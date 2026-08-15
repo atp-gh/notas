@@ -1,0 +1,13 @@
+[package]
+name = "notas-core"
+version.workspace = true
+edition.workspace = true
+description = "Core data layer for Notas: schema, repository, search (no GTK)"
+
+[dependencies]
+anyhow = "1"
+sqlx.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

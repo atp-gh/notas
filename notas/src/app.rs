@@ -1,0 +1,1451 @@
+//! Main application component: three-pane layout (sidebar | note list |
+//! editor), wires the DB worker to the widgets, and owns all app state.
+//!
+//! The widget tree is built imperatively in `init` and stored inside the
+//! model so that message handlers can touch widgets directly.
+
+use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use gtk::prelude::*;
+use libadwaita::prelude::*;
+use relm4::prelude::*;
+use relm4::{ComponentParts, ComponentSender, Controller, SimpleComponent};
+use sqlx::SqlitePool;
+
+use notas_core::models::{Note, Notebook, SearchHit, TagCount};
+
+use crate::db_worker::{DbEvent, DbMsg, DbWorker};
+use crate::editor::{build_editor, Editor};
+use crate::tr;
+
+type AppSender = relm4::Sender<AppMsg>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewId {
+    All,
+    Unfiled,
+    Trash,
+}
+
+#[derive(Debug, Clone)]
+pub enum AppMsg {
+    Db(DbEvent),
+    SelectView(ViewId),
+    SelectNotebook(i64),
+    SelectTag(Option<i64>),
+    SelectNote(i64),
+    SearchChanged(String),
+    NewNote,
+    NewNotebook(String),
+    RenameNotebook { id: i64, name: String },
+    DeleteNotebook(i64),
+    RenameTag { id: i64, name: String },
+    DeleteTag(i64),
+    TrashNote,
+    RestoreNote,
+    DeleteForever,
+    DeleteForeverConfirmed,
+    SaveNote,
+    TitleChanged,
+    ContentChanged,
+    TogglePreview,
+    FocusSearch,
+    FocusFind,
+    FindChanged(String),
+    FindNext,
+    FindPrev,
+    ReplaceAll(String),
+    TagsEdited(Vec<String>),
+    ExportMarkdown,
+    ExportTo(PathBuf),
+    BackupNow,
+    BackupTo(PathBuf),
+    DialogSave,
+    DialogDiscard,
+    DialogCancel,
+    CloseRequested,
+}
+
+#[derive(Debug, Clone)]
+enum ViewMode {
+    All,
+    Unfiled,
+    Trash,
+    Notebook(i64),
+    Tag(i64),
+    Search(String),
+}
+
+pub struct App {
+    widgets: Widgets,
+    worker: Controller<DbWorker>,
+    /// Sender used by widget closures (tag chips etc.) created after `init`.
+    ui_sender: AppSender,
+    mode: ViewMode,
+    notebooks: Vec<Notebook>,
+    notes: Vec<Note>,
+    trashed: Vec<Note>,
+    tags: Vec<TagCount>,
+    note_tags: Vec<notas_core::models::Tag>,
+    current_note: Option<i64>,
+    saved_title: String,
+    saved_content: String,
+    dirty: bool,
+    preview: bool,
+    active_tag: Option<i64>,
+    selected_trashed: Option<i64>,
+    pending_open: Option<i64>,
+    pending_new_note: bool,
+    pending_close: bool,
+    row_ids: Rc<RefCell<Vec<i64>>>,
+    tag_ids: Rc<RefCell<Vec<i64>>>,
+    loading: Rc<Cell<bool>>,
+    allow_close: Rc<Cell<bool>>,
+    suppress_selection: Rc<Cell<bool>>,
+    suppress_tag_toggle: Rc<Cell<bool>>,
+    pending_nb: Rc<Cell<i64>>,
+    pending_tag: Rc<Cell<i64>>,
+}
+
+pub struct Widgets {
+    window: adw::ApplicationWindow,
+    dirty_label: gtk::Label,
+    status_label: gtk::Label,
+    save_btn: gtk::Button,
+    // sidebar
+    search_entry: gtk::SearchEntry,
+    view_list: gtk::ListBox,
+    notebook_store: gtk::TreeStore,
+    tag_flow: gtk::FlowBox,
+    tag_menu: gtk::Popover,
+    // middle
+    view_title: gtk::Label,
+    notes_list: gtk::ListBox,
+    notes_empty: gtk::Label,
+    restore_btn: gtk::Button,
+    delete_btn: gtk::Button,
+    // editor
+    title_entry: gtk::Entry,
+    editor: Editor,
+    preview_btn: gtk::ToggleButton,
+    tag_editor_flow: gtk::FlowBox,
+    tag_entry: gtk::Entry,
+}
+
+impl SimpleComponent for App {
+    type Init = SqlitePool;
+    type Input = AppMsg;
+    type Output = ();
+    type Widgets = ();
+    type Root = adw::ApplicationWindow;
+
+    fn init_root() -> Self::Root {
+        adw::ApplicationWindow::builder()
+            .title("Notas")
+            .default_width(1180)
+            .default_height(760)
+            .build()
+    }
+
+    fn init(
+        pool: Self::Init,
+        window: Self::Root,
+        sender: ComponentSender<Self>,
+    ) -> ComponentParts<Self> {
+        let app_sender = sender.input_sender().clone();
+
+        let loading = Rc::new(Cell::new(false));
+        let allow_close = Rc::new(Cell::new(false));
+        let suppress_selection = Rc::new(Cell::new(false));
+        let suppress_tag_toggle = Rc::new(Cell::new(false));
+        let row_ids = Rc::new(RefCell::new(Vec::new()));
+        let tag_ids = Rc::new(RefCell::new(Vec::new()));
+        let pending_nb = Rc::new(Cell::new(0));
+        let pending_tag = Rc::new(Cell::new(0));
+
+        let worker: Controller<DbWorker> = relm4::ComponentBuilder::<DbWorker>::default()
+            .launch(pool)
+            .forward(&app_sender, |e| AppMsg::Db(e));
+
+        let emit = {
+            let s = app_sender.clone();
+            move |msg| {
+                let _ = s.send(msg);
+            }
+        };
+
+        // ------------------------------------------------------------- sidebar
+        let search_entry = gtk::SearchEntry::new();
+        search_entry.set_placeholder_text(Some(tr!("Search notes…")));
+        search_entry.set_margin_bottom(6);
+        {
+            let emit = emit.clone();
+            search_entry.connect_search_changed(move |entry| {
+                emit(AppMsg::SearchChanged(entry.text().to_string()));
+            });
+        }
+
+        let view_list = gtk::ListBox::new();
+        view_list.set_selection_mode(gtk::SelectionMode::Single);
+        view_list.set_activate_on_single_click(true);
+        for (label, id) in [
+            (tr!("All notes"), ViewId::All),
+            (tr!("Unfiled"), ViewId::Unfiled),
+            (tr!("Trash"), ViewId::Trash),
+        ] {
+            let row = gtk::ListBoxRow::new();
+            row.set_widget_name(match id {
+                ViewId::All => "all",
+                ViewId::Unfiled => "unfiled",
+                ViewId::Trash => "trash",
+            });
+            row.set_child(Some(&gtk::Label::new(Some(label))));
+            row.set_activatable(true);
+            view_list.append(&row);
+        }
+        {
+            let emit = emit.clone();
+            view_list.connect_row_selected(move |_list, row| {
+                if let Some(row) = row {
+                    let view = match row.widget_name().as_str() {
+                        "trash" => ViewId::Trash,
+                        "unfiled" => ViewId::Unfiled,
+                        _ => ViewId::All,
+                    };
+                    emit(AppMsg::SelectView(view));
+                }
+            });
+        }
+
+        let notebooks_label = gtk::Label::new(Some(tr!("Notebooks")));
+        notebooks_label.set_halign(gtk::Align::Start);
+        notebooks_label.set_margin_top(10);
+        notebooks_label.set_margin_bottom(4);
+        notebooks_label.add_css_class("heading");
+
+        let new_nb_btn = gtk::Button::from_icon_name("folder-new-symbolic");
+        new_nb_btn.set_tooltip_text(Some(tr!("New notebook")));
+        new_nb_btn.set_halign(gtk::Align::End);
+        new_nb_btn.set_valign(gtk::Align::Center);
+        {
+            let win = window.clone();
+            let sender = app_sender.clone();
+            new_nb_btn.connect_clicked(move |_| {
+                prompt_input(
+                    &win,
+                    &sender,
+                    tr!("New notebook"),
+                    tr!("Notebook name…"),
+                    "",
+                    AppMsg::NewNotebook,
+                );
+            });
+        }
+
+        let notebooks_header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        notebooks_header.append(&notebooks_label);
+        notebooks_header.append(&new_nb_btn);
+
+        let notebook_store = gtk::TreeStore::new(&[glib::Type::I64, glib::Type::STRING]);
+        let notebook_tree = gtk::TreeView::with_model(&notebook_store);
+        notebook_tree.set_headers_visible(false);
+        notebook_tree.set_activate_on_single_click(true);
+        notebook_tree.set_hexpand(true);
+        {
+            let column = gtk::TreeViewColumn::new();
+            let renderer = gtk::CellRendererText::new();
+            column.pack_start(&renderer, true);
+            column.add_attribute(&renderer, "text", 1);
+            notebook_tree.append_column(&column);
+        }
+        {
+            let emit = emit.clone();
+            notebook_tree.connect_row_activated(move |tree, path, _col| {
+                if let Some(model) = tree.model() {
+                    if let Some(iter) = model.iter(&path) {
+                        let id: i64 = model.get_value(&iter, 0).get().unwrap_or(0);
+                        emit(AppMsg::SelectNotebook(id));
+                    }
+                }
+            });
+        }
+
+        // Right-click context menu on the notebook tree: rename / delete.
+        let tree_menu = gtk::Popover::new();
+        let rename_nb_btn = gtk::Button::with_label(tr!("Rename…"));
+        rename_nb_btn.set_halign(gtk::Align::Fill);
+        let delete_nb_btn = gtk::Button::with_label(tr!("Delete notebook"));
+        delete_nb_btn.set_halign(gtk::Align::Fill);
+        delete_nb_btn.add_css_class("destructive-action");
+        {
+            let win = window.clone();
+            let pending = pending_nb.clone();
+            let sender = app_sender.clone();
+            rename_nb_btn.connect_clicked(move |_| {
+                let id = pending.get();
+                prompt_input(
+                    &win,
+                    &sender,
+                    tr!("Rename notebook"),
+                    tr!("Notebook name…"),
+                    "",
+                    move |name| AppMsg::RenameNotebook { id, name },
+                );
+            });
+        }
+        {
+            let emit = emit.clone();
+            let pending = pending_nb.clone();
+            delete_nb_btn.connect_clicked(move |_| {
+                emit(AppMsg::DeleteNotebook(pending.get()));
+            });
+        }
+        let tree_menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        tree_menu_box.set_margin_all(8);
+        tree_menu_box.append(&rename_nb_btn);
+        tree_menu_box.append(&delete_nb_btn);
+        tree_menu.set_child(Some(&tree_menu_box));
+        {
+            let tree = notebook_tree.clone();
+            let menu = tree_menu.clone();
+            let pending = pending_nb.clone();
+            let gesture = gtk::GestureClick::new();
+            gesture.set_button(3);
+            gesture.connect_pressed(move |_g, _n, x, y| {
+                if let Some((path, _col, _x, _y)) = tree.path_at_pos(x as i32, y as i32) {
+                    if let Some(path) = path {
+                        if let Some(model) = tree.model() {
+                            if let Some(iter) = model.iter(&path) {
+                                let id: i64 = model.get_value(&iter, 0).get().unwrap_or(0);
+                                pending.set(id);
+                                menu.set_parent(&tree);
+                                menu.present();
+                            }
+                        }
+                    }
+                }
+            });
+            notebook_tree.add_controller(gesture);
+        }
+
+        let tree_scroll = gtk::ScrolledWindow::new();
+        tree_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        tree_scroll.set_child(Some(&notebook_tree));
+        tree_scroll.set_vexpand(true);
+
+        let tags_label = gtk::Label::new(Some(tr!("Tags")));
+        tags_label.set_halign(gtk::Align::Start);
+        tags_label.set_margin_top(10);
+        tags_label.set_margin_bottom(4);
+        tags_label.add_css_class("heading");
+
+        let tag_flow = gtk::FlowBox::new();
+        tag_flow.set_selection_mode(gtk::SelectionMode::None);
+        tag_flow.set_min_children_per_line(1);
+
+        let tag_menu = gtk::Popover::new();
+        let rename_tag_btn = gtk::Button::with_label(tr!("Rename…"));
+        rename_tag_btn.set_halign(gtk::Align::Fill);
+        let delete_tag_btn = gtk::Button::with_label(tr!("Delete tag"));
+        delete_tag_btn.set_halign(gtk::Align::Fill);
+        delete_tag_btn.add_css_class("destructive-action");
+        {
+            let win = window.clone();
+            let pending = pending_tag.clone();
+            let sender = app_sender.clone();
+            rename_tag_btn.connect_clicked(move |_| {
+                let id = pending.get();
+                prompt_input(
+                    &win,
+                    &sender,
+                    tr!("Rename tag"),
+                    tr!("Tag name…"),
+                    "",
+                    move |name| AppMsg::RenameTag { id, name },
+                );
+            });
+        }
+        {
+            let emit = emit.clone();
+            let pending = pending_tag.clone();
+            delete_tag_btn.connect_clicked(move |_| {
+                emit(AppMsg::DeleteTag(pending.get()));
+            });
+        }
+        let tag_menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        tag_menu_box.set_margin_all(8);
+        tag_menu_box.append(&rename_tag_btn);
+        tag_menu_box.append(&delete_tag_btn);
+        tag_menu.set_child(Some(&tag_menu_box));
+
+        let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        sidebar.set_width_request(230);
+        sidebar.set_margin_all(8);
+        sidebar.append(&search_entry);
+        sidebar.append(&view_list);
+        sidebar.append(&notebooks_header);
+        sidebar.append(&tree_scroll);
+        sidebar.append(&tags_label);
+        sidebar.append(&tag_flow);
+
+        // ------------------------------------------------------------- middle
+        let view_title = gtk::Label::new(Some(tr!("All notes")));
+        view_title.set_halign(gtk::Align::Start);
+        view_title.add_css_class("title-2");
+
+        let restore_btn = gtk::Button::with_label(tr!("Restore"));
+        restore_btn.set_visible(false);
+        let delete_btn = gtk::Button::with_label(tr!("Delete forever"));
+        delete_btn.set_visible(false);
+        delete_btn.add_css_class("destructive-action");
+        {
+            let s = emit.clone();
+            restore_btn.connect_clicked(move |_| s(AppMsg::RestoreNote));
+            let s = emit.clone();
+            delete_btn.connect_clicked(move |_| s(AppMsg::DeleteForever));
+        }
+
+        let middle_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        middle_header.append(&view_title);
+        middle_header.set_hexpand(true);
+        middle_header.append(&restore_btn);
+        middle_header.append(&delete_btn);
+
+        let notes_list = gtk::ListBox::new();
+        notes_list.set_selection_mode(gtk::SelectionMode::Single);
+        notes_list.set_activate_on_single_click(true);
+        {
+            let emit = emit.clone();
+            let suppress = suppress_selection.clone();
+            let row_ids = row_ids.clone();
+            notes_list.connect_row_selected(move |_list, row| {
+                if suppress.get() {
+                    return;
+                }
+                if let Some(row) = row {
+                    let idx = row.index() as usize;
+                    if let Some(&id) = row_ids.borrow().get(idx) {
+                        emit(AppMsg::SelectNote(id));
+                    }
+                }
+            });
+        }
+
+        let notes_empty = gtk::Label::new(Some(tr!("No notes yet")));
+        notes_empty.add_css_class("dim-label");
+        notes_empty.set_margin_top(24);
+
+        let notes_scroll = gtk::ScrolledWindow::new();
+        notes_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+        notes_scroll.set_child(Some(&notes_list));
+        notes_scroll.set_vexpand(true);
+
+        let middle = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        middle.set_width_request(300);
+        middle.set_margin_all(8);
+        middle.append(&middle_header);
+        middle.append(&notes_scroll);
+        middle.append(&notes_empty);
+
+        // ------------------------------------------------------------- editor
+        let editor = build_editor(emit.clone(), loading.clone());
+
+        let title_entry = gtk::Entry::new();
+        title_entry.set_placeholder_text(Some(tr!("Title")));
+        title_entry.add_css_class("title-1");
+        {
+            let emit = emit.clone();
+            title_entry.connect_changed(move |_| emit(AppMsg::TitleChanged));
+        }
+
+        let editor_stack_area = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        editor_stack_area.append(&editor.search_bar);
+        editor_stack_area.append(&editor.stack);
+
+        // Note tags: an entry to add + a flow of removable chips.
+        let tag_editor_flow = gtk::FlowBox::new();
+        tag_editor_flow.set_selection_mode(gtk::SelectionMode::None);
+        let tag_entry = gtk::Entry::new();
+        tag_entry.set_placeholder_text(Some(tr!("Add tag…")));
+        tag_entry.set_width_chars(18);
+        {
+            let emit = emit.clone();
+            let flow = tag_editor_flow.clone();
+            tag_entry.connect_activate(move |entry| {
+                let mut names: Vec<String> = Vec::new();
+                let mut child = flow.first_child();
+                while let Some(w) = child {
+                    let next = w.next_sibling();
+                    if let Some(btn) = w
+                        .downcast::<gtk::FlowBoxChild>()
+                        .ok()
+                        .and_then(|c| c.child())
+                        .and_then(|w| w.downcast::<gtk::Button>().ok())
+                    {
+                        if let Some(label) =
+                            btn.child().and_then(|w| w.downcast::<gtk::Label>().ok())
+                        {
+                            let text = label.text().to_string();
+                            if let Some(stripped) = text.strip_prefix("× ") {
+                                names.push(stripped.to_string());
+                            }
+                        }
+                    }
+                    child = next;
+                }
+                let text = entry.text().trim().to_string();
+                if !text.is_empty() && !names.contains(&text) {
+                    names.push(text);
+                }
+                emit(AppMsg::TagsEdited(names));
+                entry.set_text("");
+            });
+        }
+        let tag_editor_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        tag_editor_row.append(&tag_entry);
+        tag_editor_row.append(&tag_editor_flow);
+        tag_editor_row.set_margin_top(4);
+        tag_editor_row.set_margin_bottom(4);
+
+        let status_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        status_bar.set_margin_top(4);
+        let dirty_label = gtk::Label::new(Some(tr!("All changes saved")));
+        dirty_label.set_halign(gtk::Align::Start);
+        let status_label = gtk::Label::new(None);
+        status_label.set_halign(gtk::Align::Start);
+        status_label.set_hexpand(true);
+        status_label.set_ellipsize(pango::EllipsizeMode::End);
+        let save_btn = gtk::Button::from_icon_name("document-save-symbolic");
+        save_btn.set_tooltip_text(Some(tr!("Save (Ctrl+S)")));
+        save_btn.set_sensitive(false);
+        {
+            let emit = emit.clone();
+            save_btn.connect_clicked(move |_| emit(AppMsg::SaveNote));
+        }
+        status_bar.append(&dirty_label);
+        status_bar.append(&status_label);
+        status_bar.append(&save_btn);
+
+        let editor_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        editor_pane.set_margin_all(8);
+        editor_pane.append(&title_entry);
+        editor_pane.append(&tag_editor_row);
+        editor_pane.append(&editor_stack_area);
+        editor_pane.append(&status_bar);
+        editor_stack_area.set_vexpand(true);
+
+        // ------------------------------------------------------------- header
+        let new_note_btn = gtk::Button::from_icon_name("document-new-symbolic");
+        new_note_btn.set_tooltip_text(Some(tr!("New note (Ctrl+N)")));
+        {
+            let emit = emit.clone();
+            new_note_btn.connect_clicked(move |_| emit(AppMsg::NewNote));
+        }
+
+        let trash_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+        trash_btn.set_tooltip_text(Some(tr!("Move note to trash")));
+        {
+            let emit = emit.clone();
+            trash_btn.connect_clicked(move |_| emit(AppMsg::TrashNote));
+        }
+
+        let preview_btn = gtk::ToggleButton::new();
+        preview_btn.set_label(tr!("Preview"));
+        preview_btn.set_tooltip_text(Some(tr!("Toggle Markdown preview (Ctrl+E)")));
+        {
+            let emit = emit.clone();
+            preview_btn.connect_toggled(move |_| emit(AppMsg::TogglePreview));
+        }
+
+        let export_btn = gtk::Button::with_label(tr!("Export Markdown…"));
+        let backup_btn = gtk::Button::with_label(tr!("Backup database…"));
+        let quit_btn = gtk::Button::with_label(tr!("Quit"));
+        {
+            let s = emit.clone();
+            export_btn.connect_clicked(move |_| s(AppMsg::ExportMarkdown));
+            let s = emit.clone();
+            backup_btn.connect_clicked(move |_| s(AppMsg::BackupNow));
+            let s = emit.clone();
+            quit_btn.connect_clicked(move |_| s(AppMsg::CloseRequested));
+        }
+        let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        menu_box.set_margin_all(8);
+        menu_box.append(&export_btn);
+        menu_box.append(&backup_btn);
+        menu_box.append(&quit_btn);
+        let menu_popover = gtk::Popover::new();
+        menu_popover.set_child(Some(&menu_box));
+        let menu_btn = gtk::MenuButton::new();
+        menu_btn.set_icon_name("open-menu-symbolic");
+        menu_btn.set_popover(Some(&menu_popover));
+        menu_btn.set_tooltip_text(Some(tr!("Menu")));
+
+        let header = gtk::HeaderBar::new();
+        header.pack_start(&new_note_btn);
+        header.pack_end(&menu_btn);
+        header.pack_end(&preview_btn);
+        header.pack_end(&trash_btn);
+
+        // ------------------------------------------------------------- layout
+        let middle_pane = gtk::Paned::new(gtk::Orientation::Horizontal);
+        middle_pane.set_start_child(Some(&sidebar));
+        middle_pane.set_end_child(Some(&middle));
+        middle_pane.set_position(230);
+
+        let main_pane = gtk::Paned::new(gtk::Orientation::Horizontal);
+        main_pane.set_start_child(Some(&middle_pane));
+        main_pane.set_end_child(Some(&editor_pane));
+        main_pane.set_position(560);
+
+        // AdwApplicationWindow manages its own titlebar; the header bar must
+        // live inside the content instead.
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.append(&header);
+        content.append(&main_pane);
+        window.set_content(Some(&content));
+
+        // ------------------------------------------------------- shortcuts
+        let controller = gtk::EventControllerKey::new();
+        {
+            use gtk::gdk::Key;
+            let emit = emit.clone();
+            let win = window.clone();
+            controller.connect_key_pressed(move |_c, keyval, _code, state| {
+                let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+                let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+                if ctrl && !shift && keyval == Key::S {
+                    emit(AppMsg::SaveNote);
+                    return glib::Propagation::Stop;
+                }
+                if ctrl && !shift && keyval == Key::N {
+                    emit(AppMsg::NewNote);
+                    return glib::Propagation::Stop;
+                }
+                if ctrl && !shift && keyval == Key::F {
+                    emit(AppMsg::FocusFind);
+                    return glib::Propagation::Stop;
+                }
+                if ctrl && shift && keyval == Key::F {
+                    emit(AppMsg::FocusSearch);
+                    return glib::Propagation::Stop;
+                }
+                if ctrl && !shift && keyval == Key::E {
+                    emit(AppMsg::TogglePreview);
+                    return glib::Propagation::Stop;
+                }
+                if !ctrl && keyval == Key::F3 {
+                    emit(AppMsg::FindNext);
+                    return glib::Propagation::Stop;
+                }
+                if ctrl && !shift && keyval == Key::Q {
+                    win.close();
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            });
+        }
+        window.add_controller(controller);
+
+        {
+            let emit = app_sender.clone();
+            let allow_close = allow_close.clone();
+            window.connect_close_request(move |_w| {
+                if allow_close.get() {
+                    glib::Propagation::Proceed
+                } else {
+                    let _ = emit.send(AppMsg::CloseRequested);
+                    glib::Propagation::Stop
+                }
+            });
+        }
+
+        // ------------------------------------------------------------ model
+        let widgets = Widgets {
+            window,
+            dirty_label,
+            status_label,
+            save_btn,
+            search_entry,
+            view_list,
+            notebook_store,
+            tag_flow,
+            tag_menu,
+            view_title,
+            notes_list,
+            notes_empty,
+            restore_btn,
+            delete_btn,
+            title_entry,
+            editor,
+            preview_btn,
+            tag_editor_flow,
+            tag_entry,
+        };
+
+        let model = App {
+            widgets,
+            worker,
+            ui_sender: app_sender,
+            mode: ViewMode::All,
+            notebooks: Vec::new(),
+            notes: Vec::new(),
+            trashed: Vec::new(),
+            tags: Vec::new(),
+            note_tags: Vec::new(),
+            current_note: None,
+            saved_title: String::new(),
+            saved_content: String::new(),
+            dirty: false,
+            preview: false,
+            active_tag: None,
+            selected_trashed: None,
+            pending_open: None,
+            pending_new_note: false,
+            pending_close: false,
+            row_ids,
+            tag_ids,
+            loading,
+            allow_close,
+            suppress_selection,
+            suppress_tag_toggle,
+            pending_nb,
+            pending_tag,
+        };
+
+        // Initial data load.
+        model.worker.emit(DbMsg::LoadNotebooks);
+        model.worker.emit(DbMsg::LoadTags);
+        model.worker.emit(DbMsg::LoadAll);
+
+        ComponentParts {
+            model,
+            widgets: (),
+        }
+    }
+
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
+        let app_sender = sender.input_sender().clone();
+        self.handle(msg, &app_sender);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Message handling
+// ---------------------------------------------------------------------------
+
+impl App {
+    fn handle(&mut self, msg: AppMsg, app_sender: &AppSender) {
+        match msg {
+            AppMsg::Db(event) => self.handle_db_event(event),
+            AppMsg::SelectView(view) => {
+                self.mode = match view {
+                    ViewId::All => ViewMode::All,
+                    ViewId::Unfiled => ViewMode::Unfiled,
+                    ViewId::Trash => ViewMode::Trash,
+                };
+                self.refresh_current_list();
+                self.update_view_title();
+                self.update_trash_buttons();
+            }
+            AppMsg::SelectNotebook(id) => {
+                self.mode = ViewMode::Notebook(id);
+                self.worker.emit(DbMsg::LoadNotes(id));
+                self.update_view_title();
+                self.update_trash_buttons();
+            }
+            AppMsg::SelectTag(tag) => {
+                self.active_tag = tag;
+                self.mode = match tag {
+                    Some(id) => ViewMode::Tag(id),
+                    None => ViewMode::All,
+                };
+                self.refresh_current_list();
+                self.update_view_title();
+                self.update_trash_buttons();
+                self.rebuild_tag_flow();
+            }
+            AppMsg::SelectNote(id) => {
+                if matches!(self.mode, ViewMode::Trash) {
+                    self.selected_trashed = Some(id);
+                    self.update_trash_buttons();
+                    return;
+                }
+                if self.current_note == Some(id) {
+                    return;
+                }
+                if self.dirty {
+                    self.pending_open = Some(id);
+                    unsaved_dialog(&self.widgets.window, app_sender);
+                } else {
+                    self.worker.emit(DbMsg::LoadNote(id));
+                }
+            }
+            AppMsg::SearchChanged(query) => {
+                let query = query.trim().to_string();
+                if query.is_empty() {
+                    self.mode = match self.active_tag {
+                        Some(id) => ViewMode::Tag(id),
+                        None => ViewMode::All,
+                    };
+                    self.refresh_current_list();
+                } else {
+                    self.mode = ViewMode::Search(query.clone());
+                    self.worker.emit(DbMsg::Search(query));
+                }
+                self.update_view_title();
+            }
+            AppMsg::NewNote => {
+                if self.dirty && self.current_note.is_some() {
+                    self.pending_new_note = true;
+                    unsaved_dialog(&self.widgets.window, app_sender);
+                } else {
+                    self.create_note_now();
+                }
+            }
+            AppMsg::NewNotebook(name) => {
+                let name = name.trim().to_string();
+                if !name.is_empty() {
+                    self.worker
+                        .emit(DbMsg::CreateNotebook { parent: None, name });
+                }
+            }
+            AppMsg::RenameNotebook { id, name } => {
+                let name = name.trim().to_string();
+                if !name.is_empty() {
+                    self.worker.emit(DbMsg::RenameNotebook { id, name });
+                }
+            }
+            AppMsg::DeleteNotebook(id) => {
+                self.worker.emit(DbMsg::DeleteNotebook(id));
+            }
+            AppMsg::RenameTag { id, name } => {
+                let name = name.trim().to_string();
+                if !name.is_empty() {
+                    self.worker.emit(DbMsg::RenameTag { id, name });
+                }
+            }
+            AppMsg::DeleteTag(id) => {
+                if self.active_tag == Some(id) {
+                    self.active_tag = None;
+                    self.mode = ViewMode::All;
+                }
+                self.worker.emit(DbMsg::DeleteTag(id));
+            }
+            AppMsg::TrashNote => {
+                if let Some(id) = self.current_note {
+                    self.worker.emit(DbMsg::TrashNote(id));
+                }
+            }
+            AppMsg::RestoreNote => {
+                if let Some(id) = self.selected_trashed {
+                    self.worker.emit(DbMsg::RestoreNote(id));
+                }
+            }
+            AppMsg::DeleteForever => {
+                if self.selected_trashed.is_some() {
+                    confirm_dialog(
+                        &self.widgets.window,
+                        app_sender,
+                        tr!("Delete permanently"),
+                        tr!("This note will be deleted forever. This cannot be undone."),
+                        AppMsg::DeleteForeverConfirmed,
+                    );
+                }
+            }
+            AppMsg::DeleteForeverConfirmed => {
+                if let Some(id) = self.selected_trashed {
+                    self.worker.emit(DbMsg::DeleteForever(id));
+                }
+            }
+            AppMsg::SaveNote => self.save_note(),
+            AppMsg::TitleChanged | AppMsg::ContentChanged => self.set_dirty(true),
+            AppMsg::TogglePreview => {
+                self.preview = !self.preview;
+                self.widgets.preview_btn.set_active(self.preview);
+                if self.preview {
+                    self.widgets.editor.render_preview();
+                }
+                let name = if self.preview { "preview" } else { "source" };
+                self.widgets.editor.stack.set_visible_child_name(name);
+            }
+            AppMsg::FocusSearch => {
+                self.widgets.search_entry.grab_focus();
+            }
+            AppMsg::FocusFind => {
+                self.widgets.editor.search_bar.set_search_mode(true);
+                self.widgets.editor.search_entry.grab_focus();
+            }
+            AppMsg::FindChanged(text) => {
+                if text.is_empty() {
+                    self.widgets.editor.set_search_text(None);
+                } else {
+                    self.widgets.editor.set_search_text(Some(&text));
+                }
+            }
+            AppMsg::FindNext => self.widgets.editor.find_next(),
+            AppMsg::FindPrev => self.widgets.editor.find_prev(),
+            AppMsg::ReplaceAll(text) => {
+                if text.is_empty() {
+                    return;
+                }
+                let n = self.widgets.editor.replace_all(&text);
+                self.widgets
+                    .status_label
+                    .set_text(&format!("Replaced {n} matches"));
+            }
+            AppMsg::TagsEdited(names) => {
+                if let Some(id) = self.current_note {
+                    self.worker.emit(DbMsg::SetTags { note_id: id, names });
+                }
+            }
+            AppMsg::ExportMarkdown => {
+                let dialog = gtk::FileDialog::new();
+                dialog.set_title(tr!("Export notes as Markdown"));
+                let s = app_sender.clone();
+                dialog.select_folder(
+                    Some(&self.widgets.window),
+                    None::<&gtk::gio::Cancellable>,
+                    move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                let _ = s.send(AppMsg::ExportTo(path));
+                            }
+                        }
+                    },
+                );
+            }
+            AppMsg::ExportTo(path) => {
+                self.worker.emit(DbMsg::ExportMarkdown(path));
+            }
+            AppMsg::BackupNow => {
+                let dialog = gtk::FileDialog::new();
+                dialog.set_title(tr!("Backup database"));
+                dialog.set_initial_name(Some("notas-backup.db"));
+                let s = app_sender.clone();
+                dialog.save(
+                    Some(&self.widgets.window),
+                    None::<&gtk::gio::Cancellable>,
+                    move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                let _ = s.send(AppMsg::BackupTo(path));
+                            }
+                        }
+                    },
+                );
+            }
+            AppMsg::BackupTo(path) => {
+                self.worker.emit(DbMsg::Backup(path));
+            }
+            AppMsg::DialogSave => self.save_note(),
+            AppMsg::DialogDiscard => {
+                self.dirty = false;
+                self.set_dirty(false);
+                if self.pending_close {
+                    self.finish_close();
+                } else if self.pending_new_note {
+                    self.pending_new_note = false;
+                    self.create_note_now();
+                } else if let Some(id) = self.pending_open.take() {
+                    self.worker.emit(DbMsg::LoadNote(id));
+                }
+            }
+            AppMsg::DialogCancel => {
+                self.pending_open = None;
+                self.pending_new_note = false;
+                self.pending_close = false;
+            }
+            AppMsg::CloseRequested => {
+                if self.dirty {
+                    self.pending_close = true;
+                    unsaved_dialog(&self.widgets.window, app_sender);
+                } else {
+                    self.finish_close();
+                }
+            }
+        }
+    }
+
+    fn handle_db_event(&mut self, event: DbEvent) {
+        match event {
+            DbEvent::Notebooks(list) => {
+                self.notebooks = list;
+                self.rebuild_notebook_tree();
+            }
+            DbEvent::Tags(list) => {
+                self.tags = list;
+                self.rebuild_tag_flow();
+            }
+            DbEvent::Notes(list) => {
+                self.notes = list;
+                self.rebuild_notes_list();
+            }
+            DbEvent::Trashed(list) => {
+                self.trashed = list;
+                self.rebuild_notes_list();
+            }
+            DbEvent::NoteLoaded(note) => {
+                self.current_note = Some(note.id);
+                self.saved_title = note.title.clone();
+                self.saved_content = note.content.clone();
+                self.dirty = false;
+                self.widgets.title_entry.set_text(&note.title);
+                self.loading.set(true);
+                self.widgets.editor.source_buffer.set_text(&note.content);
+                self.loading.set(false);
+                if self.preview {
+                    self.widgets.editor.render_preview();
+                }
+                self.widgets.save_btn.set_sensitive(true);
+                self.widgets.status_label.set_text("");
+                self.set_dirty(false);
+                self.worker.emit(DbMsg::LoadNoteTags(note.id));
+                self.select_note_row(note.id);
+            }
+            DbEvent::NoteCreated(note) => {
+                self.worker.emit(DbMsg::LoadNote(note.id));
+                self.refresh_current_list();
+            }
+            DbEvent::NoteSaved { id } => {
+                if self.pending_close {
+                    self.finish_close();
+                    return;
+                }
+                if self.pending_new_note {
+                    self.pending_new_note = false;
+                    self.create_note_now();
+                    return;
+                }
+                if let Some(pending) = self.pending_open.take() {
+                    self.worker.emit(DbMsg::LoadNote(pending));
+                    return;
+                }
+                if self.current_note == Some(id) {
+                    self.dirty = false;
+                    self.set_dirty(false);
+                    self.widgets.status_label.set_text(tr!("Saved"));
+                    self.worker.emit(DbMsg::LoadNoteTags(id));
+                    self.worker.emit(DbMsg::LoadTags);
+                    self.refresh_current_list();
+                }
+            }
+            DbEvent::NoteTrashed { id } => {
+                if self.current_note == Some(id) {
+                    self.current_note = None;
+                    self.widgets.title_entry.set_text("");
+                    self.loading.set(true);
+                    self.widgets.editor.source_buffer.set_text("");
+                    self.loading.set(false);
+                    self.widgets.save_btn.set_sensitive(false);
+                    self.set_dirty(false);
+                }
+                self.refresh_current_list();
+            }
+            DbEvent::NoteRestored { .. } | DbEvent::NoteDeletedForever { .. } => {
+                self.refresh_current_list();
+            }
+            DbEvent::DataChanged => {
+                self.worker.emit(DbMsg::LoadNotebooks);
+                self.worker.emit(DbMsg::LoadTags);
+                self.refresh_current_list();
+            }
+            DbEvent::NoteTags(tags) => {
+                self.note_tags = tags;
+                self.rebuild_tag_editor();
+            }
+            DbEvent::SearchResults(hits) => {
+                self.render_search_results(hits);
+            }
+            DbEvent::ExportDone(result) => match result {
+                Ok(n) => {
+                    self.widgets
+                        .status_label
+                        .set_text(&format!("Exported {n} notes"));
+                }
+                Err(e) => error_dialog(&self.widgets.window, &e),
+            },
+            DbEvent::BackupDone(result) => match result {
+                Ok(()) => {
+                    self.widgets.status_label.set_text(tr!("Backup created"));
+                }
+                Err(e) => error_dialog(&self.widgets.window, &e),
+            },
+            DbEvent::Error(e) => error_dialog(&self.widgets.window, &e),
+        }
+    }
+
+    // ------------------------------------------------------------ actions
+
+    fn create_note_now(&mut self) {
+        let notebook_id = match &self.mode {
+            ViewMode::Notebook(id) => Some(*id),
+            _ => None,
+        };
+        self.worker.emit(DbMsg::CreateNote(notebook_id));
+    }
+
+    fn save_note(&mut self) {
+        if let Some(id) = self.current_note {
+            let title = self.widgets.title_entry.text().to_string();
+            let content = self
+                .widgets
+                .editor
+                .source_buffer
+                .text(
+                    &self.widgets.editor.source_buffer.start_iter(),
+                    &self.widgets.editor.source_buffer.end_iter(),
+                    true,
+                )
+                .to_string();
+            if title != self.saved_title || content != self.saved_content {
+                self.worker
+                    .emit(DbMsg::UpdateNote { id, title, content });
+            } else {
+                self.resolve_saved();
+            }
+        }
+    }
+
+    fn resolve_saved(&mut self) {
+        if self.pending_close {
+            self.finish_close();
+        } else if self.pending_new_note {
+            self.pending_new_note = false;
+            self.create_note_now();
+        } else if let Some(id) = self.pending_open.take() {
+            self.worker.emit(DbMsg::LoadNote(id));
+        } else {
+            self.dirty = false;
+            self.set_dirty(false);
+        }
+    }
+
+    fn finish_close(&mut self) {
+        self.allow_close.set(true);
+        self.widgets.window.close();
+    }
+
+    fn set_dirty(&mut self, dirty: bool) {
+        self.dirty = dirty;
+        if dirty {
+            self.widgets.dirty_label.set_text(tr!("● Unsaved changes"));
+            self.widgets.dirty_label.add_css_class("error");
+        } else {
+            self.widgets
+                .dirty_label
+                .set_text(tr!("All changes saved"));
+            self.widgets.dirty_label.remove_css_class("error");
+        }
+    }
+
+    fn refresh_current_list(&mut self) {
+        match self.mode.clone() {
+            ViewMode::All => self.worker.emit(DbMsg::LoadAll),
+            ViewMode::Unfiled => self.worker.emit(DbMsg::LoadUnfiled),
+            ViewMode::Trash => self.worker.emit(DbMsg::LoadTrashed),
+            ViewMode::Notebook(id) => self.worker.emit(DbMsg::LoadNotes(id)),
+            ViewMode::Tag(id) => self.worker.emit(DbMsg::LoadByTag(id)),
+            ViewMode::Search(q) => self.worker.emit(DbMsg::Search(q)),
+        }
+    }
+
+    fn update_view_title(&self) {
+        let title = match &self.mode {
+            ViewMode::All => tr!("All notes").to_string(),
+            ViewMode::Unfiled => tr!("Unfiled").to_string(),
+            ViewMode::Trash => tr!("Trash").to_string(),
+            ViewMode::Notebook(id) => self
+                .notebooks
+                .iter()
+                .find(|n| n.id == *id)
+                .map(|n| n.name.clone())
+                .unwrap_or_else(|| tr!("Notebook").to_string()),
+            ViewMode::Tag(id) => self
+                .tags
+                .iter()
+                .find(|t| t.id == *id)
+                .map(|t| format!("#{}", t.name))
+                .unwrap_or_else(|| tr!("Tag").to_string()),
+            ViewMode::Search(q) => format!("{}: {q}", tr!("Search")),
+        };
+        self.widgets.view_title.set_text(&title);
+    }
+
+    fn update_trash_buttons(&self) {
+        let trash = matches!(self.mode, ViewMode::Trash);
+        self.widgets.restore_btn.set_visible(trash);
+        self.widgets.delete_btn.set_visible(trash);
+        self.widgets
+            .restore_btn
+            .set_sensitive(self.selected_trashed.is_some());
+        self.widgets
+            .delete_btn
+            .set_sensitive(self.selected_trashed.is_some());
+    }
+
+    // ------------------------------------------------------------ rebuilds
+
+    fn rebuild_notebook_tree(&self) {
+        self.widgets.notebook_store.clear();
+        let mut iters: std::collections::HashMap<i64, gtk::TreeIter> =
+            std::collections::HashMap::new();
+        for nb in &self.notebooks {
+            let parent = nb.parent_id.and_then(|p| iters.get(&p).cloned());
+            let iter = self.widgets.notebook_store.insert_with_values(
+                parent.as_ref(),
+                None,
+                &[(0, &nb.id), (1, &nb.name)],
+            );
+            iters.insert(nb.id, iter);
+        }
+    }
+
+    fn rebuild_tag_flow(&self) {
+        clear_flow_box(&self.widgets.tag_flow);
+        let mut ids = self.tag_ids.borrow_mut();
+        ids.clear();
+        for tag in &self.tags {
+            ids.push(tag.id);
+            let btn = gtk::ToggleButton::with_label(&format!("{} ({})", tag.name, tag.note_count));
+            {
+                let suppress = self.suppress_tag_toggle.clone();
+                let sender = self.ui_sender.clone();
+                let id = tag.id;
+                btn.connect_toggled(move |b| {
+                    if suppress.get() {
+                        return;
+                    }
+                    let _ = sender.send(if b.is_active() {
+                        AppMsg::SelectTag(Some(id))
+                    } else {
+                        AppMsg::SelectTag(None)
+                    });
+                });
+            }
+            self.suppress_tag_toggle.set(true);
+            btn.set_active(self.active_tag == Some(tag.id));
+            self.suppress_tag_toggle.set(false);
+
+            let chip = gtk::FlowBoxChild::new();
+            chip.set_child(Some(&btn));
+            {
+                let pending = self.pending_tag.clone();
+                let menu = self.widgets.tag_menu.clone();
+                let chip_widget = chip.clone();
+                let tag_id = tag.id;
+                let gesture = gtk::GestureClick::new();
+                gesture.set_button(3);
+                gesture.connect_pressed(move |_g, _n, _x, _y| {
+                    pending.set(tag_id);
+                    menu.set_parent(&chip_widget);
+                    menu.present();
+                });
+                chip.add_controller(gesture);
+            }
+            self.widgets.tag_flow.append(&chip);
+        }
+        drop(ids);
+    }
+
+    fn rebuild_notes_list(&self) {
+        clear_list_box(&self.widgets.notes_list);
+        let mut ids = self.row_ids.borrow_mut();
+        ids.clear();
+
+        let (list, empty) = if matches!(self.mode, ViewMode::Trash) {
+            (&self.trashed, self.trashed.is_empty())
+        } else {
+            (&self.notes, self.notes.is_empty())
+        };
+        self.widgets.notes_empty.set_visible(empty);
+        for note in list {
+            ids.push(note.id);
+            self.widgets
+                .notes_list
+                .append(&note_row(&note.title, &note.updated_at));
+        }
+        drop(ids);
+
+        if let Some(id) = self.current_note {
+            self.select_note_row(id);
+        }
+    }
+
+    fn render_search_results(&self, hits: Vec<SearchHit>) {
+        clear_list_box(&self.widgets.notes_list);
+        let mut ids = self.row_ids.borrow_mut();
+        ids.clear();
+        self.widgets.notes_empty.set_visible(hits.is_empty());
+        for hit in &hits {
+            ids.push(hit.id);
+            self.widgets
+                .notes_list
+                .append(&note_row(&hit.title, &hit.snippet));
+        }
+        drop(ids);
+    }
+
+    fn select_note_row(&self, id: i64) {
+        self.suppress_selection.set(true);
+        if let Some(idx) = self.row_ids.borrow().iter().position(|&x| x == id) {
+            if let Some(row) = self.widgets.notes_list.row_at_index(idx as i32) {
+                self.widgets.notes_list.select_row(Some(&row));
+            }
+        }
+        self.suppress_selection.set(false);
+    }
+
+    fn rebuild_tag_editor(&self) {
+        clear_flow_box(&self.widgets.tag_editor_flow);
+        let names: Vec<String> = self.note_tags.iter().map(|t| t.name.clone()).collect();
+        for tag in &self.note_tags {
+            let chip = gtk::Button::with_label(&format!("× {}", tag.name));
+            chip.add_css_class("pill");
+            let sender = self.ui_sender.clone();
+            let names = names.clone();
+            let current = self.current_note;
+            let tag_name = tag.name.clone();
+            chip.connect_clicked(move |_| {
+                if let Some(_note_id) = current {
+                    let remaining: Vec<String> = names
+                        .iter()
+                        .filter(|n| **n != tag_name)
+                        .cloned()
+                        .collect();
+                    let _ = sender.send(AppMsg::TagsEdited(remaining));
+                }
+            });
+            self.widgets.tag_editor_flow.append(&chip);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Row & dialog helpers
+// ---------------------------------------------------------------------------
+
+/// Remove every child row from a `ListBox`.
+fn clear_list_box(list: &gtk::ListBox) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+}
+
+/// Remove every child chip from a `FlowBox`.
+fn clear_flow_box(flow: &gtk::FlowBox) {
+    while let Some(child) = flow.first_child() {
+        flow.remove(&child);
+    }
+}
+
+fn note_row(title: &str, subtitle: &str) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    row.set_activatable(true);
+    let title_label = gtk::Label::new(None);
+    title_label.set_xalign(0.0);
+    title_label.set_ellipsize(pango::EllipsizeMode::End);
+    title_label.set_markup(&format!("<b>{}</b>", glib::markup_escape_text(title)));
+    let sub_label = gtk::Label::new(None);
+    sub_label.set_xalign(0.0);
+    sub_label.set_ellipsize(pango::EllipsizeMode::End);
+    sub_label.set_markup(&format!(
+        "<span size='small' foreground='#8f8f8f'>{}</span>",
+        glib::markup_escape_text(subtitle)
+    ));
+    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    vbox.set_margin_all(6);
+    vbox.append(&title_label);
+    vbox.append(&sub_label);
+    row.set_child(Some(&vbox));
+    row
+}
+
+fn unsaved_dialog(window: &adw::ApplicationWindow, sender: &AppSender) {
+    let dialog = adw::AlertDialog::new(
+        Some(tr!("Unsaved changes")),
+        Some(tr!("The current note has unsaved changes.")),
+    );
+    dialog.add_response("cancel", tr!("Cancel"));
+    dialog.add_response("discard", tr!("Discard"));
+    dialog.add_response("save", tr!("Save"));
+    dialog.set_default_response(Some("save"));
+    dialog.set_close_response("cancel");
+    dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+    let s = sender.clone();
+    dialog.connect_response(None::<&str>, move |_d, resp| {
+        let msg = match resp {
+            "save" => AppMsg::DialogSave,
+            "discard" => AppMsg::DialogDiscard,
+            _ => AppMsg::DialogCancel,
+        };
+        let _ = s.send(msg);
+    });
+    dialog.present(Some(window));
+}
+
+fn confirm_dialog(
+    window: &adw::ApplicationWindow,
+    sender: &AppSender,
+    title: &str,
+    body: &str,
+    msg: AppMsg,
+) {
+    let dialog = adw::AlertDialog::new(Some(title), Some(body));
+    dialog.add_response("cancel", tr!("Cancel"));
+    dialog.add_response("confirm", tr!("Delete"));
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    dialog.set_response_appearance("confirm", adw::ResponseAppearance::Destructive);
+    let s = sender.clone();
+    dialog.connect_response(None::<&str>, move |_d, resp| {
+        if resp == "confirm" {
+            let _ = s.send(msg.clone());
+        }
+    });
+    dialog.present(Some(window));
+}
+
+fn error_dialog(window: &adw::ApplicationWindow, message: &str) {
+    let dialog = adw::AlertDialog::new(Some(tr!("Error")), Some(message));
+    dialog.add_response("ok", tr!("OK"));
+    dialog.set_default_response(Some("ok"));
+    dialog.present(Some(window));
+}
+
+fn prompt_input(
+    window: &adw::ApplicationWindow,
+    sender: &AppSender,
+    title: &str,
+    placeholder: &str,
+    initial: &str,
+    ok: impl Fn(String) -> AppMsg + 'static,
+) {
+    let dialog = gtk::Dialog::with_buttons(
+        Some(title),
+        Some(window),
+        gtk::DialogFlags::MODAL,
+        &[
+            (tr!("Cancel"), gtk::ResponseType::Cancel),
+            (tr!("OK"), gtk::ResponseType::Ok),
+        ],
+    );
+    dialog.set_default_response(gtk::ResponseType::Ok);
+    let entry = gtk::Entry::new();
+    entry.set_placeholder_text(Some(placeholder));
+    entry.set_text(initial);
+    entry.set_activates_default(true);
+    dialog.content_area().append(&entry);
+    dialog.set_size_request(360, -1);
+    let s = sender.clone();
+    let entry2 = entry.clone();
+    dialog.connect_response(move |d, resp| {
+        if resp == gtk::ResponseType::Ok {
+            let _ = s.send(ok(entry2.text().to_string()));
+        }
+        d.close();
+    });
+    dialog.show();
+    entry.grab_focus();
+}

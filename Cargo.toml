@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["notas-core", "notas"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
