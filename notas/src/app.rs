@@ -615,23 +615,27 @@ impl SimpleComponent for App {
             controller.connect_key_pressed(move |_c, keyval, _code, state| {
                 let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
                 let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
-                if ctrl && !shift && keyval == Key::S {
+                // Ctrl+<letter> arrives as the lowercase keysym (Key::s, not
+                // Key::S); normalize via unicode so caps lock can't break the
+                // match either.
+                let key = keyval.to_unicode().map(|c| c.to_ascii_lowercase());
+                if ctrl && !shift && key == Some('s') {
                     emit(AppMsg::SaveNote);
                     return glib::Propagation::Stop;
                 }
-                if ctrl && !shift && keyval == Key::N {
+                if ctrl && !shift && key == Some('n') {
                     emit(AppMsg::NewNote);
                     return glib::Propagation::Stop;
                 }
-                if ctrl && !shift && keyval == Key::F {
+                if ctrl && !shift && key == Some('f') {
                     emit(AppMsg::FocusFind);
                     return glib::Propagation::Stop;
                 }
-                if ctrl && shift && keyval == Key::F {
+                if ctrl && shift && key == Some('f') {
                     emit(AppMsg::FocusSearch);
                     return glib::Propagation::Stop;
                 }
-                if ctrl && !shift && keyval == Key::E {
+                if ctrl && !shift && key == Some('e') {
                     emit(AppMsg::TogglePreview);
                     return glib::Propagation::Stop;
                 }
@@ -639,7 +643,7 @@ impl SimpleComponent for App {
                     emit(AppMsg::FindNext);
                     return glib::Propagation::Stop;
                 }
-                if ctrl && !shift && keyval == Key::Q {
+                if ctrl && !shift && key == Some('q') {
                     win.close();
                     return glib::Propagation::Stop;
                 }
@@ -860,7 +864,16 @@ impl App {
                 }
             }
             AppMsg::SaveNote => self.save_note(),
-            AppMsg::TitleChanged | AppMsg::ContentChanged => self.set_dirty(true),
+            AppMsg::TitleChanged | AppMsg::ContentChanged => {
+                // Decide dirtiness by comparing with the last saved state:
+                // loading a note sets the entry/buffer programmatically,
+                // which also fires "changed", and reverting an edit back to
+                // the saved text must clear the flag.
+                let dirty = self.current_note.is_some()
+                    && (self.current_title() != self.saved_title
+                        || self.current_content() != self.saved_content);
+                self.set_dirty(dirty);
+            }
             AppMsg::TogglePreview => {
                 self.preview = !self.preview;
                 self.widgets.preview_btn.set_active(self.preview);
@@ -1088,17 +1101,8 @@ impl App {
 
     fn save_note(&mut self) {
         if let Some(id) = self.current_note {
-            let title = self.widgets.title_entry.text().to_string();
-            let content = self
-                .widgets
-                .editor
-                .source_buffer
-                .text(
-                    &self.widgets.editor.source_buffer.start_iter(),
-                    &self.widgets.editor.source_buffer.end_iter(),
-                    true,
-                )
-                .to_string();
+            let title = self.current_title();
+            let content = self.current_content();
             if title != self.saved_title || content != self.saved_content {
                 self.worker
                     .emit(DbMsg::UpdateNote { id, title, content });
@@ -1106,6 +1110,17 @@ impl App {
                 self.resolve_saved();
             }
         }
+    }
+
+    fn current_title(&self) -> String {
+        self.widgets.title_entry.text().to_string()
+    }
+
+    fn current_content(&self) -> String {
+        let buffer = &self.widgets.editor.source_buffer;
+        buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), true)
+            .to_string()
     }
 
     fn resolve_saved(&mut self) {
