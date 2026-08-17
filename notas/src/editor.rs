@@ -5,7 +5,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+use libadwaita as adw;
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use sourceview5::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
@@ -33,13 +34,15 @@ pub struct PreviewTags {
 
 impl PreviewTags {
     fn new(buffer: &gtk::TextBuffer) -> Self {
+        // Heading colors/sizes are updated per theme by `apply_theme`;
+        // these are the light-theme defaults used before/without that call.
         let h1 = buffer
             .create_tag(
                 Some("h1"),
                 &[
-                    ("size-points", &22f64),
+                    ("size-points", &26f64),
                     ("weight", &800i32),
-                    ("underline", &pango::Underline::Single),
+                    ("foreground", &"#3584e4"),
                     ("pixels-above-lines", &12i32),
                     ("pixels-below-lines", &4i32),
                 ],
@@ -49,9 +52,9 @@ impl PreviewTags {
             .create_tag(
                 Some("h2"),
                 &[
-                    ("size-points", &17f64),
+                    ("size-points", &20f64),
                     ("weight", &700i32),
-                    ("underline", &pango::Underline::Single),
+                    ("foreground", &"#3584e4"),
                     ("pixels-above-lines", &10i32),
                     ("pixels-below-lines", &3i32),
                 ],
@@ -61,8 +64,9 @@ impl PreviewTags {
             .create_tag(
                 Some("h3"),
                 &[
-                    ("size-points", &14f64),
+                    ("size-points", &16f64),
                     ("weight", &700i32),
+                    ("foreground", &"#3584e4"),
                     ("pixels-above-lines", &8i32),
                     ("pixels-below-lines", &2i32),
                 ],
@@ -85,7 +89,7 @@ impl PreviewTags {
                 Some("code"),
                 &[
                     ("font", &"monospace"),
-                    ("background", &"rgba(127,127,127,0.15)"),
+                    ("background", &"rgba(127,127,127,0.18)"),
                 ],
             )
             .expect("create code tag");
@@ -94,7 +98,7 @@ impl PreviewTags {
                 Some("code-block"),
                 &[
                     ("font", &"monospace"),
-                    ("background", &"rgba(127,127,127,0.12)"),
+                    ("background", &"rgba(127,127,127,0.18)"),
                     ("left-margin", &12i32),
                     ("right-margin", &12i32),
                 ],
@@ -104,7 +108,11 @@ impl PreviewTags {
             buffer
                 .create_tag(
                     Some(name),
-                    &[("foreground", &"#8f8f8f"), ("left-margin", &margin)],
+                    &[
+                        ("foreground", &"#8f8f8f"),
+                        ("background", &"rgba(0,0,0,0.05)"),
+                        ("left-margin", &margin),
+                    ],
                 )
                 .unwrap_or_else(|| panic!("create {name} tag"))
         };
@@ -144,6 +152,29 @@ impl PreviewTags {
             table,
         }
     }
+
+    /// Re-apply theme-dependent colors (dark/light palette + accent).
+    /// Called once at build time and again whenever the libadwaita theme
+    /// or the accent color changes.
+    pub fn apply_theme(&self, dark: bool, accent: &gtk::gdk::RGBA) {
+        let accent_hex = rgba_to_hex(accent);
+        let text_hex = if dark { "#c8c8c8" } else { "#8f8f8f" };
+        let quote_bg = if dark { "rgba(255,255,255,0.06)" } else { "rgba(0,0,0,0.05)" };
+        let code_bg = if dark { "rgba(255,255,255,0.10)" } else { "rgba(127,127,127,0.18)" };
+
+        for h in [&self.h1, &self.h2, &self.h3] {
+            h.set_property("foreground", accent_hex.as_str());
+        }
+        self.link.set_property("foreground", accent_hex.as_str());
+        for q in [&self.quote_1, &self.quote_2, &self.quote_3] {
+            q.set_property("foreground", text_hex);
+            q.set_property("background", quote_bg);
+        }
+        self.dim.set_property("foreground", text_hex);
+        self.strike.set_property("foreground", text_hex);
+        self.code.set_property("background", code_bg);
+        self.code_block.set_property("background", code_bg);
+    }
 }
 
 pub struct Editor {
@@ -157,7 +188,7 @@ pub struct Editor {
     pub replace_entry: gtk::Entry,
     pub search_context: sourceview5::SearchContext,
     search_settings: sourceview5::SearchSettings,
-    preview_tags: PreviewTags,
+    preview_tags: Rc<PreviewTags>,
 }
 
 impl Editor {
@@ -262,7 +293,29 @@ where
     source_view.set_wrap_mode(gtk::WrapMode::WordChar);
 
     let preview_buffer = gtk::TextBuffer::new(None);
-    let preview_tags = PreviewTags::new(&preview_buffer);
+    let preview_tags = Rc::new(PreviewTags::new(&preview_buffer));
+
+    // Keep the preview colors in sync with the libadwaita theme.
+    {
+        let style_manager = adw::StyleManager::default();
+        let accent = style_manager.accent_color_rgba();
+        preview_tags.apply_theme(style_manager.is_dark(), &accent);
+
+        let tags = preview_tags.clone();
+        let sm = style_manager.clone();
+        sm.clone().connect_dark_notify(move |_| {
+            let accent = sm.accent_color_rgba();
+            tags.apply_theme(sm.is_dark(), &accent);
+        });
+
+        let tags = preview_tags.clone();
+        let sm = style_manager.clone();
+        sm.clone().connect_accent_color_rgba_notify(move |_| {
+            let accent = sm.accent_color_rgba();
+            tags.apply_theme(sm.is_dark(), &accent);
+        });
+    }
+
     let preview_view = gtk::TextView::new();
     preview_view.set_buffer(Some(&preview_buffer));
     preview_view.set_editable(false);
@@ -410,6 +463,8 @@ struct Renderer {
     item_blocks: Vec<u32>,
     table: Option<TableState>,
     code_buf: Option<String>,
+    /// Language from the code fence (first word of the info string).
+    code_lang: Option<String>,
 }
 
 impl Renderer {
@@ -428,6 +483,7 @@ impl Renderer {
             item_blocks: Vec::new(),
             table: None,
             code_buf: None,
+            code_lang: None,
         }
     }
 
@@ -574,9 +630,25 @@ impl Renderer {
                     self.sep(1);
                 }
             }
-            Tag::CodeBlock(_) => {
+            Tag::CodeBlock(kind) => {
                 self.block_start();
                 self.code_buf = Some(String::new());
+                self.code_lang = match kind {
+                    CodeBlockKind::Fenced(info) => {
+                        let lang = info
+                            .trim()
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .to_string();
+                        if lang.is_empty() {
+                            None
+                        } else {
+                            Some(lang)
+                        }
+                    }
+                    CodeBlockKind::Indented => None,
+                };
             }
             Tag::List(start) => {
                 if let Some(blocks) = self.item_blocks.last_mut() {
@@ -656,10 +728,18 @@ impl Renderer {
             TagEnd::CodeBlock => {
                 if let Some(buf) = self.code_buf.take() {
                     let code = buf.trim_end_matches('\n');
-                    if !code.is_empty() {
+                    let lang = self.code_lang.take();
+                    if !code.is_empty() || lang.is_some() {
                         let mut styles = self.separator_styles();
                         styles.push(Style::CodeBlock);
-                        self.emit(code, styles);
+                        if let Some(lang) = lang {
+                            let mut lang_styles = styles.clone();
+                            lang_styles.push(Style::Dim);
+                            self.emit(&format!("{lang}\n"), lang_styles);
+                        }
+                        if !code.is_empty() {
+                            self.emit(code, styles);
+                        }
                     }
                 }
             }
@@ -823,6 +903,14 @@ fn style_tag(tags: &PreviewTags, style: Style) -> &gtk::TextTag {
     }
 }
 
+/// Convert a `gdk::RGBA` to a `#rrggbb` hex string for tag properties.
+fn rgba_to_hex(c: &gtk::gdk::RGBA) -> String {
+    let r = (c.red() * 255.0).round() as u8;
+    let g = (c.green() * 255.0).round() as u8;
+    let b = (c.blue() * 255.0).round() as u8;
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
 /// Render Markdown into `buffer` using a small set of text tags. This is a
 /// lightweight, dependency-free preview (no webview); it covers headings,
 /// emphasis, code, lists, quotes, links, tables and rules.
@@ -830,8 +918,12 @@ pub fn render_markdown(buffer: &gtk::TextBuffer, tags: &PreviewTags, md: &str) {
     buffer.set_text("");
     let mut end = buffer.end_iter();
     for span in build_spans(md) {
-        let start = end;
+        // `insert` invalidates `start`, so remember the offset and rebuild
+        // the iterator afterwards instead of copying it (copying produced
+        // a stale iter that made `apply_tag` fail with a Gtk-CRITICAL).
+        let start_offset = end.offset();
         buffer.insert(&mut end, &span.text);
+        let start = buffer.iter_at_offset(start_offset);
         for style in &span.styles {
             buffer.apply_tag(style_tag(tags, *style), &start, &end);
         }
@@ -893,7 +985,18 @@ mod tests {
     #[test]
     fn code_blocks_are_trimmed_and_separated() {
         assert_eq!(rendered("```\nfn main() {}\n```"), "fn main() {}");
-        assert_eq!(rendered("p\n\n```rust\nlet x = 1;\n```"), "p\n\nlet x = 1;");
+        assert_eq!(
+            rendered("p\n\n```rust\nlet x = 1;\n```"),
+            "p\n\nrust\nlet x = 1;"
+        );
+    }
+
+    #[test]
+    fn code_blocks_show_language_label() {
+        assert_eq!(rendered("```rust\nlet x = 1;\n```"), "rust\nlet x = 1;");
+        assert_eq!(rendered("``` python\nprint(1)\n```"), "python\nprint(1)");
+        // Empty/whitespace-only info string: no label.
+        assert_eq!(rendered("```  \nplain\n```"), "plain");
     }
 
     #[test]
@@ -928,6 +1031,14 @@ mod tests {
         assert_eq!(rendered("[text](https://x.org)"), "text (https://x.org)");
         assert_eq!(rendered("<https://x.org>"), "https://x.org");
         assert_eq!(rendered("[x](x)"), "x");
+    }
+
+    #[test]
+    fn link_style_applied_to_link_text() {
+        let spans = build_spans("[text](https://x.org)");
+        assert!(spans
+            .iter()
+            .any(|s| s.text == "text" && s.styles.contains(&Style::Link)));
     }
 
     #[test]
