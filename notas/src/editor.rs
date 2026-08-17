@@ -379,10 +379,23 @@ where
         preview_view.add_controller(motion);
     }
 
+    // A TextView only gets a real viewport (and scrollbars) inside a
+    // ScrolledWindow; without one the views grew to their full content
+    // height and could not be scrolled.
+    let source_scroll = gtk::ScrolledWindow::new();
+    source_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    source_scroll.set_child(Some(&source_view));
+    source_scroll.set_vexpand(true);
+
+    let preview_scroll = gtk::ScrolledWindow::new();
+    preview_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    preview_scroll.set_child(Some(&preview_view));
+    preview_scroll.set_vexpand(true);
+
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
-    stack.add_named(&source_view, Some("source"));
-    stack.add_named(&preview_view, Some("preview"));
+    stack.add_named(&source_scroll, Some("source"));
+    stack.add_named(&preview_scroll, Some("preview"));
     stack.set_visible_child_name("source");
 
     // --- find / replace -----------------------------------------------------
@@ -1132,6 +1145,66 @@ mod tests {
     fn continuation_paragraph_inside_item() {
         // A second paragraph of the parent item stays attached to the item.
         assert_eq!(rendered("- a\n  - b\n\n  para2"), "• a\n  ◦ b\npara2");
+    }
+
+    /// Manual scrollability probe (run with `--ignored --nocapture`): prints
+    /// the source view's vertical adjustment range inside a constrained
+    /// window.
+    #[test]
+    #[ignore]
+    fn source_view_scroll_probe() {
+        gtk::init().expect("gtk init");
+        adw::init().expect("adw init");
+        let editor = build_editor(|_| {}, Rc::new(Cell::new(false)));
+        let long = (0..300)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        editor.source_buffer.set_text(&long);
+
+        let window = gtk::Window::new();
+        window.set_default_size(600, 300);
+        let pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        pane.append(&editor.stack);
+        pane.set_vexpand(true);
+        window.set_child(Some(&pane));
+        window.present();
+        let ctx = glib::MainContext::default();
+        for _ in 0..50 {
+            ctx.iteration(false);
+        }
+
+        let adj = editor.source_view.vadjustment().expect("source vadjustment");
+        let range = adj.upper() - adj.page_size();
+        println!(
+            "source view: upper={:.1} page={:.1} value={:.1} range={:.1}",
+            adj.upper(),
+            adj.page_size(),
+            adj.value(),
+            range
+        );
+        assert!(adj.page_size() > 100.0, "viewport must have real height");
+        assert!(range > 0.0, "long content must be scrollable");
+        adj.set_value(range);
+        assert!((adj.value() - range).abs() < 1.0, "must scroll to the end");
+
+        // Same for the preview: give it content, show it, and check its range.
+        editor.render_preview();
+        editor.stack.set_visible_child_name("preview");
+        for _ in 0..50 {
+            ctx.iteration(false);
+        }
+        let preview_adj = editor.preview_view.vadjustment().expect("preview vadjustment");
+        let preview_range = preview_adj.upper() - preview_adj.page_size();
+        println!(
+            "preview view: upper={:.1} page={:.1} value={:.1} range={:.1}",
+            preview_adj.upper(),
+            preview_adj.page_size(),
+            preview_adj.value(),
+            preview_range
+        );
+        assert!(preview_adj.page_size() > 100.0, "preview viewport must have real height");
+        assert!(preview_range > 0.0, "long preview must be scrollable");
     }
 
     /// Manual check that the editor stays editable at the widget level:
