@@ -1134,6 +1134,31 @@ mod tests {
         assert_eq!(rendered("- a\n  - b\n\n  para2"), "• a\n  ◦ b\npara2");
     }
 
+    /// Manual check that the editor stays editable at the widget level:
+    /// `cargo test --bin notas source_view_stays_editable -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn source_view_stays_editable() {
+        gtk::init().expect("gtk init");
+        adw::init().expect("adw init");
+        let editor = build_editor(|_| {}, Rc::new(Cell::new(false)));
+        assert!(editor.source_view.is_editable(), "source view must be editable");
+        assert!(editor.source_view.is_sensitive(), "source view must be sensitive");
+        assert_eq!(
+            editor.stack.visible_child_name().as_deref(),
+            Some("source"),
+            "stack must show the source view by default"
+        );
+        // Typing inserts into the source buffer even with no note open.
+        editor.source_buffer.insert_at_cursor("hello");
+        let text = editor.source_buffer.text(
+            &editor.source_buffer.start_iter(),
+            &editor.source_buffer.end_iter(),
+            true,
+        );
+        assert_eq!(text, "hello");
+    }
+
     /// Manual visual check: `cargo test --bin notas preview_screenshot -- --ignored --nocapture`
     /// then screenshot the window from outside.
     #[test]
