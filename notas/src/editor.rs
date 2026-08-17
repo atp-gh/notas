@@ -1,7 +1,7 @@
 //! The editor pane: GtkSourceView-based Markdown editor, a rendered
 //! preview, and a find/replace bar.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -30,6 +30,9 @@ pub struct PreviewTags {
     pub dim: gtk::TextTag,
     /// Monospace, so table columns line up.
     pub table: gtk::TextTag,
+    /// Link ranges `(start, end, url)` in the preview buffer, rebuilt on
+    /// every render so a click can resolve the URL at a position.
+    link_ranges: RefCell<Vec<(i32, i32, String)>>,
 }
 
 impl PreviewTags {
@@ -150,7 +153,22 @@ impl PreviewTags {
             link,
             dim,
             table,
+            link_ranges: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Replace the link range table (called on every preview render).
+    pub fn set_link_ranges(&self, ranges: Vec<(i32, i32, String)>) {
+        *self.link_ranges.borrow_mut() = ranges;
+    }
+
+    /// Destination URL of the link covering `offset`, if any.
+    pub fn link_url_at(&self, offset: i32) -> Option<String> {
+        self.link_ranges
+            .borrow()
+            .iter()
+            .find(|(start, end, _)| offset >= *start && offset < *end)
+            .map(|(_, _, url)| url.clone())
     }
 
     /// Re-apply theme-dependent colors (dark/light palette + accent).
@@ -326,6 +344,41 @@ where
     preview_view.set_top_margin(8);
     preview_view.set_bottom_margin(8);
 
+    // Clickable links: hover shows a pointer cursor, clicking opens the
+    // URL in the system browser.
+    {
+        let tags = preview_tags.clone();
+        let view = preview_view.clone();
+        let gesture = gtk::GestureClick::new();
+        gesture.connect_pressed(move |_g, _n, x, y| {
+            if let Some(iter) = view.iter_at_location(x as i32, y as i32) {
+                if let Some(url) = tags.link_url_at(iter.offset()) {
+                    let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                        &url,
+                        None::<&gtk::gio::AppLaunchContext>,
+                    );
+                }
+            }
+        });
+        preview_view.add_controller(gesture);
+
+        let tags = preview_tags.clone();
+        let view = preview_view.clone();
+        let motion = gtk::EventControllerMotion::new();
+        motion.connect_motion(move |_m, x, y| {
+            let over_link = view
+                .iter_at_location(x as i32, y as i32)
+                .is_some_and(|iter| tags.link_url_at(iter.offset()).is_some());
+            let cursor = if over_link {
+                gtk::gdk::Cursor::from_name("pointer", None)
+            } else {
+                None
+            };
+            view.set_cursor(cursor.as_ref());
+        });
+        preview_view.add_controller(motion);
+    }
+
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     stack.add_named(&source_view, Some("source"));
@@ -420,6 +473,8 @@ enum Style {
 struct Span {
     text: String,
     styles: Vec<Style>,
+    /// Destination URL when this span sits inside a link, else `None`.
+    url: Option<String>,
 }
 
 /// Horizontal rule drawn in the preview.
@@ -450,8 +505,8 @@ struct Renderer {
     /// Newlines owed before the next content (0–2).
     pending_sep: usize,
     inline: Vec<Style>,
-    /// Span index at link start plus destination, for the "(url)" suffix.
-    links: Vec<(usize, String)>,
+    /// Destination of the link currently being parsed, if any.
+    link_url: Option<String>,
     heading: u32,
     quote_depth: u32,
     lists: Vec<ListState>,
@@ -474,7 +529,7 @@ impl Renderer {
             first: true,
             pending_sep: 0,
             inline: Vec::new(),
-            links: Vec::new(),
+            link_url: None,
             heading: 0,
             quote_depth: 0,
             lists: Vec::new(),
@@ -533,6 +588,7 @@ impl Renderer {
             self.spans.push(Span {
                 text: "\n".repeat(self.pending_sep),
                 styles,
+                url: None,
             });
             self.pending_sep = 0;
         }
@@ -540,6 +596,7 @@ impl Renderer {
         self.spans.push(Span {
             text: text.to_owned(),
             styles,
+            url: self.link_url.clone(),
         });
     }
 
@@ -693,7 +750,7 @@ impl Renderer {
             Tag::Emphasis => self.inline.push(Style::Italic),
             Tag::Strikethrough => self.inline.push(Style::Strike),
             Tag::Link { dest_url, .. } => {
-                self.links.push((self.spans.len(), dest_url.into_string()));
+                self.link_url = Some(dest_url.into_string());
                 self.inline.push(Style::Link);
             }
             Tag::Image { .. } => {}
@@ -759,19 +816,7 @@ impl Renderer {
             }
             TagEnd::Link => {
                 self.inline.pop();
-                if let Some((start, dest)) = self.links.pop() {
-                    let visible: String = self.spans[start..]
-                        .iter()
-                        .map(|s| s.text.as_str())
-                        .collect();
-                    if self.table.is_none()
-                        && self.code_buf.is_none()
-                        && !dest.is_empty()
-                        && visible != dest
-                    {
-                        self.emit(&format!(" ({dest})"), vec![Style::Dim]);
-                    }
-                }
+                self.link_url = None;
             }
             TagEnd::Table => self.render_table(),
             TagEnd::TableHead | TagEnd::TableRow => {
@@ -916,6 +961,7 @@ fn rgba_to_hex(c: &gtk::gdk::RGBA) -> String {
 /// emphasis, code, lists, quotes, links, tables and rules.
 pub fn render_markdown(buffer: &gtk::TextBuffer, tags: &PreviewTags, md: &str) {
     buffer.set_text("");
+    let mut link_ranges = Vec::new();
     let mut end = buffer.end_iter();
     for span in build_spans(md) {
         // `insert` invalidates `start`, so remember the offset and rebuild
@@ -923,11 +969,15 @@ pub fn render_markdown(buffer: &gtk::TextBuffer, tags: &PreviewTags, md: &str) {
         // a stale iter that made `apply_tag` fail with a Gtk-CRITICAL).
         let start_offset = end.offset();
         buffer.insert(&mut end, &span.text);
+        if let Some(url) = &span.url {
+            link_ranges.push((start_offset, end.offset(), url.clone()));
+        }
         let start = buffer.iter_at_offset(start_offset);
         for style in &span.styles {
             buffer.apply_tag(style_tag(tags, *style), &start, &end);
         }
     }
+    tags.set_link_ranges(link_ranges);
 }
 
 #[cfg(test)]
@@ -1027,10 +1077,24 @@ mod tests {
     }
 
     #[test]
-    fn links_show_target_when_hidden() {
-        assert_eq!(rendered("[text](https://x.org)"), "text (https://x.org)");
+    fn links_show_only_their_text() {
+        assert_eq!(rendered("[text](https://x.org)"), "text");
         assert_eq!(rendered("<https://x.org>"), "https://x.org");
         assert_eq!(rendered("[x](x)"), "x");
+    }
+
+    #[test]
+    fn link_spans_carry_destination() {
+        let spans = build_spans("plain [text](https://x.org)");
+        let link = spans
+            .iter()
+            .find(|s| s.styles.contains(&Style::Link))
+            .expect("link span");
+        assert_eq!(link.url.as_deref(), Some("https://x.org"));
+        assert_eq!(
+            spans.iter().find(|s| s.text == "plain").and_then(|s| s.url.as_deref()),
+            None
+        );
     }
 
     #[test]
