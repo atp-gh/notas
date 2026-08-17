@@ -313,24 +313,31 @@ where
     let preview_buffer = gtk::TextBuffer::new(None);
     let preview_tags = Rc::new(PreviewTags::new(&preview_buffer));
 
-    // Keep the preview colors in sync with the libadwaita theme.
+    // Keep the preview colors and the syntax highlighting scheme in sync
+    // with the libadwaita theme. GtkSourceView defaults to a light scheme
+    // and does not switch it automatically, so apply it ourselves.
+    let scheme_manager = sourceview5::StyleSchemeManager::new();
     {
         let style_manager = adw::StyleManager::default();
+        let dark = style_manager.is_dark();
         let accent = style_manager.accent_color_rgba();
-        preview_tags.apply_theme(style_manager.is_dark(), &accent);
+        preview_tags.apply_theme(dark, &accent);
+        apply_scheme(&scheme_manager, &source_buffer, dark);
 
         let tags = preview_tags.clone();
         let sm = style_manager.clone();
+        let schemes = scheme_manager.clone();
+        let buf = source_buffer.clone();
         sm.clone().connect_dark_notify(move |_| {
-            let accent = sm.accent_color_rgba();
-            tags.apply_theme(sm.is_dark(), &accent);
+            let dark = sm.is_dark();
+            tags.apply_theme(dark, &sm.accent_color_rgba());
+            apply_scheme(&schemes, &buf, dark);
         });
 
         let tags = preview_tags.clone();
         let sm = style_manager.clone();
         sm.clone().connect_accent_color_rgba_notify(move |_| {
-            let accent = sm.accent_color_rgba();
-            tags.apply_theme(sm.is_dark(), &accent);
+            tags.apply_theme(sm.is_dark(), &sm.accent_color_rgba());
         });
     }
 
@@ -961,6 +968,19 @@ fn style_tag(tags: &PreviewTags, style: Style) -> &gtk::TextTag {
     }
 }
 
+/// Apply the GtkSourceView style scheme matching the libadwaita theme
+/// ("Adwaita" for light, "Adwaita-dark" for dark).
+fn apply_scheme(
+    manager: &sourceview5::StyleSchemeManager,
+    buffer: &sourceview5::Buffer,
+    dark: bool,
+) {
+    let id = if dark { "Adwaita-dark" } else { "Adwaita" };
+    if let Some(scheme) = manager.scheme(id) {
+        buffer.set_style_scheme(Some(&scheme));
+    }
+}
+
 /// Convert a `gdk::RGBA` to a `#rrggbb` hex string for tag properties.
 fn rgba_to_hex(c: &gtk::gdk::RGBA) -> String {
     let r = (c.red() * 255.0).round() as u8;
@@ -1230,6 +1250,12 @@ mod tests {
             true,
         );
         assert_eq!(text, "hello");
+
+        // The syntax highlighting scheme follows the libadwaita theme.
+        let dark = adw::StyleManager::default().is_dark();
+        let expected = if dark { "Adwaita-dark" } else { "Adwaita" };
+        let scheme = editor.source_buffer.style_scheme().map(|s| s.id().to_string());
+        assert_eq!(scheme.as_deref(), Some(expected));
     }
 
     /// Manual visual check: `cargo test --bin notas preview_screenshot -- --ignored --nocapture`
