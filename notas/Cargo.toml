@@ -8,11 +8,12 @@ description = "Notas — a fast local-first note-taking app for Linux"
 notas-core = { path = "../notas-core" }
 anyhow = "1"
 relm4 = { version = "0.11", features = ["libadwaita"] }
-gtk = { package = "gtk4", version = "0.11", features = ["v4_10"] }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_22"] }
 libadwaita = { version = "0.9", features = ["v1_9"] }
 sourceview5 = "0.11"
-pulldown-cmark = "0.12"
+pulldown-cmark = "0.13"
 glib = "0.22"
 pango = "0.22"
+unicode-width = "0.2"
 sqlx.workspace = true
 tokio.workspace = true
