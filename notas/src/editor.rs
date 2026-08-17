@@ -5,8 +5,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 use sourceview5::prelude::*;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::AppMsg;
 
@@ -20,8 +21,14 @@ pub struct PreviewTags {
     pub strike: gtk::TextTag,
     pub code: gtk::TextTag,
     pub code_block: gtk::TextTag,
-    pub quote: gtk::TextTag,
+    pub quote_1: gtk::TextTag,
+    pub quote_2: gtk::TextTag,
+    pub quote_3: gtk::TextTag,
     pub link: gtk::TextTag,
+    /// Muted text: link URLs and horizontal rules.
+    pub dim: gtk::TextTag,
+    /// Monospace, so table columns line up.
+    pub table: gtk::TextTag,
 }
 
 impl PreviewTags {
@@ -32,7 +39,8 @@ impl PreviewTags {
                 &[
                     ("size-points", &22f64),
                     ("weight", &800i32),
-                    ("pixels-above-lines", &10i32),
+                    ("underline", &pango::Underline::Single),
+                    ("pixels-above-lines", &12i32),
                     ("pixels-below-lines", &4i32),
                 ],
             )
@@ -43,8 +51,9 @@ impl PreviewTags {
                 &[
                     ("size-points", &17f64),
                     ("weight", &700i32),
-                    ("pixels-above-lines", &8i32),
-                    ("pixels-below-lines", &2i32),
+                    ("underline", &pango::Underline::Single),
+                    ("pixels-above-lines", &10i32),
+                    ("pixels-below-lines", &3i32),
                 ],
             )
             .expect("create h2 tag");
@@ -54,7 +63,8 @@ impl PreviewTags {
                 &[
                     ("size-points", &14f64),
                     ("weight", &700i32),
-                    ("pixels-above-lines", &6i32),
+                    ("pixels-above-lines", &8i32),
+                    ("pixels-below-lines", &2i32),
                 ],
             )
             .expect("create h3 tag");
@@ -73,7 +83,10 @@ impl PreviewTags {
         let code = buffer
             .create_tag(
                 Some("code"),
-                &[("font", &"monospace"), ("background", &"rgba(127,127,127,0.15)")],
+                &[
+                    ("font", &"monospace"),
+                    ("background", &"rgba(127,127,127,0.15)"),
+                ],
             )
             .expect("create code tag");
         let code_block = buffer
@@ -87,16 +100,17 @@ impl PreviewTags {
                 ],
             )
             .expect("create code-block tag");
-        let quote = buffer
-            .create_tag(
-                Some("quote"),
-                &[
-                    ("style", &pango::Style::Italic),
-                    ("foreground", &"#8f8f8f"),
-                    ("left-margin", &16i32),
-                ],
-            )
-            .expect("create quote tag");
+        let quote_tag = |name: &str, margin: i32| {
+            buffer
+                .create_tag(
+                    Some(name),
+                    &[("foreground", &"#8f8f8f"), ("left-margin", &margin)],
+                )
+                .unwrap_or_else(|| panic!("create {name} tag"))
+        };
+        let quote_1 = quote_tag("quote-1", 16);
+        let quote_2 = quote_tag("quote-2", 32);
+        let quote_3 = quote_tag("quote-3", 48);
         let link = buffer
             .create_tag(
                 Some("link"),
@@ -106,6 +120,12 @@ impl PreviewTags {
                 ],
             )
             .expect("create link tag");
+        let dim = buffer
+            .create_tag(Some("dim"), &[("foreground", &"#8f8f8f")])
+            .expect("create dim tag");
+        let table = buffer
+            .create_tag(Some("table"), &[("font", &"monospace")])
+            .expect("create table tag");
 
         Self {
             h1,
@@ -116,8 +136,12 @@ impl PreviewTags {
             strike,
             code,
             code_block,
-            quote,
+            quote_1,
+            quote_2,
+            quote_3,
             link,
+            dim,
+            table,
         }
     }
 }
@@ -321,28 +345,481 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Markdown -> TextBuffer rendering
+// Markdown -> styled spans
 // ---------------------------------------------------------------------------
 
-fn push_text(
-    buffer: &gtk::TextBuffer,
-    end: &mut gtk::TextIter,
-    text: &str,
-    tags: &[&gtk::TextTag],
-) {
-    let start = *end;
-    buffer.insert(end, text);
-    for tag in tags {
-        buffer.apply_tag(*tag, &start, end);
+/// A visual style that maps to one `gtk::TextTag` in the preview.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Style {
+    Bold,
+    Italic,
+    Strike,
+    Code,
+    CodeBlock,
+    Link,
+    Dim,
+    Heading(u32),
+    Quote(u32),
+    Table,
+}
+
+/// A run of text carrying the styles active at that position.
+struct Span {
+    text: String,
+    styles: Vec<Style>,
+}
+
+/// Horizontal rule drawn in the preview.
+const RULE_LINE: &str = "────────────────────────────────────────";
+
+/// Per-list state: ordered counter or bullets, and whether any item rendered.
+struct ListState {
+    /// `Some(n)` for ordered lists (next number to emit), `None` for bullets.
+    next: Option<u64>,
+    emitted_any: bool,
+}
+
+/// Cells accumulated while a table is being parsed.
+struct TableState {
+    alignments: Vec<pulldown_cmark::Alignment>,
+    rows: Vec<Vec<String>>,
+    row: Vec<String>,
+    cell: String,
+}
+
+/// Turns Markdown events into styled spans. All block separation flows
+/// through `sep`/`emit`, so newlines are emitted exactly once, right before
+/// the content they separate.
+struct Renderer {
+    spans: Vec<Span>,
+    /// True until the first content is emitted; suppresses leading newlines.
+    first: bool,
+    /// Newlines owed before the next content (0–2).
+    pending_sep: usize,
+    inline: Vec<Style>,
+    /// Span index at link start plus destination, for the "(url)" suffix.
+    links: Vec<(usize, String)>,
+    heading: u32,
+    quote_depth: u32,
+    lists: Vec<ListState>,
+    /// Bullet/number prefix waiting to be emitted with the item's first text.
+    item_prefix: Option<String>,
+    /// Indent of the current item, reused for task-list checkboxes.
+    item_indent: String,
+    /// Blocks seen inside each open list item, innermost last.
+    item_blocks: Vec<u32>,
+    table: Option<TableState>,
+    code_buf: Option<String>,
+}
+
+impl Renderer {
+    fn new() -> Self {
+        Self {
+            spans: Vec::new(),
+            first: true,
+            pending_sep: 0,
+            inline: Vec::new(),
+            links: Vec::new(),
+            heading: 0,
+            quote_depth: 0,
+            lists: Vec::new(),
+            item_prefix: None,
+            item_indent: String::new(),
+            item_blocks: Vec::new(),
+            table: None,
+            code_buf: None,
+        }
+    }
+
+    /// Declare separation before a block: a blank line at top level, a
+    /// single newline between blocks of one list item. The first block of
+    /// an item flows directly after the bullet.
+    fn block_start(&mut self) {
+        match self.item_blocks.last().copied() {
+            Some(count) => {
+                if count > 0 {
+                    self.sep(1);
+                }
+                if let Some(blocks) = self.item_blocks.last_mut() {
+                    *blocks += 1;
+                }
+            }
+            None => {
+                if self.pending_sep == 0 {
+                    self.sep(2);
+                }
+            }
+        }
+    }
+
+    fn sep(&mut self, n: usize) {
+        if !self.first {
+            self.pending_sep = self.pending_sep.max(n);
+        }
+    }
+
+    /// Styles for newline-only spans so blank lines keep the quote indent.
+    fn separator_styles(&self) -> Vec<Style> {
+        if self.quote_depth > 0 {
+            vec![Style::Quote(self.quote_depth)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Emit content, flushing any owed block separation first.
+    fn emit(&mut self, text: &str, styles: Vec<Style>) {
+        if text.is_empty() {
+            return;
+        }
+        if self.pending_sep > 0 {
+            let styles = self.separator_styles();
+            self.spans.push(Span {
+                text: "\n".repeat(self.pending_sep),
+                styles,
+            });
+            self.pending_sep = 0;
+        }
+        self.first = false;
+        self.spans.push(Span {
+            text: text.to_owned(),
+            styles,
+        });
+    }
+
+    /// Styles active at the current position: inline stack plus heading
+    /// and quote context.
+    fn context_styles(&self) -> Vec<Style> {
+        let mut styles = self.inline.clone();
+        if self.heading > 0 {
+            styles.push(Style::Heading(self.heading));
+        }
+        if self.quote_depth > 0 {
+            styles.push(Style::Quote(self.quote_depth));
+        }
+        styles
+    }
+
+    /// Emit the pending item prefix (bullet/number), if any.
+    fn flush_prefix(&mut self) {
+        if let Some(prefix) = self.item_prefix.take() {
+            let styles = self.separator_styles();
+            self.emit(&prefix, styles);
+        }
+    }
+
+    fn text(&mut self, text: &str) {
+        if let Some(table) = self.table.as_mut() {
+            table.cell.push_str(text);
+            return;
+        }
+        if let Some(buf) = self.code_buf.as_mut() {
+            buf.push_str(text);
+            return;
+        }
+        self.flush_prefix();
+        let styles = self.context_styles();
+        self.emit(text, styles);
+    }
+
+    fn code(&mut self, code: &str) {
+        if let Some(table) = self.table.as_mut() {
+            table.cell.push_str(code);
+            return;
+        }
+        self.flush_prefix();
+        let mut styles = self.context_styles();
+        styles.push(Style::Code);
+        self.emit(code, styles);
+    }
+
+    fn line_break(&mut self) {
+        if let Some(table) = self.table.as_mut() {
+            table.cell.push(' ');
+            return;
+        }
+        let styles = self.separator_styles();
+        self.emit("\n", styles);
+    }
+
+    fn task_marker(&mut self, checked: bool) {
+        let marker = if checked { "[x] " } else { "[ ] " };
+        if let Some(table) = self.table.as_mut() {
+            table.cell.push_str(marker);
+            return;
+        }
+        // Task items show a checkbox instead of the bullet.
+        if self.item_prefix.is_some() {
+            self.item_prefix = None;
+            let prefix = format!("{}{}", self.item_indent, marker);
+            let styles = self.separator_styles();
+            self.emit(&prefix, styles);
+        } else {
+            self.emit(marker, Vec::new());
+        }
+    }
+
+    fn start_tag(&mut self, tag: Tag) {
+        match tag {
+            Tag::Paragraph => self.block_start(),
+            Tag::Heading { level, .. } => {
+                self.block_start();
+                self.heading = level as u32;
+            }
+            Tag::BlockQuote(_) => {
+                self.quote_depth += 1;
+                if self.quote_depth == 1 {
+                    self.block_start();
+                } else {
+                    self.sep(1);
+                }
+            }
+            Tag::CodeBlock(_) => {
+                self.block_start();
+                self.code_buf = Some(String::new());
+            }
+            Tag::List(start) => {
+                if let Some(blocks) = self.item_blocks.last_mut() {
+                    *blocks += 1;
+                }
+                self.lists.push(ListState {
+                    next: start,
+                    emitted_any: false,
+                });
+            }
+            Tag::Item => {
+                let depth = self.lists.len();
+                let first_item = self.lists.last().is_none_or(|l| !l.emitted_any);
+                if first_item && depth <= 1 {
+                    self.block_start();
+                } else {
+                    self.sep(1);
+                }
+                let marker = {
+                    let list = self
+                        .lists
+                        .last_mut()
+                        .expect("Item must follow a List start");
+                    list.emitted_any = true;
+                    match list.next {
+                        Some(n) => {
+                            list.next = Some(n + 1);
+                            format!("{n}. ")
+                        }
+                        None => match depth {
+                            1 => "• ".to_owned(),
+                            2 => "◦ ".to_owned(),
+                            _ => "▪ ".to_owned(),
+                        },
+                    }
+                };
+                self.item_indent = " ".repeat(2 * (depth - 1));
+                self.item_prefix = Some(format!("{}{}", self.item_indent, marker));
+                self.item_blocks.push(0);
+            }
+            Tag::Strong => self.inline.push(Style::Bold),
+            Tag::Emphasis => self.inline.push(Style::Italic),
+            Tag::Strikethrough => self.inline.push(Style::Strike),
+            Tag::Link { dest_url, .. } => {
+                self.links.push((self.spans.len(), dest_url.into_string()));
+                self.inline.push(Style::Link);
+            }
+            Tag::Image { .. } => {}
+            Tag::Table(alignments) => {
+                self.block_start();
+                self.table = Some(TableState {
+                    alignments,
+                    rows: Vec::new(),
+                    row: Vec::new(),
+                    cell: String::new(),
+                });
+            }
+            Tag::TableHead | Tag::TableRow => {
+                if let Some(table) = self.table.as_mut() {
+                    table.row.clear();
+                }
+            }
+            Tag::TableCell => {
+                if let Some(table) = self.table.as_mut() {
+                    table.cell.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn end_tag(&mut self, tag: TagEnd) {
+        match tag {
+            TagEnd::Paragraph => {}
+            TagEnd::Heading(_) => self.heading = 0,
+            TagEnd::BlockQuote(_) => self.quote_depth = self.quote_depth.saturating_sub(1),
+            TagEnd::CodeBlock => {
+                if let Some(buf) = self.code_buf.take() {
+                    let code = buf.trim_end_matches('\n');
+                    if !code.is_empty() {
+                        let mut styles = self.separator_styles();
+                        styles.push(Style::CodeBlock);
+                        self.emit(code, styles);
+                    }
+                }
+            }
+            TagEnd::List(_) => {
+                self.lists.pop();
+            }
+            TagEnd::Item => {
+                if self.item_blocks.last() == Some(&0) {
+                    // Empty item: keep the lone bullet.
+                    self.flush_prefix();
+                }
+                self.item_prefix = None;
+                self.item_blocks.pop();
+            }
+            TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough => {
+                self.inline.pop();
+            }
+            TagEnd::Link => {
+                self.inline.pop();
+                if let Some((start, dest)) = self.links.pop() {
+                    let visible: String = self.spans[start..]
+                        .iter()
+                        .map(|s| s.text.as_str())
+                        .collect();
+                    if self.table.is_none()
+                        && self.code_buf.is_none()
+                        && !dest.is_empty()
+                        && visible != dest
+                    {
+                        self.emit(&format!(" ({dest})"), vec![Style::Dim]);
+                    }
+                }
+            }
+            TagEnd::Table => self.render_table(),
+            TagEnd::TableHead | TagEnd::TableRow => {
+                if let Some(table) = self.table.as_mut() {
+                    let row = std::mem::take(&mut table.row);
+                    table.rows.push(row);
+                }
+            }
+            TagEnd::TableCell => {
+                if let Some(table) = self.table.as_mut() {
+                    let cell = std::mem::take(&mut table.cell);
+                    table.row.push(cell);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Lay the buffered table out as aligned, padded rows.
+    fn render_table(&mut self) {
+        let Some(table) = self.table.take() else {
+            return;
+        };
+        if table.rows.is_empty() {
+            return;
+        }
+
+        let cols = table
+            .alignments
+            .len()
+            .max(table.rows.iter().map(Vec::len).max().unwrap_or(0));
+        let mut widths = vec![0usize; cols];
+        for row in &table.rows {
+            for (i, cell) in row.iter().enumerate() {
+                widths[i] = widths[i].max(cell.width());
+            }
+        }
+
+        let mut lines: Vec<(String, Vec<Style>)> = Vec::with_capacity(table.rows.len() + 1);
+        for (row_index, row) in table.rows.iter().enumerate() {
+            let cells: Vec<String> = (0..cols)
+                .map(|i| {
+                    pad_cell(
+                        row.get(i).map(String::as_str).unwrap_or(""),
+                        widths[i],
+                        *table.alignments.get(i).unwrap_or(&Alignment::None),
+                    )
+                })
+                .collect();
+            if row_index == 0 {
+                lines.push((cells.join(" │ "), vec![Style::Table, Style::Bold]));
+                let rule = widths
+                    .iter()
+                    .map(|w| "─".repeat(*w))
+                    .collect::<Vec<_>>()
+                    .join("─┼─");
+                lines.push((rule, vec![Style::Table, Style::Dim]));
+            } else {
+                lines.push((cells.join(" │ "), vec![Style::Table]));
+            }
+        }
+        for (i, (text, styles)) in lines.into_iter().enumerate() {
+            if i > 0 {
+                self.sep(1);
+            }
+            self.emit(&text, styles);
+        }
     }
 }
 
-fn heading_tag(tags: &PreviewTags, level: u32) -> Option<&gtk::TextTag> {
-    match level {
-        1 => Some(&tags.h1),
-        2 => Some(&tags.h2),
-        _ if level >= 3 => Some(&tags.h3),
-        _ => None,
+/// Pad a table cell to its column width, honouring the column alignment.
+fn pad_cell(cell: &str, width: usize, align: Alignment) -> String {
+    let pad = width.saturating_sub(cell.width());
+    match align {
+        Alignment::Right => format!("{}{}", " ".repeat(pad), cell),
+        Alignment::Center => {
+            let left = pad / 2;
+            format!("{}{}{}", " ".repeat(left), cell, " ".repeat(pad - left))
+        }
+        _ => format!("{}{}", cell, " ".repeat(pad)),
+    }
+}
+
+/// Parse `md` into styled spans (pure; no GTK involved).
+fn build_spans(md: &str) -> Vec<Span> {
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_HEADING_ATTRIBUTES;
+    let mut renderer = Renderer::new();
+    for event in Parser::new_ext(md, options) {
+        match event {
+            Event::Start(tag) => renderer.start_tag(tag),
+            Event::End(tag) => renderer.end_tag(tag),
+            Event::Text(text) => renderer.text(&text),
+            Event::Code(text) => renderer.code(&text),
+            Event::SoftBreak | Event::HardBreak => renderer.line_break(),
+            Event::Rule => {
+                renderer.block_start();
+                renderer.emit(RULE_LINE, vec![Style::Dim]);
+            }
+            Event::TaskListMarker(checked) => renderer.task_marker(checked),
+            _ => {}
+        }
+    }
+    renderer.spans
+}
+
+// ---------------------------------------------------------------------------
+// Spans -> TextBuffer
+// ---------------------------------------------------------------------------
+
+fn style_tag(tags: &PreviewTags, style: Style) -> &gtk::TextTag {
+    match style {
+        Style::Bold => &tags.bold,
+        Style::Italic => &tags.italic,
+        Style::Strike => &tags.strike,
+        Style::Code => &tags.code,
+        Style::CodeBlock => &tags.code_block,
+        Style::Link => &tags.link,
+        Style::Dim => &tags.dim,
+        Style::Heading(1) => &tags.h1,
+        Style::Heading(2) => &tags.h2,
+        Style::Heading(_) => &tags.h3,
+        Style::Quote(1) => &tags.quote_1,
+        Style::Quote(2) => &tags.quote_2,
+        Style::Quote(_) => &tags.quote_3,
+        Style::Table => &tags.table,
     }
 }
 
@@ -351,120 +828,204 @@ fn heading_tag(tags: &PreviewTags, level: u32) -> Option<&gtk::TextTag> {
 /// emphasis, code, lists, quotes, links, tables and rules.
 pub fn render_markdown(buffer: &gtk::TextBuffer, tags: &PreviewTags, md: &str) {
     buffer.set_text("");
-
     let mut end = buffer.end_iter();
-    let mut inline: Vec<&gtk::TextTag> = Vec::new();
-    let mut heading_level: u32 = 0;
-    let mut list_counters: Vec<u64> = Vec::new();
-    let mut first = true;
+    for span in build_spans(md) {
+        let start = end;
+        buffer.insert(&mut end, &span.text);
+        for style in &span.styles {
+            buffer.apply_tag(style_tag(tags, *style), &start, &end);
+        }
+    }
+}
 
-    let options = Options::ENABLE_TABLES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_HEADING_ATTRIBUTES;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    for event in Parser::new_ext(md, options) {
-        match event {
-            Event::Start(tag) => match tag {
-                Tag::Heading { level, .. } => {
-                    heading_level = level as u32;
-                    if !first {
-                        push_text(buffer, &mut end, "\n\n", &[]);
-                    }
-                    first = false;
-                }
-                Tag::Strong => inline.push(&tags.bold),
-                Tag::Emphasis => inline.push(&tags.italic),
-                Tag::Strikethrough => inline.push(&tags.strike),
-                Tag::Link { .. } => inline.push(&tags.link),
-                Tag::CodeBlock(_) => {
-                    if !first {
-                        push_text(buffer, &mut end, "\n\n", &[]);
-                    }
-                    first = false;
-                    inline.push(&tags.code_block);
-                }
-                Tag::BlockQuote(_) => {
-                    if !first {
-                        push_text(buffer, &mut end, "\n\n", &[]);
-                    }
-                    first = false;
-                    inline.push(&tags.quote);
-                }
-                Tag::List(start) => {
-                    list_counters.push(start.unwrap_or(0));
-                }
-                Tag::Item => {
-                    let depth = list_counters.len();
-                    let prefix = if depth == 0 {
-                        "• ".to_string()
-                    } else if list_counters[depth - 1] > 0 {
-                        let n = list_counters[depth - 1];
-                        list_counters[depth - 1] += 1;
-                        format!("{n}. ")
-                    } else {
-                        "• ".to_string()
-                    };
-                    push_text(buffer, &mut end, &format!("\n{prefix}"), &[]);
-                    first = false;
-                }
-                Tag::Paragraph => {
-                    if !first {
-                        push_text(buffer, &mut end, "\n\n", &[]);
-                    }
-                    first = false;
-                }
-                Tag::TableRow => {
-                    push_text(buffer, &mut end, "\n", &[]);
-                }
-                Tag::TableCell => {
-                    push_text(buffer, &mut end, "\t", &[]);
-                }
-                _ => {}
-            },
-            Event::End(tag) => match tag {
-                TagEnd::Heading(_) => heading_level = 0,
-                TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough | TagEnd::Link => {
-                    inline.pop();
-                }
-                TagEnd::CodeBlock => {
-                    inline.pop();
-                }
-                TagEnd::BlockQuote(_) => {
-                    inline.pop();
-                }
-                TagEnd::List(_) => {
-                    list_counters.pop();
-                }
-                _ => {}
-            },
-            Event::Text(text) => {
-                let mut tags_to_apply: Vec<&gtk::TextTag> = inline.clone();
-                if let Some(h) = heading_tag(tags, heading_level) {
-                    tags_to_apply.push(h);
-                }
-                push_text(buffer, &mut end, &text, &tags_to_apply);
-                first = false;
-            }
-            Event::Code(text) => {
-                push_text(buffer, &mut end, &text, &[&tags.code]);
-                first = false;
-            }
-            Event::SoftBreak | Event::HardBreak => {
-                push_text(buffer, &mut end, "\n", &[]);
-            }
-            Event::Rule => {
-                push_text(buffer, &mut end, "────────────\n", &[]);
-            }
-            Event::TaskListMarker(checked) => {
-                push_text(
-                    buffer,
-                    &mut end,
-                    if checked { "[x] " } else { "[ ] " },
-                    &[],
-                );
-            }
-            _ => {}
+    fn rendered(md: &str) -> String {
+        build_spans(md)
+            .into_iter()
+            .map(|s| s.text)
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    #[test]
+    fn headings_and_paragraphs() {
+        assert_eq!(rendered("# Title\n\nbody"), "Title\n\nbody");
+        assert_eq!(rendered("a\n\nb"), "a\n\nb");
+        assert_eq!(rendered("a\nb"), "a\nb");
+    }
+
+    #[test]
+    fn no_leading_or_trailing_blank_lines() {
+        assert_eq!(rendered("# H"), "H");
+        assert_eq!(rendered("- a"), "• a");
+        assert_eq!(rendered("> q"), "q");
+    }
+
+    #[test]
+    fn list_items_stay_on_their_bullet_line() {
+        // Regression: item paragraphs used to push the text onto its own
+        // line with a blank line after the bullet.
+        assert_eq!(rendered("intro\n\n- a\n- b"), "intro\n\n• a\n• b");
+        assert_eq!(rendered("- a\n\n- b"), "• a\n• b");
+    }
+
+    #[test]
+    fn ordered_lists_keep_numbers() {
+        assert_eq!(rendered("3. x\n4. y"), "3. x\n4. y");
+    }
+
+    #[test]
+    fn nested_lists_indent() {
+        assert_eq!(
+            rendered("- a\n  - b\n    - c\n- d"),
+            "• a\n  ◦ b\n    ▪ c\n• d"
+        );
+    }
+
+    #[test]
+    fn task_lists_show_checkboxes_instead_of_bullets() {
+        assert_eq!(rendered("- [ ] a\n- [x] b"), "[ ] a\n[x] b");
+    }
+
+    #[test]
+    fn code_blocks_are_trimmed_and_separated() {
+        assert_eq!(rendered("```\nfn main() {}\n```"), "fn main() {}");
+        assert_eq!(rendered("p\n\n```rust\nlet x = 1;\n```"), "p\n\nlet x = 1;");
+    }
+
+    #[test]
+    fn quotes_and_nested_quotes() {
+        assert_eq!(rendered("> a\n> b"), "a\nb");
+        assert_eq!(rendered("> a\n> > b"), "a\nb");
+        assert_eq!(rendered("> a\n\n> b"), "a\n\nb");
+    }
+
+    #[test]
+    fn rules_get_their_own_line() {
+        assert_eq!(rendered("a\n\n---\n\nb"), format!("a\n\n{RULE_LINE}\n\nb"));
+    }
+
+    #[test]
+    fn tables_align_columns() {
+        let out = rendered("| a | right |\n|:--|------:|\n| x | 1 |\n");
+        assert!(out.contains("a │ right"), "{out}");
+        assert!(out.contains("──┼─────"), "{out}");
+        assert!(out.contains("x │     1"), "{out}");
+    }
+
+    #[test]
+    fn tables_count_wide_chars_correctly() {
+        let out = rendered("| 名称 | v |\n|---|---|\n| x | 1 |\n");
+        assert!(out.contains("名称 │ v"), "{out}");
+        assert!(out.contains("x    │ 1"), "{out}");
+    }
+
+    #[test]
+    fn links_show_target_when_hidden() {
+        assert_eq!(rendered("[text](https://x.org)"), "text (https://x.org)");
+        assert_eq!(rendered("<https://x.org>"), "https://x.org");
+        assert_eq!(rendered("[x](x)"), "x");
+    }
+
+    #[test]
+    fn inline_styles_carry_context() {
+        let spans = build_spans("**b** and `c`");
+        assert!(spans
+            .iter()
+            .any(|s| s.text == "b" && s.styles.contains(&Style::Bold)));
+        assert!(spans
+            .iter()
+            .any(|s| s.text == "c" && s.styles.contains(&Style::Code)));
+
+        let spans = build_spans("# Head with `code`");
+        assert!(spans.iter().any(|s| s.text == "code"
+            && s.styles.contains(&Style::Code)
+            && s.styles.contains(&Style::Heading(1))));
+    }
+
+    #[test]
+    fn blocks_after_lists_quotes_and_code_separate() {
+        assert_eq!(rendered("- a\n\npara"), "• a\n\npara");
+        assert_eq!(rendered("> q\n\npara"), "q\n\npara");
+        assert_eq!(rendered("```\nc\n```\n\npara"), "c\n\npara");
+    }
+
+    #[test]
+    fn continuation_paragraph_inside_item() {
+        // A second paragraph of the parent item stays attached to the item.
+        assert_eq!(rendered("- a\n  - b\n\n  para2"), "• a\n  ◦ b\npara2");
+    }
+
+    /// Manual visual check: `cargo test --bin notas preview_screenshot -- --ignored --nocapture`
+    /// then screenshot the window from outside.
+    #[test]
+    #[ignore]
+    fn preview_screenshot() {
+        gtk::init().expect("gtk init");
+        let buffer = gtk::TextBuffer::new(None);
+        let tags = PreviewTags::new(&buffer);
+        let view = gtk::TextView::new();
+        let css = gtk::CssProvider::new();
+        css.load_from_data("textview { background: #123456; }");
+        gtk::style_context_add_provider_for_display(
+            &gtk::gdk::Display::default().expect("display"),
+            &css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        view.set_buffer(Some(&buffer));
+        view.set_editable(false);
+        view.set_wrap_mode(gtk::WrapMode::WordChar);
+        view.set_left_margin(12);
+        view.set_right_margin(12);
+        view.set_top_margin(12);
+        view.set_bottom_margin(12);
+        let md = r#"# Heading One
+
+## Heading Two
+
+### Heading Three
+
+#### Heading Four
+
+Some paragraph with **bold**, *italic*, ~~strike~~, `inline code` and a
+[link to example](https://example.com) plus a bare URL https://example.org here.
+
+```rust
+fn main() {
+    println!("Hello, world!");
+}
+```
+
+> A block quote line one.
+> Line two.
+
+> > Nested quote deeper.
+
+- bullet one
+- bullet two
+  - nested bullet
+
+1. first
+2. second
+
+---
+
+| Name | Value |
+|:-----|------:|
+| a    |     1 |
+| b    |    22 |
+"#;
+        render_markdown(&buffer, &tags, md);
+        let window = gtk::Window::new();
+        window.set_default_size(720, 900);
+        window.set_child(Some(&view));
+        window.present();
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(20) {
+            glib::MainContext::default().iteration(true);
         }
     }
 }
