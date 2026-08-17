@@ -589,15 +589,37 @@ impl SimpleComponent for App {
         header.pack_end(&trash_btn);
 
         // ------------------------------------------------------------- layout
+        // Three panes in a 1:1:2 ratio (file tree : notes : editor). GtkPaned
+        // only supports pixel positions, so rebalance the split on window
+        // resize: tree = width/4, tree+notes = width/2, editor = the rest.
         let middle_pane = gtk::Paned::new(gtk::Orientation::Horizontal);
         middle_pane.set_start_child(Some(&sidebar));
         middle_pane.set_end_child(Some(&middle));
-        middle_pane.set_position(230);
 
         let main_pane = gtk::Paned::new(gtk::Orientation::Horizontal);
         main_pane.set_start_child(Some(&middle_pane));
         main_pane.set_end_child(Some(&editor_pane));
-        main_pane.set_position(560);
+
+        {
+            let tree_pane = middle_pane.clone();
+            let notes_pane = main_pane.clone();
+            window.connect_map(move |w| {
+                let ratio = {
+                    let tree_pane = tree_pane.clone();
+                    let notes_pane = notes_pane.clone();
+                    move |width: i32| {
+                        if width > 0 {
+                            tree_pane.set_position(width / 4);
+                            notes_pane.set_position(width / 2);
+                        }
+                    }
+                };
+                ratio(w.width());
+                if let Some(surface) = w.surface() {
+                    surface.connect_width_notify(move |s| ratio(s.width()));
+                }
+            });
+        }
 
         // AdwApplicationWindow manages its own titlebar; the header bar must
         // live inside the content instead.
