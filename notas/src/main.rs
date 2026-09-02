@@ -1,6 +1,8 @@
 mod app;
+mod config;
 mod db_worker;
 mod editor;
+mod settings_window;
 #[macro_use]
 mod tr;
 
@@ -8,7 +10,8 @@ use std::process::ExitCode;
 
 use relm4::RelmApp;
 
-use crate::app::App;
+use crate::app::{App, AppInit};
+use crate::config::Settings;
 
 fn main() -> ExitCode {
     // Connect to SQLite before the UI starts. The dedicated tokio runtime
@@ -31,7 +34,8 @@ fn main() -> ExitCode {
         }
     };
 
+    let settings = Settings::load();
     let relm_app = RelmApp::new("io.github.notas.Notas");
-    relm_app.run::<App>(pool);
+    relm_app.run::<App>(AppInit { pool, settings });
     ExitCode::SUCCESS
 }

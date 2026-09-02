@@ -12,12 +12,15 @@ use gtk::prelude::*;
 use libadwaita::prelude::*;
 use relm4::prelude::*;
 use relm4::{ComponentParts, ComponentSender, Controller, SimpleComponent};
+use sourceview5::prelude::*;
 use sqlx::SqlitePool;
 
 use notas_core::models::{Note, Notebook, SearchHit, Tag, TagCount};
 
+use crate::config::{Settings, ThemeMode};
 use crate::db_worker::{DbEvent, DbMsg, DbWorker};
 use crate::editor::{Editor, build_editor};
+use crate::settings_window::{SettingsWindow, build_settings_window, font_subtitle};
 use crate::tr;
 
 type AppSender = relm4::Sender<AppMsg>;
@@ -66,6 +69,12 @@ pub enum AppMsg {
     DialogDiscard,
     DialogCancel,
     CloseRequested,
+    // settings
+    OpenSettings,
+    ThemeChanged(ThemeMode),
+    FontChanged(Option<String>),
+    ToggleLineNumbers(bool),
+    ToggleStatusBar(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +92,7 @@ pub struct App {
     worker: Controller<DbWorker>,
     /// Sender used by widget closures (tag chips etc.) created after `init`.
     ui_sender: AppSender,
+    settings: Settings,
     mode: ViewMode,
     notebooks: Vec<Notebook>,
     notes: Vec<Note>,
@@ -137,10 +147,21 @@ pub struct Widgets {
     editor: Editor,
     preview_btn: gtk::ToggleButton,
     tag_editor_flow: gtk::FlowBox,
+    // bottom bar / settings
+    status_bar: gtk::Box,
+    settings_window: adw::PreferencesDialog,
+    settings_font_row: adw::ActionRow,
+    settings_reset_btn: gtk::Button,
+}
+
+/// Everything the app needs to start: the DB pool plus persisted settings.
+pub struct AppInit {
+    pub pool: SqlitePool,
+    pub settings: Settings,
 }
 
 impl SimpleComponent for App {
-    type Init = SqlitePool;
+    type Init = AppInit;
     type Input = AppMsg;
     type Output = ();
     type Widgets = ();
@@ -159,11 +180,17 @@ impl SimpleComponent for App {
         reason = "notebook sidebar uses gtk::TreeView; migrating to gtk::ColumnView is a separate UI task"
     )]
     fn init(
-        pool: Self::Init,
+        init: Self::Init,
         window: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
+        let AppInit { pool, settings } = init;
         let app_sender = sender.input_sender().clone();
+
+        // Apply the persisted color scheme before anything reads the style
+        // manager (the editor picks up its initial GtkSourceView scheme and
+        // preview palette from `is_dark()` at build time).
+        apply_theme(settings.theme.mode);
 
         let loading = Rc::new(Cell::new(false));
         let allow_close = Rc::new(Cell::new(false));
@@ -458,6 +485,21 @@ impl SimpleComponent for App {
 
         // ------------------------------------------------------------- editor
         let editor = build_editor(emit.clone(), loading.clone());
+        // The font provider must be registered on the display once; `set_font`
+        // then swaps its rule. An ID-selector rule outranks the `.monospace`
+        // class the view normally uses, and only targets this widget by name.
+        {
+            let display = gtk::prelude::WidgetExt::display(&window);
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &editor.font_provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+        }
+        editor.set_font(settings.editor.font_desc.as_deref());
+        editor
+            .source_view
+            .set_show_line_numbers(settings.editor.show_line_numbers);
 
         let title_entry = gtk::Entry::new();
         title_entry.set_placeholder_text(Some(tr!("Title")));
@@ -532,6 +574,7 @@ impl SimpleComponent for App {
         status_bar.append(&dirty_label);
         status_bar.append(&status_label);
         status_bar.append(&save_btn);
+        status_bar.set_visible(settings.interface.show_status_bar);
 
         let editor_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
         editor_pane.set_margin_all(8);
@@ -566,6 +609,7 @@ impl SimpleComponent for App {
 
         let export_btn = gtk::Button::with_label(tr!("Export Markdown…"));
         let backup_btn = gtk::Button::with_label(tr!("Backup database…"));
+        let settings_btn = gtk::Button::with_label(tr!("Settings…"));
         let quit_btn = gtk::Button::with_label(tr!("Quit"));
         {
             let s = emit.clone();
@@ -573,12 +617,15 @@ impl SimpleComponent for App {
             let s = emit.clone();
             backup_btn.connect_clicked(move |_| s(AppMsg::BackupNow));
             let s = emit.clone();
+            settings_btn.connect_clicked(move |_| s(AppMsg::OpenSettings));
+            let s = emit.clone();
             quit_btn.connect_clicked(move |_| s(AppMsg::CloseRequested));
         }
         let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
         menu_box.set_margin_all(8);
         menu_box.append(&export_btn);
         menu_box.append(&backup_btn);
+        menu_box.append(&settings_btn);
         menu_box.append(&quit_btn);
         let menu_popover = gtk::Popover::new();
         menu_popover.set_child(Some(&menu_box));
@@ -692,6 +739,14 @@ impl SimpleComponent for App {
             });
         }
 
+        // ------------------------------------------------------- settings
+        let settings_window = build_settings_window(&window, &settings, emit.clone());
+        let SettingsWindow {
+            window: settings_window,
+            font_row: settings_font_row,
+            reset_font_btn: settings_reset_btn,
+        } = settings_window;
+
         // ------------------------------------------------------------ model
         let widgets = Widgets {
             window,
@@ -711,12 +766,17 @@ impl SimpleComponent for App {
             editor,
             preview_btn,
             tag_editor_flow,
+            status_bar,
+            settings_window,
+            settings_font_row,
+            settings_reset_btn,
         };
 
         let model = App {
             widgets,
             worker,
             ui_sender: app_sender,
+            settings,
             mode: ViewMode::All,
             notebooks: Vec::new(),
             notes: Vec::new(),
@@ -972,6 +1032,38 @@ impl App {
             }
             AppMsg::BackupTo(path) => {
                 self.worker.emit(DbMsg::Backup(path));
+            }
+            AppMsg::OpenSettings => self
+                .widgets
+                .settings_window
+                .present(Some(&self.widgets.window)),
+            AppMsg::ThemeChanged(mode) => {
+                self.settings.theme.mode = mode;
+                apply_theme(mode);
+                self.settings.save();
+            }
+            AppMsg::FontChanged(font) => {
+                self.settings.editor.font_desc = font;
+                self.widgets
+                    .editor
+                    .set_font(self.settings.editor.font_desc.as_deref());
+                self.widgets
+                    .settings_font_row
+                    .set_subtitle(&font_subtitle(self.settings.editor.font_desc.as_deref()));
+                self.widgets
+                    .settings_reset_btn
+                    .set_visible(self.settings.editor.font_desc.is_some());
+                self.settings.save();
+            }
+            AppMsg::ToggleLineNumbers(on) => {
+                self.settings.editor.show_line_numbers = on;
+                self.widgets.editor.source_view.set_show_line_numbers(on);
+                self.settings.save();
+            }
+            AppMsg::ToggleStatusBar(on) => {
+                self.settings.interface.show_status_bar = on;
+                self.widgets.status_bar.set_visible(on);
+                self.settings.save();
             }
             AppMsg::DialogSave => self.save_note(),
             AppMsg::DialogDiscard => {
@@ -1402,6 +1494,18 @@ fn note_row(title: &str, subtitle: &str) -> gtk::ListBoxRow {
     vbox.append(&sub_label);
     row.set_child(Some(&vbox));
     row
+}
+
+/// Apply a color scheme to libadwaita's style manager. The editor and
+/// preview follow automatically through the `dark-notify` hook wired in
+/// `editor::build_editor`, so one call switches the whole app.
+fn apply_theme(mode: ThemeMode) {
+    let scheme = match mode {
+        ThemeMode::System => adw::ColorScheme::Default,
+        ThemeMode::Light => adw::ColorScheme::ForceLight,
+        ThemeMode::Dark => adw::ColorScheme::ForceDark,
+    };
+    adw::StyleManager::default().set_color_scheme(scheme);
 }
 
 fn unsaved_dialog(window: &adw::ApplicationWindow, sender: &AppSender) {
