@@ -51,6 +51,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 - Trash with restore / permanent delete
 - Markdown export (safety valve for the DB-only storage)
 - One-click SQLite backup (`VACUUM INTO`)
+- Settings (☰ menu → Settings…): theme (follow system / light / dark,
+  applied immediately), editor font picker, line-number gutter, status bar
+  — persisted to `$XDG_CONFIG_HOME/notas/settings.json`
 - Keyboard shortcuts: Ctrl+N new note, Ctrl+S save, Ctrl+F find, Ctrl+Shift+F
   search notes, Ctrl+E preview, F3 next match, Ctrl+Q quit
 
