@@ -13,10 +13,17 @@ async fn notebook_note_roundtrip_and_search() {
     let (pool, _dir) = test_pool().await;
 
     let nb = repo::create_notebook(&pool, None, "Work").await.unwrap();
-    let note = repo::create_note(&pool, Some(nb.id), "Meeting notes").await.unwrap();
-    repo::update_note(&pool, note.id, "Meeting notes", "# Agenda\n- Discuss the **budget**")
+    let note = repo::create_note(&pool, Some(nb.id), "Meeting notes")
         .await
         .unwrap();
+    repo::update_note(
+        &pool,
+        note.id,
+        "Meeting notes",
+        "# Agenda\n- Discuss the **budget**",
+    )
+    .await
+    .unwrap();
 
     let got = repo::get_note(&pool, note.id).await.unwrap().unwrap();
     assert_eq!(got.title, "Meeting notes");
@@ -33,7 +40,12 @@ async fn notebook_note_roundtrip_and_search() {
     assert_eq!(listed.len(), 1);
 
     // search is empty for a miss
-    assert!(repo::search(&pool, "nonexistenttermxyz").await.unwrap().is_empty());
+    assert!(
+        repo::search(&pool, "nonexistenttermxyz")
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -74,7 +86,9 @@ async fn tags_crud() {
     assert!(counts.iter().all(|t| t.note_count == 1));
 
     // removing a tag
-    repo::set_note_tags(&pool, note.id, &["rust".to_string()]).await.unwrap();
+    repo::set_note_tags(&pool, note.id, &["rust".to_string()])
+        .await
+        .unwrap();
     assert_eq!(repo::get_note_tags(&pool, note.id).await.unwrap().len(), 1);
 }
 
@@ -82,9 +96,15 @@ async fn tags_crud() {
 async fn export_markdown_writes_files() {
     let (pool, dir) = test_pool().await;
 
-    let nb = repo::create_notebook(&pool, None, "My Notebook").await.unwrap();
-    let note = repo::create_note(&pool, Some(nb.id), "Hello world").await.unwrap();
-    repo::update_note(&pool, note.id, "Hello world", "Body text").await.unwrap();
+    let nb = repo::create_notebook(&pool, None, "My Notebook")
+        .await
+        .unwrap();
+    let note = repo::create_note(&pool, Some(nb.id), "Hello world")
+        .await
+        .unwrap();
+    repo::update_note(&pool, note.id, "Hello world", "Body text")
+        .await
+        .unwrap();
 
     let out = dir.path().join("export");
     let count = repo::export_markdown(&pool, &out).await.unwrap();
