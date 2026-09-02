@@ -5,9 +5,12 @@ edition.workspace = true
 description = "Core data layer for Notas: schema, repository, search (no GTK)"
 
 [dependencies]
-anyhow = "1"
+thiserror.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

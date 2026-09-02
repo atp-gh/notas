@@ -8,17 +8,19 @@ use std::path::Path;
 
 use sqlx::{AssertSqlSafe, FromRow, SqlitePool};
 
-use crate::models::{Notebook, Note, SearchHit, Tag, TagCount};
+use crate::Result;
+use crate::models::{Note, Notebook, SearchHit, Tag, TagCount};
 
 // ---------------------------------------------------------------------------
 // Notebooks
 // ---------------------------------------------------------------------------
 
+/// Insert a notebook and return the created row.
 pub async fn create_notebook(
     pool: &SqlitePool,
     parent_id: Option<i64>,
     name: &str,
-) -> anyhow::Result<Notebook> {
+) -> Result<Notebook> {
     let row = sqlx::query(
         "INSERT INTO notebooks (parent_id, name) VALUES (?, ?) RETURNING \
          id, parent_id, name, created_at, updated_at",
@@ -30,7 +32,8 @@ pub async fn create_notebook(
     Ok(Notebook::from_row(&row)?)
 }
 
-pub async fn rename_notebook(pool: &SqlitePool, id: i64, name: &str) -> anyhow::Result<()> {
+/// Rename a notebook and bump its `updated_at`.
+pub async fn rename_notebook(pool: &SqlitePool, id: i64, name: &str) -> Result<()> {
     sqlx::query("UPDATE notebooks SET name = ?, updated_at = datetime('now') WHERE id = ?")
         .bind(name)
         .bind(id)
@@ -39,7 +42,9 @@ pub async fn rename_notebook(pool: &SqlitePool, id: i64, name: &str) -> anyhow::
     Ok(())
 }
 
-pub async fn delete_notebook(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
+/// Delete a notebook. Nested notebooks cascade; its notes become unfiled
+/// (`notebook_id` is set to NULL by the schema).
+pub async fn delete_notebook(pool: &SqlitePool, id: i64) -> Result<()> {
     sqlx::query("DELETE FROM notebooks WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -47,7 +52,8 @@ pub async fn delete_notebook(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn list_notebooks(pool: &SqlitePool) -> anyhow::Result<Vec<Notebook>> {
+/// All notebooks, sorted by name.
+pub async fn list_notebooks(pool: &SqlitePool) -> Result<Vec<Notebook>> {
     let rows = sqlx::query_as::<_, Notebook>(
         "SELECT id, parent_id, name, created_at, updated_at FROM notebooks ORDER BY name",
     )
@@ -60,11 +66,8 @@ pub async fn list_notebooks(pool: &SqlitePool) -> anyhow::Result<Vec<Notebook>> 
 // Notes
 // ---------------------------------------------------------------------------
 
-pub async fn create_note(
-    pool: &SqlitePool,
-    notebook_id: Option<i64>,
-    title: &str,
-) -> anyhow::Result<Note> {
+/// Insert a note (with the given title) and return the created row.
+pub async fn create_note(pool: &SqlitePool, notebook_id: Option<i64>, title: &str) -> Result<Note> {
     let row = sqlx::query(
         "INSERT INTO notes (notebook_id, title) VALUES (?, ?) RETURNING \
          id, notebook_id, title, content, is_trashed, created_at, updated_at",
@@ -76,7 +79,8 @@ pub async fn create_note(
     Ok(Note::from_row(&row)?)
 }
 
-pub async fn get_note(pool: &SqlitePool, id: i64) -> anyhow::Result<Option<Note>> {
+/// Fetch a single note by id, if it exists.
+pub async fn get_note(pool: &SqlitePool, id: i64) -> Result<Option<Note>> {
     let note = sqlx::query_as::<_, Note>(
         "SELECT id, notebook_id, title, content, is_trashed, created_at, updated_at \
          FROM notes WHERE id = ?",
@@ -88,12 +92,7 @@ pub async fn get_note(pool: &SqlitePool, id: i64) -> anyhow::Result<Option<Note>
 }
 
 /// Update title + content; the FTS index is kept in sync by trigger `notes_au`.
-pub async fn update_note(
-    pool: &SqlitePool,
-    id: i64,
-    title: &str,
-    content: &str,
-) -> anyhow::Result<()> {
+pub async fn update_note(pool: &SqlitePool, id: i64, title: &str, content: &str) -> Result<()> {
     sqlx::query(
         "UPDATE notes SET title = ?, content = ?, updated_at = datetime('now') WHERE id = ?",
     )
@@ -105,7 +104,8 @@ pub async fn update_note(
     Ok(())
 }
 
-pub async fn trash_note(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
+/// Move a note to the trash.
+pub async fn trash_note(pool: &SqlitePool, id: i64) -> Result<()> {
     sqlx::query("UPDATE notes SET is_trashed = 1, updated_at = datetime('now') WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -113,7 +113,8 @@ pub async fn trash_note(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn restore_note(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
+/// Restore a trashed note.
+pub async fn restore_note(pool: &SqlitePool, id: i64) -> Result<()> {
     sqlx::query("UPDATE notes SET is_trashed = 0, updated_at = datetime('now') WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -122,7 +123,7 @@ pub async fn restore_note(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
 }
 
 /// Physically delete a note (FTS row removed by trigger `notes_ad`).
-pub async fn delete_note_forever(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
+pub async fn delete_note_forever(pool: &SqlitePool, id: i64) -> Result<()> {
     sqlx::query("DELETE FROM notes WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -130,7 +131,8 @@ pub async fn delete_note_forever(pool: &SqlitePool, id: i64) -> anyhow::Result<(
     Ok(())
 }
 
-pub async fn list_notes(pool: &SqlitePool, notebook_id: i64) -> anyhow::Result<Vec<Note>> {
+/// Non-trashed notes of one notebook, newest first.
+pub async fn list_notes(pool: &SqlitePool, notebook_id: i64) -> Result<Vec<Note>> {
     let rows = sqlx::query_as::<_, Note>(
         "SELECT id, notebook_id, title, content, is_trashed, created_at, updated_at \
          FROM notes WHERE notebook_id = ? AND is_trashed = 0 \
@@ -143,7 +145,7 @@ pub async fn list_notes(pool: &SqlitePool, notebook_id: i64) -> anyhow::Result<V
 }
 
 /// All non-trashed notes across every notebook, newest first.
-pub async fn list_all_notes(pool: &SqlitePool) -> anyhow::Result<Vec<Note>> {
+pub async fn list_all_notes(pool: &SqlitePool) -> Result<Vec<Note>> {
     let rows = sqlx::query_as::<_, Note>(
         "SELECT id, notebook_id, title, content, is_trashed, created_at, updated_at \
          FROM notes WHERE is_trashed = 0 ORDER BY updated_at DESC",
@@ -154,7 +156,7 @@ pub async fn list_all_notes(pool: &SqlitePool) -> anyhow::Result<Vec<Note>> {
 }
 
 /// All non-trashed notes carrying a given tag, newest first.
-pub async fn list_notes_by_tag(pool: &SqlitePool, tag_id: i64) -> anyhow::Result<Vec<Note>> {
+pub async fn list_notes_by_tag(pool: &SqlitePool, tag_id: i64) -> Result<Vec<Note>> {
     let rows = sqlx::query_as::<_, Note>(
         "SELECT n.id, n.notebook_id, n.title, n.content, n.is_trashed, n.created_at, n.updated_at \
          FROM notes n \
@@ -169,7 +171,7 @@ pub async fn list_notes_by_tag(pool: &SqlitePool, tag_id: i64) -> anyhow::Result
 }
 
 /// Notes whose notebook was deleted (notebook_id is NULL) but not trashed.
-pub async fn list_unfiled_notes(pool: &SqlitePool) -> anyhow::Result<Vec<Note>> {
+pub async fn list_unfiled_notes(pool: &SqlitePool) -> Result<Vec<Note>> {
     let rows = sqlx::query_as::<_, Note>(
         "SELECT id, notebook_id, title, content, is_trashed, created_at, updated_at \
          FROM notes WHERE notebook_id IS NULL AND is_trashed = 0 ORDER BY updated_at DESC",
@@ -179,7 +181,8 @@ pub async fn list_unfiled_notes(pool: &SqlitePool) -> anyhow::Result<Vec<Note>> 
     Ok(rows)
 }
 
-pub async fn list_trashed(pool: &SqlitePool) -> anyhow::Result<Vec<Note>> {
+/// Trashed notes, newest first.
+pub async fn list_trashed(pool: &SqlitePool) -> Result<Vec<Note>> {
     let rows = sqlx::query_as::<_, Note>(
         "SELECT id, notebook_id, title, content, is_trashed, created_at, updated_at \
          FROM notes WHERE is_trashed = 1 ORDER BY updated_at DESC",
@@ -203,7 +206,8 @@ fn fts_query(user_input: &str) -> String {
         .join(" ")
 }
 
-pub async fn search(pool: &SqlitePool, query: &str) -> anyhow::Result<Vec<SearchHit>> {
+/// Full-text search over title + content, newest first, capped at 200 hits.
+pub async fn search(pool: &SqlitePool, query: &str) -> Result<Vec<SearchHit>> {
     let match_expr = fts_query(query);
     if match_expr.trim().is_empty() {
         return Ok(Vec::new());
@@ -226,7 +230,8 @@ pub async fn search(pool: &SqlitePool, query: &str) -> anyhow::Result<Vec<Search
 // Tags
 // ---------------------------------------------------------------------------
 
-pub async fn list_tags(pool: &SqlitePool) -> anyhow::Result<Vec<TagCount>> {
+/// All tags with the number of notes using each, sorted by name.
+pub async fn list_tags(pool: &SqlitePool) -> Result<Vec<TagCount>> {
     let rows = sqlx::query_as::<_, TagCount>(
         "SELECT t.id, t.name, COUNT(nt.note_id) AS note_count \
          FROM tags t LEFT JOIN note_tags nt ON nt.tag_id = t.id \
@@ -237,7 +242,8 @@ pub async fn list_tags(pool: &SqlitePool) -> anyhow::Result<Vec<TagCount>> {
     Ok(rows)
 }
 
-pub async fn get_note_tags(pool: &SqlitePool, note_id: i64) -> anyhow::Result<Vec<Tag>> {
+/// The tags attached to one note, sorted by name.
+pub async fn get_note_tags(pool: &SqlitePool, note_id: i64) -> Result<Vec<Tag>> {
     let rows = sqlx::query_as::<_, Tag>(
         "SELECT t.id, t.name FROM tags t \
          JOIN note_tags nt ON nt.tag_id = t.id \
@@ -250,7 +256,7 @@ pub async fn get_note_tags(pool: &SqlitePool, note_id: i64) -> anyhow::Result<Ve
 }
 
 /// Replace the tag set of a note. Tags are created on demand.
-pub async fn set_note_tags(pool: &SqlitePool, note_id: i64, names: &[String]) -> anyhow::Result<()> {
+pub async fn set_note_tags(pool: &SqlitePool, note_id: i64, names: &[String]) -> Result<()> {
     let mut tx = pool.begin().await?;
 
     sqlx::query("DELETE FROM note_tags WHERE note_id = ?")
@@ -267,11 +273,10 @@ pub async fn set_note_tags(pool: &SqlitePool, note_id: i64, names: &[String]) ->
             .bind(name)
             .execute(&mut *tx)
             .await?;
-        let tag_id: i64 =
-            sqlx::query_scalar("SELECT id FROM tags WHERE name = ?")
-                .bind(name)
-                .fetch_one(&mut *tx)
-                .await?;
+        let tag_id: i64 = sqlx::query_scalar("SELECT id FROM tags WHERE name = ?")
+            .bind(name)
+            .fetch_one(&mut *tx)
+            .await?;
         sqlx::query("INSERT OR IGNORE INTO note_tags (note_id, tag_id) VALUES (?, ?)")
             .bind(note_id)
             .bind(tag_id)
@@ -283,7 +288,18 @@ pub async fn set_note_tags(pool: &SqlitePool, note_id: i64, names: &[String]) ->
     Ok(())
 }
 
-pub async fn delete_tag(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
+/// Rename a tag. The `tags.name` UNIQUE constraint rejects colliding names.
+pub async fn rename_tag(pool: &SqlitePool, id: i64, name: &str) -> Result<()> {
+    sqlx::query("UPDATE tags SET name = ? WHERE id = ?")
+        .bind(name)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Delete a tag; its `note_tags` links are removed by CASCADE.
+pub async fn delete_tag(pool: &SqlitePool, id: i64) -> Result<()> {
     sqlx::query("DELETE FROM tags WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -298,7 +314,13 @@ pub async fn delete_tag(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
 fn sanitize_filename(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let trimmed = cleaned.trim().trim_matches('-');
     if trimmed.is_empty() {
@@ -310,8 +332,8 @@ fn sanitize_filename(name: &str) -> String {
 
 /// Export every non-trashed note as `.md` files, grouped into notebook
 /// subdirectories. The file name is the note title; collisions get a
-/// numeric suffix.
-pub async fn export_markdown(pool: &SqlitePool, out_dir: &Path) -> anyhow::Result<usize> {
+/// numeric suffix. Returns the number of notes written.
+pub async fn export_markdown(pool: &SqlitePool, out_dir: &Path) -> Result<usize> {
     use std::collections::HashMap;
 
     tokio::fs::create_dir_all(out_dir).await?;
@@ -364,7 +386,7 @@ pub async fn export_markdown(pool: &SqlitePool, out_dir: &Path) -> anyhow::Resul
 
 /// Create a consistent snapshot of the database at `dest` using
 /// `VACUUM INTO` (SQLite >= 3.27).
-pub async fn backup(pool: &SqlitePool, dest: &Path) -> anyhow::Result<()> {
+pub async fn backup(pool: &SqlitePool, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -375,8 +397,6 @@ pub async fn backup(pool: &SqlitePool, dest: &Path) -> anyhow::Result<()> {
     // string literal; audited safe, hence `AssertSqlSafe`.
     let escaped = dest.to_string_lossy().replace('\'', "''");
     let sql = format!("VACUUM INTO '{}'", escaped);
-    sqlx::query(AssertSqlSafe(sql))
-        .execute(pool)
-        .await?;
+    sqlx::query(AssertSqlSafe(sql)).execute(pool).await?;
     Ok(())
 }

@@ -9,3 +9,10 @@ edition = "2024"
 [workspace.dependencies]
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+thiserror = "2"
+
+# Shared lint policy for the whole workspace. `all` matches the default clippy
+# set verified by CI (`-D warnings`); pedantic/restriction lints are applied
+# per-site with `#[expect(...)]` where they earn their keep.
+[workspace.lints.clippy]
+all = "warn"

@@ -1,5 +1,7 @@
 //! SQLite schema definition.
 
+/// Idempotent DDL: tables, indexes, the FTS5 index and its sync triggers.
+/// Safe to run on every start-up.
 pub const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS notebooks (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
