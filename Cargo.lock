@@ -932,6 +932,8 @@ dependencies = [
  "pango",
  "pulldown-cmark",
  "relm4",
+ "serde",
+ "serde_json",
  "sourceview5",
  "sqlx",
  "tokio",
