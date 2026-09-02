@@ -11,19 +11,27 @@ use relm4::RelmApp;
 use crate::app::App;
 
 fn main() -> ExitCode {
+    // Connect to SQLite before the UI starts. The dedicated tokio runtime
+    // must outlive the app: the DB worker and the sqlx pool keep running
+    // tasks on it for as long as the window is open. Merely keeping `rt` in
+    // scope is enough here, because `RelmApp::run` blocks until the app
+    // exits (no need to leak it with `mem::forget`).
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("failed to create tokio runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let pool = match rt.block_on(notas_core::db::connect(notas_core::db::db_path())) {
+        Ok(pool) => pool,
+        Err(e) => {
+            eprintln!("failed to open database: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let relm_app = RelmApp::new("io.github.notas.Notas");
-
-    // Connect to SQLite before the UI starts. The runtime is intentionally
-    // leaked: sqlx may keep background tasks alive on it for the pool.
-    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-    let pool = rt
-        .block_on(notas_core::db::connect(notas_core::db::db_path()))
-        .unwrap_or_else(|e| {
-            eprintln!("failed to open database: {e:#}");
-            std::process::exit(1);
-        });
-    std::mem::forget(rt);
-
     relm_app.run::<App>(pool);
     ExitCode::SUCCESS
 }
