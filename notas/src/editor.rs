@@ -177,8 +177,16 @@ impl PreviewTags {
     pub fn apply_theme(&self, dark: bool, accent: &gtk::gdk::RGBA) {
         let accent_hex = rgba_to_hex(accent);
         let text_hex = if dark { "#c8c8c8" } else { "#8f8f8f" };
-        let quote_bg = if dark { "rgba(255,255,255,0.06)" } else { "rgba(0,0,0,0.05)" };
-        let code_bg = if dark { "rgba(255,255,255,0.10)" } else { "rgba(127,127,127,0.18)" };
+        let quote_bg = if dark {
+            "rgba(255,255,255,0.06)"
+        } else {
+            "rgba(0,0,0,0.05)"
+        };
+        let code_bg = if dark {
+            "rgba(255,255,255,0.10)"
+        } else {
+            "rgba(127,127,127,0.18)"
+        };
 
         for h in [&self.h1, &self.h2, &self.h3] {
             h.set_property("foreground", accent_hex.as_str());
@@ -198,12 +206,10 @@ impl PreviewTags {
 pub struct Editor {
     pub source_view: sourceview5::View,
     pub source_buffer: sourceview5::Buffer,
-    pub preview_view: gtk::TextView,
     pub preview_buffer: gtk::TextBuffer,
     pub stack: gtk::Stack,
     pub search_bar: gtk::SearchBar,
     pub search_entry: gtk::SearchEntry,
-    pub replace_entry: gtk::Entry,
     pub search_context: sourceview5::SearchContext,
     search_settings: sourceview5::SearchSettings,
     preview_tags: Rc<PreviewTags>,
@@ -259,18 +265,17 @@ impl Editor {
         let buffer = &self.source_buffer;
         let mut iter = buffer.start_iter();
         let mut count = 0;
-        loop {
-            match self.search_context.forward(&iter) {
-                Some((start, end, _wrapped)) => {
-                    let mut s = start;
-                    let mut e = end;
-                    if self.search_context.replace(&mut s, &mut e, replacement).is_ok() {
-                        count += 1;
-                    }
-                    iter = e;
-                }
-                None => break,
+        while let Some((start, end, _wrapped)) = self.search_context.forward(&iter) {
+            let mut s = start;
+            let mut e = end;
+            if self
+                .search_context
+                .replace(&mut s, &mut e, replacement)
+                .is_ok()
+            {
+                count += 1;
             }
+            iter = e;
         }
         count
     }
@@ -358,13 +363,13 @@ where
         let view = preview_view.clone();
         let gesture = gtk::GestureClick::new();
         gesture.connect_pressed(move |_g, _n, x, y| {
-            if let Some(iter) = view.iter_at_location(x as i32, y as i32) {
-                if let Some(url) = tags.link_url_at(iter.offset()) {
-                    let _ = gtk::gio::AppInfo::launch_default_for_uri(
-                        &url,
-                        None::<&gtk::gio::AppLaunchContext>,
-                    );
-                }
+            if let Some(iter) = view.iter_at_location(x as i32, y as i32)
+                && let Some(url) = tags.link_url_at(iter.offset())
+            {
+                let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                    &url,
+                    None::<&gtk::gio::AppLaunchContext>,
+                );
             }
         });
         preview_view.add_controller(gesture);
@@ -458,12 +463,10 @@ where
     Editor {
         source_view,
         source_buffer,
-        preview_view,
         preview_buffer,
         stack,
         search_bar,
         search_entry,
-        replace_entry,
         search_context,
         search_settings,
         preview_tags,
@@ -712,17 +715,8 @@ impl Renderer {
                 self.code_buf = Some(String::new());
                 self.code_lang = match kind {
                     CodeBlockKind::Fenced(info) => {
-                        let lang = info
-                            .trim()
-                            .split_whitespace()
-                            .next()
-                            .unwrap_or("")
-                            .to_string();
-                        if lang.is_empty() {
-                            None
-                        } else {
-                            Some(lang)
-                        }
+                        let lang = info.split_whitespace().next().unwrap_or("").to_string();
+                        if lang.is_empty() { None } else { Some(lang) }
                     }
                     CodeBlockKind::Indented => None,
                 };
@@ -1125,7 +1119,10 @@ mod tests {
             .expect("link span");
         assert_eq!(link.url.as_deref(), Some("https://x.org"));
         assert_eq!(
-            spans.iter().find(|s| s.text == "plain").and_then(|s| s.url.as_deref()),
+            spans
+                .iter()
+                .find(|s| s.text == "plain")
+                .and_then(|s| s.url.as_deref()),
             None
         );
     }
@@ -1133,20 +1130,26 @@ mod tests {
     #[test]
     fn link_style_applied_to_link_text() {
         let spans = build_spans("[text](https://x.org)");
-        assert!(spans
-            .iter()
-            .any(|s| s.text == "text" && s.styles.contains(&Style::Link)));
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.text == "text" && s.styles.contains(&Style::Link))
+        );
     }
 
     #[test]
     fn inline_styles_carry_context() {
         let spans = build_spans("**b** and `c`");
-        assert!(spans
-            .iter()
-            .any(|s| s.text == "b" && s.styles.contains(&Style::Bold)));
-        assert!(spans
-            .iter()
-            .any(|s| s.text == "c" && s.styles.contains(&Style::Code)));
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.text == "b" && s.styles.contains(&Style::Bold))
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.text == "c" && s.styles.contains(&Style::Code))
+        );
 
         let spans = build_spans("# Head with `code`");
         assert!(spans.iter().any(|s| s.text == "code"
@@ -1194,7 +1197,10 @@ mod tests {
             ctx.iteration(false);
         }
 
-        let adj = editor.source_view.vadjustment().expect("source vadjustment");
+        let adj = editor
+            .source_view
+            .vadjustment()
+            .expect("source vadjustment");
         let range = adj.upper() - adj.page_size();
         println!(
             "source view: upper={:.1} page={:.1} value={:.1} range={:.1}",
@@ -1214,7 +1220,14 @@ mod tests {
         for _ in 0..50 {
             ctx.iteration(false);
         }
-        let preview_adj = editor.preview_view.vadjustment().expect("preview vadjustment");
+        let preview_view = editor
+            .stack
+            .child_by_name("preview")
+            .and_then(|w| w.downcast::<gtk::ScrolledWindow>().ok())
+            .and_then(|s| s.child())
+            .and_then(|w| w.downcast::<gtk::TextView>().ok())
+            .expect("preview scrolled window");
+        let preview_adj = preview_view.vadjustment().expect("preview vadjustment");
         let preview_range = preview_adj.upper() - preview_adj.page_size();
         println!(
             "preview view: upper={:.1} page={:.1} value={:.1} range={:.1}",
@@ -1223,7 +1236,10 @@ mod tests {
             preview_adj.value(),
             preview_range
         );
-        assert!(preview_adj.page_size() > 100.0, "preview viewport must have real height");
+        assert!(
+            preview_adj.page_size() > 100.0,
+            "preview viewport must have real height"
+        );
         assert!(preview_range > 0.0, "long preview must be scrollable");
     }
 
@@ -1235,8 +1251,14 @@ mod tests {
         gtk::init().expect("gtk init");
         adw::init().expect("adw init");
         let editor = build_editor(|_| {}, Rc::new(Cell::new(false)));
-        assert!(editor.source_view.is_editable(), "source view must be editable");
-        assert!(editor.source_view.is_sensitive(), "source view must be sensitive");
+        assert!(
+            editor.source_view.is_editable(),
+            "source view must be editable"
+        );
+        assert!(
+            editor.source_view.is_sensitive(),
+            "source view must be sensitive"
+        );
         assert_eq!(
             editor.stack.visible_child_name().as_deref(),
             Some("source"),
@@ -1254,7 +1276,10 @@ mod tests {
         // The syntax highlighting scheme follows the libadwaita theme.
         let dark = adw::StyleManager::default().is_dark();
         let expected = if dark { "Adwaita-dark" } else { "Adwaita" };
-        let scheme = editor.source_buffer.style_scheme().map(|s| s.id().to_string());
+        let scheme = editor
+            .source_buffer
+            .style_scheme()
+            .map(|s| s.id().to_string());
         assert_eq!(scheme.as_deref(), Some(expected));
     }
 
@@ -1268,7 +1293,7 @@ mod tests {
         let tags = PreviewTags::new(&buffer);
         let view = gtk::TextView::new();
         let css = gtk::CssProvider::new();
-        css.load_from_data("textview { background: #123456; }");
+        css.load_from_string("textview { background: #123456; }");
         gtk::style_context_add_provider_for_display(
             &gtk::gdk::Display::default().expect("display"),
             &css,

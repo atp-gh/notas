@@ -14,10 +14,10 @@ use relm4::prelude::*;
 use relm4::{ComponentParts, ComponentSender, Controller, SimpleComponent};
 use sqlx::SqlitePool;
 
-use notas_core::models::{Note, Notebook, SearchHit, TagCount};
+use notas_core::models::{Note, Notebook, SearchHit, Tag, TagCount};
 
 use crate::db_worker::{DbEvent, DbMsg, DbWorker};
-use crate::editor::{build_editor, Editor};
+use crate::editor::{Editor, build_editor};
 use crate::tr;
 
 type AppSender = relm4::Sender<AppMsg>;
@@ -88,7 +88,7 @@ pub struct App {
     notes: Vec<Note>,
     trashed: Vec<Note>,
     tags: Vec<TagCount>,
-    note_tags: Vec<notas_core::models::Tag>,
+    note_tags: Vec<Tag>,
     current_note: Option<i64>,
     saved_title: String,
     saved_content: String,
@@ -105,10 +105,17 @@ pub struct App {
     allow_close: Rc<Cell<bool>>,
     suppress_selection: Rc<Cell<bool>>,
     suppress_tag_toggle: Rc<Cell<bool>>,
-    pending_nb: Rc<Cell<i64>>,
     pending_tag: Rc<Cell<i64>>,
 }
 
+/// Widget handles the message handlers touch. Widgets that are created and
+/// wired up in `init` but never touched again (sidebar list, tag entry)
+/// intentionally stay local to `init`; GTK keeps them alive through the
+/// parent/child references.
+#[expect(
+    deprecated,
+    reason = "notebook sidebar uses gtk::TreeView; migrating to gtk::ColumnView is a separate UI task"
+)]
 pub struct Widgets {
     window: adw::ApplicationWindow,
     dirty_label: gtk::Label,
@@ -116,7 +123,6 @@ pub struct Widgets {
     save_btn: gtk::Button,
     // sidebar
     search_entry: gtk::SearchEntry,
-    view_list: gtk::ListBox,
     notebook_store: gtk::TreeStore,
     tag_flow: gtk::FlowBox,
     tag_menu: gtk::Popover,
@@ -131,7 +137,6 @@ pub struct Widgets {
     editor: Editor,
     preview_btn: gtk::ToggleButton,
     tag_editor_flow: gtk::FlowBox,
-    tag_entry: gtk::Entry,
 }
 
 impl SimpleComponent for App {
@@ -149,6 +154,10 @@ impl SimpleComponent for App {
             .build()
     }
 
+    #[expect(
+        deprecated,
+        reason = "notebook sidebar uses gtk::TreeView; migrating to gtk::ColumnView is a separate UI task"
+    )]
     fn init(
         pool: Self::Init,
         window: Self::Root,
@@ -167,7 +176,7 @@ impl SimpleComponent for App {
 
         let worker: Controller<DbWorker> = relm4::ComponentBuilder::<DbWorker>::default()
             .launch(pool)
-            .forward(&app_sender, |e| AppMsg::Db(e));
+            .forward(&app_sender, AppMsg::Db);
 
         let emit = {
             let s = app_sender.clone();
@@ -263,11 +272,11 @@ impl SimpleComponent for App {
         {
             let emit = emit.clone();
             notebook_tree.connect_row_activated(move |tree, path, _col| {
-                if let Some(model) = tree.model() {
-                    if let Some(iter) = model.iter(&path) {
-                        let id: i64 = model.get_value(&iter, 0).get().unwrap_or(0);
-                        emit(AppMsg::SelectNotebook(id));
-                    }
+                if let Some(model) = tree.model()
+                    && let Some(iter) = model.iter(path)
+                {
+                    let id: i64 = model.get_value(&iter, 0).get().unwrap_or(0);
+                    emit(AppMsg::SelectNotebook(id));
                 }
             });
         }
@@ -314,17 +323,15 @@ impl SimpleComponent for App {
             let gesture = gtk::GestureClick::new();
             gesture.set_button(3);
             gesture.connect_pressed(move |_g, _n, x, y| {
-                if let Some((path, _col, _x, _y)) = tree.path_at_pos(x as i32, y as i32) {
-                    if let Some(path) = path {
-                        if let Some(model) = tree.model() {
-                            if let Some(iter) = model.iter(&path) {
-                                let id: i64 = model.get_value(&iter, 0).get().unwrap_or(0);
-                                pending.set(id);
-                                menu.set_parent(&tree);
-                                menu.present();
-                            }
-                        }
-                    }
+                if let Some((path, _col, _x, _y)) = tree.path_at_pos(x as i32, y as i32)
+                    && let Some(path) = path
+                    && let Some(model) = tree.model()
+                    && let Some(iter) = model.iter(&path)
+                {
+                    let id: i64 = model.get_value(&iter, 0).get().unwrap_or(0);
+                    pending.set(id);
+                    menu.set_parent(&tree);
+                    menu.present();
                 }
             });
             notebook_tree.add_controller(gesture);
@@ -483,14 +490,12 @@ impl SimpleComponent for App {
                         .ok()
                         .and_then(|c| c.child())
                         .and_then(|w| w.downcast::<gtk::Button>().ok())
-                    {
-                        if let Some(label) =
+                        && let Some(label) =
                             btn.child().and_then(|w| w.downcast::<gtk::Label>().ok())
-                        {
-                            let text = label.text().to_string();
-                            if let Some(stripped) = text.strip_prefix("× ") {
-                                names.push(stripped.to_string());
-                            }
+                    {
+                        let text = label.text().to_string();
+                        if let Some(stripped) = text.strip_prefix("× ") {
+                            names.push(stripped.to_string());
                         }
                     }
                     child = next;
@@ -694,7 +699,6 @@ impl SimpleComponent for App {
             status_label,
             save_btn,
             search_entry,
-            view_list,
             notebook_store,
             tag_flow,
             tag_menu,
@@ -707,7 +711,6 @@ impl SimpleComponent for App {
             editor,
             preview_btn,
             tag_editor_flow,
-            tag_entry,
         };
 
         let model = App {
@@ -736,7 +739,6 @@ impl SimpleComponent for App {
             allow_close,
             suppress_selection,
             suppress_tag_toggle,
-            pending_nb,
             pending_tag,
         };
 
@@ -745,10 +747,7 @@ impl SimpleComponent for App {
         model.worker.emit(DbMsg::LoadTags);
         model.worker.emit(DbMsg::LoadAll);
 
-        ComponentParts {
-            model,
-            widgets: (),
-        }
+        ComponentParts { model, widgets: () }
     }
 
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
@@ -943,10 +942,10 @@ impl App {
                     Some(&self.widgets.window),
                     None::<&gtk::gio::Cancellable>,
                     move |result| {
-                        if let Ok(file) = result {
-                            if let Some(path) = file.path() {
-                                let _ = s.send(AppMsg::ExportTo(path));
-                            }
+                        if let Ok(file) = result
+                            && let Some(path) = file.path()
+                        {
+                            let _ = s.send(AppMsg::ExportTo(path));
                         }
                     },
                 );
@@ -963,10 +962,10 @@ impl App {
                     Some(&self.widgets.window),
                     None::<&gtk::gio::Cancellable>,
                     move |result| {
-                        if let Ok(file) = result {
-                            if let Some(path) = file.path() {
-                                let _ = s.send(AppMsg::BackupTo(path));
-                            }
+                        if let Ok(file) = result
+                            && let Some(path) = file.path()
+                        {
+                            let _ = s.send(AppMsg::BackupTo(path));
                         }
                     },
                 );
@@ -1078,7 +1077,13 @@ impl App {
                 }
                 self.refresh_current_list();
             }
-            DbEvent::NoteRestored { .. } | DbEvent::NoteDeletedForever { .. } => {
+            DbEvent::NoteRestored { id } | DbEvent::NoteDeletedForever { id } => {
+                // Drop the note from our cached trash list so the selection
+                // state stays consistent until the reload below lands.
+                self.trashed.retain(|n| n.id != id);
+                if self.selected_trashed == Some(id) {
+                    self.selected_trashed = None;
+                }
                 self.refresh_current_list();
             }
             DbEvent::DataChanged => {
@@ -1126,8 +1131,7 @@ impl App {
             let title = self.current_title();
             let content = self.current_content();
             if title != self.saved_title || content != self.saved_content {
-                self.worker
-                    .emit(DbMsg::UpdateNote { id, title, content });
+                self.worker.emit(DbMsg::UpdateNote { id, title, content });
             } else {
                 self.resolve_saved();
             }
@@ -1170,9 +1174,7 @@ impl App {
             self.widgets.dirty_label.set_text(tr!("● Unsaved changes"));
             self.widgets.dirty_label.add_css_class("error");
         } else {
-            self.widgets
-                .dirty_label
-                .set_text(tr!("All changes saved"));
+            self.widgets.dirty_label.set_text(tr!("All changes saved"));
             self.widgets.dirty_label.remove_css_class("error");
         }
     }
@@ -1224,6 +1226,10 @@ impl App {
 
     // ------------------------------------------------------------ rebuilds
 
+    #[expect(
+        deprecated,
+        reason = "notebook sidebar uses gtk::TreeView; migrating to gtk::ColumnView is a separate UI task"
+    )]
     fn rebuild_notebook_tree(&self) {
         self.widgets.notebook_store.clear();
         let mut iters: std::collections::HashMap<i64, gtk::TreeIter> =
@@ -1303,6 +1309,8 @@ impl App {
                 .notes_list
                 .append(&note_row(&note.title, &note.updated_at));
         }
+        // Release the `row_ids` guard before re-borrowing it in
+        // `select_note_row`; without this the RefCell panics.
         drop(ids);
 
         if let Some(id) = self.current_note {
@@ -1326,10 +1334,10 @@ impl App {
 
     fn select_note_row(&self, id: i64) {
         self.suppress_selection.set(true);
-        if let Some(idx) = self.row_ids.borrow().iter().position(|&x| x == id) {
-            if let Some(row) = self.widgets.notes_list.row_at_index(idx as i32) {
-                self.widgets.notes_list.select_row(Some(&row));
-            }
+        if let Some(idx) = self.row_ids.borrow().iter().position(|&x| x == id)
+            && let Some(row) = self.widgets.notes_list.row_at_index(idx as i32)
+        {
+            self.widgets.notes_list.select_row(Some(&row));
         }
         self.suppress_selection.set(false);
     }
@@ -1345,12 +1353,9 @@ impl App {
             let current = self.current_note;
             let tag_name = tag.name.clone();
             chip.connect_clicked(move |_| {
-                if let Some(_note_id) = current {
-                    let remaining: Vec<String> = names
-                        .iter()
-                        .filter(|n| **n != tag_name)
-                        .cloned()
-                        .collect();
+                if current.is_some() {
+                    let remaining: Vec<String> =
+                        names.iter().filter(|n| **n != tag_name).cloned().collect();
                     let _ = sender.send(AppMsg::TagsEdited(remaining));
                 }
             });
@@ -1451,6 +1456,10 @@ fn error_dialog(window: &adw::ApplicationWindow, message: &str) {
     dialog.present(Some(window));
 }
 
+#[expect(
+    deprecated,
+    reason = "gtk::Dialog is deprecated since 4.10; keep until adw::AlertDialog can host custom content"
+)]
 fn prompt_input(
     window: &adw::ApplicationWindow,
     sender: &AppSender,
@@ -1483,6 +1492,6 @@ fn prompt_input(
         }
         d.close();
     });
-    dialog.show();
+    dialog.present();
     entry.grab_focus();
 }
