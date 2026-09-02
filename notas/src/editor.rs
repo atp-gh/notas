@@ -213,9 +213,6 @@ pub struct Editor {
     pub search_context: sourceview5::SearchContext,
     search_settings: sourceview5::SearchSettings,
     preview_tags: Rc<PreviewTags>,
-    /// Holds the user's editor font CSS rule. The provider itself is
-    /// registered on the display in `app.rs`; `set_font` reloads it.
-    pub(crate) font_provider: gtk::CssProvider,
 }
 
 impl Editor {
@@ -261,48 +258,6 @@ impl Editor {
             self.source_view
                 .scroll_to_iter(&mut start, 0.0, false, 0.0, 0.0);
         }
-    }
-
-    /// Apply the user's editor font (a pango font description string, e.g.
-    /// "Cantarell 14"), or restore the default monospace font when `None`.
-    ///
-    /// GTK4 has no `font-desc` property on `TextView`, so the font is set
-    /// with a small CSS rule targeting the source view by widget name.
-    /// `sourceview` is matched alongside `textview` so the rule works
-    /// whichever node name GtkSourceView uses. Reloading the provider
-    /// replaces the previous rule ("empty" CSS is a comment-only sheet).
-    pub fn set_font(&self, font_desc: Option<&str>) {
-        let css = match font_desc {
-            Some(desc) => {
-                let description = pango::FontDescription::from_string(desc);
-                let family = description.family();
-                let size_pt = (description.size() > 0)
-                    .then(|| description.size() as f64 / pango::SCALE as f64);
-                let rule = |decls: &str| {
-                    format!(
-                        "textview#notas-editor-source, sourceview#notas-editor-source {{ {decls} }}"
-                    )
-                };
-                match (family, size_pt) {
-                    (Some(family), Some(size)) => rule(&format!(
-                        "font-family: \"{}\"; font-size: {size}pt;",
-                        css_escape(&family)
-                    )),
-                    (Some(family), None) => {
-                        rule(&format!("font-family: \"{}\";", css_escape(&family)))
-                    }
-                    (None, Some(size)) => rule(&format!("font-size: {size}pt;")),
-                    (None, None) => String::new(),
-                }
-            }
-            None => String::new(),
-        };
-        let css = if css.is_empty() {
-            "/* notas: default editor font */".to_owned()
-        } else {
-            css
-        };
-        self.font_provider.load_from_string(&css);
     }
 
     /// Replace every match of the current search text, returning the count.
@@ -359,9 +314,6 @@ where
     source_view.set_show_line_numbers(false);
     source_view.set_show_right_margin(false);
     source_view.set_wrap_mode(gtk::WrapMode::WordChar);
-    // Named so the settings font CSS can target only this view (never the
-    // preview or the tag entries).
-    source_view.set_widget_name("notas-editor-source");
 
     let preview_buffer = gtk::TextBuffer::new(None);
     let preview_tags = Rc::new(PreviewTags::new(&preview_buffer));
@@ -438,8 +390,6 @@ where
         });
         preview_view.add_controller(motion);
     }
-
-    let font_provider = gtk::CssProvider::new();
 
     // A TextView only gets a real viewport (and scrollbars) inside a
     // ScrolledWindow; without one the views grew to their full content
@@ -520,7 +470,6 @@ where
         search_context,
         search_settings,
         preview_tags,
-        font_provider,
     }
 }
 
@@ -1024,11 +973,6 @@ fn apply_scheme(
     if let Some(scheme) = manager.scheme(id) {
         buffer.set_style_scheme(Some(&scheme));
     }
-}
-
-/// Escape a string for use inside a double-quoted CSS string.
-fn css_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Convert a `gdk::RGBA` to a `#rrggbb` hex string for tag properties.

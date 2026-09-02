@@ -64,13 +64,10 @@ pub struct ThemeSettings {
     pub mode: ThemeMode,
 }
 
-/// Editor section: the user font and the line-number gutter toggle.
+/// Editor section: the line-number gutter toggle.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditorSettings {
-    /// A pango font description string (from `FontDescription::to_str`),
-    /// or `None` for the default monospace font.
-    pub font_desc: Option<String>,
     pub show_line_numbers: bool,
 }
 
@@ -183,7 +180,6 @@ mod tests {
     fn defaults_match_designed_values() {
         let s = Settings::default();
         assert_eq!(s.theme.mode, ThemeMode::System);
-        assert_eq!(s.editor.font_desc, None);
         assert!(!s.editor.show_line_numbers);
         assert!(s.interface.show_status_bar);
     }
@@ -203,7 +199,6 @@ mod tests {
         fs::write(&path, r#"{"editor": {"show_line_numbers": true}}"#).unwrap();
         let settings = Settings::load_from(path.clone());
         assert_eq!(settings.theme.mode, ThemeMode::System);
-        assert_eq!(settings.editor.font_desc, None);
         assert!(settings.editor.show_line_numbers);
         assert!(settings.interface.show_status_bar);
         let _ = fs::remove_file(&path);
@@ -263,7 +258,6 @@ mod tests {
         let path = temp_settings_path("roundtrip");
         let mut settings = Settings::default();
         settings.theme.mode = ThemeMode::Dark;
-        settings.editor.font_desc = Some("Cantarell 14".into());
         settings.editor.show_line_numbers = true;
         settings.interface.show_status_bar = false;
 

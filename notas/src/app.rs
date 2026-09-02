@@ -20,7 +20,7 @@ use notas_core::models::{Note, Notebook, SearchHit, Tag, TagCount};
 use crate::config::{Settings, ThemeMode};
 use crate::db_worker::{DbEvent, DbMsg, DbWorker};
 use crate::editor::{Editor, build_editor};
-use crate::settings_window::{SettingsWindow, build_settings_window, font_subtitle};
+use crate::settings_window::build_settings_window;
 use crate::tr;
 
 type AppSender = relm4::Sender<AppMsg>;
@@ -72,7 +72,6 @@ pub enum AppMsg {
     // settings
     OpenSettings,
     ThemeChanged(ThemeMode),
-    FontChanged(Option<String>),
     ToggleLineNumbers(bool),
     ToggleStatusBar(bool),
 }
@@ -150,8 +149,6 @@ pub struct Widgets {
     // bottom bar / settings
     status_bar: gtk::Box,
     settings_window: adw::PreferencesDialog,
-    settings_font_row: adw::ActionRow,
-    settings_reset_btn: gtk::Button,
 }
 
 /// Everything the app needs to start: the DB pool plus persisted settings.
@@ -485,18 +482,6 @@ impl SimpleComponent for App {
 
         // ------------------------------------------------------------- editor
         let editor = build_editor(emit.clone(), loading.clone());
-        // The font provider must be registered on the display once; `set_font`
-        // then swaps its rule. An ID-selector rule outranks the `.monospace`
-        // class the view normally uses, and only targets this widget by name.
-        {
-            let display = gtk::prelude::WidgetExt::display(&window);
-            gtk::style_context_add_provider_for_display(
-                &display,
-                &editor.font_provider,
-                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-            );
-        }
-        editor.set_font(settings.editor.font_desc.as_deref());
         editor
             .source_view
             .set_show_line_numbers(settings.editor.show_line_numbers);
@@ -740,12 +725,7 @@ impl SimpleComponent for App {
         }
 
         // ------------------------------------------------------- settings
-        let settings_window = build_settings_window(&window, &settings, emit.clone());
-        let SettingsWindow {
-            window: settings_window,
-            font_row: settings_font_row,
-            reset_font_btn: settings_reset_btn,
-        } = settings_window;
+        let settings_window = build_settings_window(&settings, emit.clone());
 
         // ------------------------------------------------------------ model
         let widgets = Widgets {
@@ -768,8 +748,6 @@ impl SimpleComponent for App {
             tag_editor_flow,
             status_bar,
             settings_window,
-            settings_font_row,
-            settings_reset_btn,
         };
 
         let model = App {
@@ -1040,19 +1018,6 @@ impl App {
             AppMsg::ThemeChanged(mode) => {
                 self.settings.theme.mode = mode;
                 apply_theme(mode);
-                self.settings.save();
-            }
-            AppMsg::FontChanged(font) => {
-                self.settings.editor.font_desc = font;
-                self.widgets
-                    .editor
-                    .set_font(self.settings.editor.font_desc.as_deref());
-                self.widgets
-                    .settings_font_row
-                    .set_subtitle(&font_subtitle(self.settings.editor.font_desc.as_deref()));
-                self.widgets
-                    .settings_reset_btn
-                    .set_visible(self.settings.editor.font_desc.is_some());
                 self.settings.save();
             }
             AppMsg::ToggleLineNumbers(on) => {

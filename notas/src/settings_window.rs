@@ -13,46 +13,17 @@ use crate::app::AppMsg;
 use crate::config::{Settings, ThemeMode};
 use crate::tr;
 
-/// Widgets the app needs to reach after building (to refresh the font row
-/// when the font changes elsewhere).
-pub struct SettingsWindow {
-    pub window: adw::PreferencesDialog,
-    pub font_row: adw::ActionRow,
-    pub reset_font_btn: gtk::Button,
-}
-
-/// Subtitle for the font row: the font's own description, or a "default"
-/// placeholder when no custom font is set.
-pub fn font_subtitle(font_desc: Option<&str>) -> String {
-    match font_desc {
-        Some(desc) => {
-            let shown = pango::FontDescription::from_string(desc).to_str();
-            if shown.is_empty() {
-                tr!("Default font").to_owned()
-            } else {
-                shown.to_string()
-            }
-        }
-        None => tr!("Default font").to_owned(),
-    }
-}
-
 /// Build the settings window. `emit` forwards UI events to the app. The
-/// window is modal and transient for `main_window`, and is kept alive by
-/// the `Widgets` struct so reopening it re-presents the same instance.
-pub fn build_settings_window<E>(
-    main_window: &impl IsA<gtk::Window>,
-    settings: &Settings,
-    emit: E,
-) -> SettingsWindow
+/// window is modal and transient for the main window (the app presents it
+/// against `self.widgets.window`), and is kept alive by the `Widgets`
+/// struct so reopening it re-presents the same instance.
+pub fn build_settings_window<E>(settings: &Settings, emit: E) -> adw::PreferencesDialog
 where
     E: Fn(AppMsg) + 'static + Clone,
 {
     let window = adw::PreferencesDialog::new();
     window.set_title(tr!("Settings"));
     window.set_content_width(440);
-    // Owned clone so the `'static` closures below can reach the parent.
-    let main_window = main_window.clone();
 
     let page = adw::PreferencesPage::new();
     page.set_title(tr!("Appearance"));
@@ -76,49 +47,9 @@ where
         });
     }
 
-    // --- editor: font, line numbers, status bar ---------------------------
+    // --- editor: line numbers, status bar ---------------------------------
     let editor_group = adw::PreferencesGroup::new();
     editor_group.set_title(tr!("Editor"));
-
-    let initial_font = settings.editor.font_desc.clone();
-    let font_row = adw::ActionRow::new();
-    font_row.set_title(tr!("Editor font"));
-    font_row.set_subtitle(&font_subtitle(settings.editor.font_desc.as_deref()));
-    {
-        let emit = emit.clone();
-        font_row.connect_activated(move |_| {
-            // Clone for the `FnOnce` choose-font callback: the dialog runs
-            // asynchronously and outlives this activated handler.
-            let emit = emit.clone();
-            let dialog = gtk::FontDialog::new();
-            dialog.set_title(tr!("Choose editor font"));
-            let initial = initial_font
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .map(pango::FontDescription::from_string);
-            // `choose_font` runs its callback once the dialog is dismissed;
-            // `Ok(font)` means the user picked one, `Err` means cancelled.
-            dialog.choose_font(
-                Some(&main_window),
-                initial.as_ref(),
-                None::<&gtk::gio::Cancellable>,
-                move |result| {
-                    if let Ok(font) = result {
-                        emit(AppMsg::FontChanged(Some(font.to_str().to_string())));
-                    }
-                },
-            );
-        });
-    }
-
-    let reset_font_btn = gtk::Button::with_label(tr!("Default"));
-    reset_font_btn.set_tooltip_text(Some(tr!("Reset to the default font")));
-    reset_font_btn.set_visible(settings.editor.font_desc.is_some());
-    {
-        let emit = emit.clone();
-        reset_font_btn.connect_clicked(move |_| emit(AppMsg::FontChanged(None)));
-    }
-    font_row.add_suffix(&reset_font_btn);
 
     let line_numbers_row = adw::SwitchRow::new();
     line_numbers_row.set_title(tr!("Show line numbers"));
@@ -144,17 +75,12 @@ where
 
     theme_group.add(&theme_row);
     page.add(&theme_group);
-    editor_group.add(&font_row);
     editor_group.add(&line_numbers_row);
     editor_group.add(&status_bar_row);
     page.add(&editor_group);
     window.add(&page);
 
-    SettingsWindow {
-        window,
-        font_row,
-        reset_font_btn,
-    }
+    window
 }
 
 #[cfg(test)]
@@ -220,21 +146,9 @@ mod tests {
             move |msg| messages.borrow_mut().push(msg)
         };
 
-        let SettingsWindow {
-            window,
-            font_row,
-            reset_font_btn,
-        } = build_settings_window(&main, &settings, emit);
-
+        let window = build_settings_window(&settings, emit);
         // Window basics.
         assert_eq!(window.title(), "Settings");
-        assert_eq!(font_row.title(), "Editor font");
-        assert_eq!(font_subtitle(None), "Default font");
-        assert_eq!(font_row.subtitle().as_deref(), Some("Default font"));
-        assert!(
-            !reset_font_btn.is_visible(),
-            "reset hidden without a custom font"
-        );
 
         // Realize the dialog so its pages/groups attach as widget children.
         window.present(Some(&main));
@@ -289,12 +203,6 @@ mod tests {
         assert!(matches!(pop(&messages), AppMsg::ToggleLineNumbers(true)));
         bar.set_active(false);
         assert!(matches!(pop(&messages), AppMsg::ToggleStatusBar(false)));
-
-        // Font reset button emits FontChanged(None); the row stays wired.
-        // (`Button::activate` does not emit `clicked` in GTK4; use the
-        // explicit emitter, which a real press would trigger.)
-        reset_font_btn.emit_clicked();
-        assert!(matches!(pop(&messages), AppMsg::FontChanged(None)));
 
         assert!(
             messages.borrow().is_empty(),
