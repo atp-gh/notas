@@ -31,6 +31,16 @@ cargo build --release
 ./target/release/notas
 ```
 
+## Development
+
+```bash
+# Run the full test suite (core + Markdown renderer; GUI probes are #[ignore]d)
+cargo test --workspace
+
+# Lint the whole workspace with warnings as errors
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
 ## Features (v1)
 
 - Notebooks (nested tree) + tags with filtering
