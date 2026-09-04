@@ -41,7 +41,8 @@ pub struct SyncStats {
     pub trashed: usize,
     /// Conflict copies created from remote content.
     pub conflicts: usize,
-    /// `YYYY-MM-DD HH:MM:SS` UTC timestamp of this run.
+    /// `YYYY-MM-DD HH:MM:SS` timestamp of this run, in the device's local
+    /// time — it exists only to be shown in the UI.
     pub last_synced_at: String,
 }
 
@@ -119,8 +120,9 @@ pub async fn run_sync(pool: &SqlitePool, settings: &SyncSettings) -> Result<Sync
         }
     }
 
-    // 5. Timestamp of this run, UTC (the UI shows it as-is).
-    stats.last_synced_at = sqlx::query_scalar::<_, String>("SELECT datetime('now')")
+    // 5. Timestamp of this run, in the device's local time (display only;
+    //    note timestamps themselves stay UTC in the database).
+    stats.last_synced_at = sqlx::query_scalar::<_, String>("SELECT datetime('now', 'localtime')")
         .fetch_one(pool)
         .await
         .map_err(|e| format!("{e:#}"))?;

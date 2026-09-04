@@ -71,6 +71,8 @@ switching to gettext later is a mechanical change.
 
 Sync is **manual**: ☰ menu → “Sync now…” pushes local changes up and pulls
 remote changes down in one pass. There is no background auto-sync yet.
+The status bar shows the sync state at a glance: “Syncing…” while a sync
+runs, and the time of the last successful sync afterwards.
 
 Each note is identified across devices by a stable uuid (assigned on first
 sync; the SQLite `notes.id` never leaves the machine). On the bucket, under

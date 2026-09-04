@@ -165,6 +165,8 @@ pub struct Widgets {
     window: adw::ApplicationWindow,
     dirty_label: gtk::Label,
     status_label: gtk::Label,
+    /// Always-on sync state (last successful sync, or “Syncing…”).
+    sync_label: gtk::Label,
     save_btn: gtk::Button,
     // sidebar
     search_entry: gtk::SearchEntry,
@@ -585,6 +587,13 @@ impl SimpleComponent for App {
         status_label.set_halign(gtk::Align::Start);
         status_label.set_hexpand(true);
         status_label.set_ellipsize(pango::EllipsizeMode::End);
+        // Persistent sync indicator on the right side of the bar: the last
+        // successful sync time, or “Syncing…” while a sync is in flight.
+        let sync_label = gtk::Label::new(None);
+        sync_label.set_halign(gtk::Align::End);
+        sync_label.set_ellipsize(pango::EllipsizeMode::End);
+        sync_label.set_tooltip_text(Some(tr!("Sync status — ☰ menu → Sync now…")));
+        sync_label.set_text(&sync_indicator_text(&settings.sync.last_synced_at));
         let save_btn = gtk::Button::from_icon_name("document-save-symbolic");
         save_btn.set_tooltip_text(Some(tr!("Save (Ctrl+S)")));
         save_btn.set_sensitive(false);
@@ -594,6 +603,7 @@ impl SimpleComponent for App {
         }
         status_bar.append(&dirty_label);
         status_bar.append(&status_label);
+        status_bar.append(&sync_label);
         status_bar.append(&save_btn);
         status_bar.set_visible(settings.interface.show_status_bar);
 
@@ -819,6 +829,7 @@ impl SimpleComponent for App {
             window,
             dirty_label,
             status_label,
+            sync_label,
             save_btn,
             search_entry,
             notebook_store,
@@ -1098,10 +1109,21 @@ impl App {
             AppMsg::BackupTo(path) => {
                 self.worker.emit(DbMsg::Backup(path));
             }
-            AppMsg::OpenSettings => self
-                .widgets
-                .settings_window
-                .present(Some(&self.widgets.window)),
+            AppMsg::OpenSettings => {
+                // Rebuild from the current settings so the dialog always
+                // reflects the latest values, including the last sync time
+                // and any config edited since it was first opened.
+                let emit = {
+                    let sender = app_sender.clone();
+                    move |msg| {
+                        let _ = sender.send(msg);
+                    }
+                };
+                self.widgets.settings_window = build_settings_window(&self.settings, emit);
+                self.widgets
+                    .settings_window
+                    .present(Some(&self.widgets.window));
+            }
             AppMsg::ThemeChanged(mode) => {
                 self.settings.theme.mode = mode;
                 apply_theme(mode);
@@ -1130,6 +1152,7 @@ impl App {
                 if self.dirty {
                     self.save_note();
                 }
+                self.widgets.sync_label.set_text(tr!("Syncing…"));
                 self.worker.emit(DbMsg::SyncNow(self.settings.sync.clone()));
             }
             AppMsg::SyncEndpointChanged(value) => {
@@ -1298,6 +1321,9 @@ impl App {
             DbEvent::SyncDone(stats) => {
                 self.settings.sync.last_synced_at = stats.last_synced_at.clone();
                 self.settings.save();
+                self.widgets
+                    .sync_label
+                    .set_text(&sync_indicator_text(&self.settings.sync.last_synced_at));
                 let mut parts = Vec::new();
                 if stats.uploaded > 0 {
                     parts.push(format!("{} {}", stats.uploaded, tr!("up")));
@@ -1323,6 +1349,11 @@ impl App {
                 self.refresh_current_list();
             }
             DbEvent::SyncFailed(e) => {
+                // Back to the last successful sync; the error dialog carries
+                // the details.
+                self.widgets
+                    .sync_label
+                    .set_text(&sync_indicator_text(&self.settings.sync.last_synced_at));
                 self.widgets.status_label.set_text(tr!("Sync failed"));
                 error_dialog(&self.widgets.window, &e);
             }
@@ -1581,6 +1612,16 @@ impl App {
 // ---------------------------------------------------------------------------
 // Row & dialog helpers
 // ---------------------------------------------------------------------------
+
+/// Persistent text for the status-bar sync indicator. Empty (never
+/// synced) shows a hint; otherwise the local time of the last run.
+fn sync_indicator_text(last_synced_at: &str) -> String {
+    if last_synced_at.is_empty() {
+        tr!("Never synced").to_string()
+    } else {
+        format!("{} {last_synced_at}", tr!("Last synced"))
+    }
+}
 
 /// Remove every child row from a `ListBox`.
 fn clear_list_box(list: &gtk::ListBox) {

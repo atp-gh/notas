@@ -109,8 +109,8 @@ pub struct SyncSettings {
     pub access_key_id: String,
     /// S3 secret access key.
     pub secret_access_key: String,
-    /// Time of the last successful sync (`YYYY-MM-DD HH:MM:SS` UTC), or
-    /// empty if never.
+    /// Time of the last successful sync (`YYYY-MM-DD HH:MM:SS`, device
+    /// local time), or empty if never.
     pub last_synced_at: String,
 }
 
