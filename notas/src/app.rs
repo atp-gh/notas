@@ -730,10 +730,6 @@ impl SimpleComponent for App {
                 // offsets to the children's minimum sizes on allocation.
                 let outer_px = (ratios.outer * f64::from(width)).round() as i32;
                 let inner_px = (ratios.inner * f64::from(outer_px)).round() as i32;
-                eprintln!(
-                    "REBAL width={width} frac_outer={:.4} frac_inner={:.4} outer_px={outer_px} inner_px={inner_px}",
-                    ratios.outer, ratios.inner
-                );
                 outer_pane.set_position(outer_px);
                 inner_pane.set_position(inner_px);
                 ratios.applied = true;
@@ -1462,13 +1458,13 @@ impl App {
     }
 
     fn refresh_current_list(&mut self) {
-        match self.mode.clone() {
+        match &self.mode {
             ViewMode::All => self.worker.emit(DbMsg::LoadAll),
             ViewMode::Unfiled => self.worker.emit(DbMsg::LoadUnfiled),
             ViewMode::Trash => self.worker.emit(DbMsg::LoadTrashed),
-            ViewMode::Notebook(id) => self.worker.emit(DbMsg::LoadNotes(id)),
-            ViewMode::Tag(id) => self.worker.emit(DbMsg::LoadByTag(id)),
-            ViewMode::Search(q) => self.worker.emit(DbMsg::Search(q)),
+            ViewMode::Notebook(id) => self.worker.emit(DbMsg::LoadNotes(*id)),
+            ViewMode::Tag(id) => self.worker.emit(DbMsg::LoadByTag(*id)),
+            ViewMode::Search(q) => self.worker.emit(DbMsg::Search(q.clone())),
         }
     }
 

@@ -183,59 +183,59 @@ pub fn plan_sync(
 
     // --- local notes ------------------------------------------------------
     for note in local {
-        match remote.get(&note.uuid) {
-            // Nothing remote: first sync, or the remote copy is an orphan
-            // md without a sidecar — upload the full note either way.
-            None | Some(RemoteEntry { sidecar: None, .. }) => {
+        // Nothing remote: first sync, or the remote copy is an orphan
+        // md without a sidecar — upload the full note either way.
+        let Some(entry) = remote.get(&note.uuid) else {
+            actions.push(SyncAction::Upload { note: note.clone() });
+            continue;
+        };
+        let Some(sidecar) = entry.sidecar.as_ref() else {
+            actions.push(SyncAction::Upload { note: note.clone() });
+            continue;
+        };
+        if sidecar.deleted {
+            // A tombstone: the note was permanently deleted on the
+            // device that uploaded it. Respect it unless the local
+            // note was touched *after* the tombstone (an explicit
+            // restore or edit, which resurrects the note).
+            if note.is_trashed {
+                // Already in the trash; don't fight the tombstone
+                // by re-uploading.
+            } else if sidecar.updated_at >= note.updated_at {
+                actions.push(SyncAction::TrashLocal {
+                    uuid: note.uuid.clone(),
+                });
+            } else {
                 actions.push(SyncAction::Upload { note: note.clone() });
             }
-            Some(entry) => {
-                let sidecar = entry.sidecar.as_ref().expect("sidecar matched above");
-                if sidecar.deleted {
-                    // A tombstone: the note was permanently deleted on the
-                    // device that uploaded it. Respect it unless the local
-                    // note was touched *after* the tombstone (an explicit
-                    // restore or edit, which resurrects the note).
-                    if note.is_trashed {
-                        // Already in the trash; don't fight the tombstone
-                        // by re-uploading.
-                    } else if sidecar.updated_at >= note.updated_at {
-                        actions.push(SyncAction::TrashLocal {
-                            uuid: note.uuid.clone(),
-                        });
-                    } else {
-                        actions.push(SyncAction::Upload { note: note.clone() });
-                    }
-                } else if sidecar.updated_at < note.updated_at {
-                    actions.push(SyncAction::Upload { note: note.clone() });
-                } else if sidecar.updated_at > note.updated_at {
-                    if entry.has_md {
-                        actions.push(SyncAction::Download {
-                            sidecar: sidecar.clone(),
-                        });
-                    }
-                    // sidecar newer but the body is missing: broken remote
-                    // state, leave the local copy alone.
-                } else if sidecar.content_hash != content_hash(&note.content) {
-                    // Same second, different body: keep the local note and
-                    // preserve the remote version as a conflict copy.
-                    actions.push(SyncAction::ConflictCopy {
-                        sidecar: sidecar.clone(),
-                    });
-                } else if sidecar_meta_key(sidecar) != local_meta_key(note) {
-                    // Same second, same body, different metadata: adopt the
-                    // deterministically smaller tuple on both devices.
-                    if sidecar_meta_key(sidecar) < local_meta_key(note) {
-                        actions.push(SyncAction::Download {
-                            sidecar: sidecar.clone(),
-                        });
-                    } else {
-                        actions.push(SyncAction::Upload { note: note.clone() });
-                    }
-                }
-                // else: identical on both sides — nothing to do.
+        } else if sidecar.updated_at < note.updated_at {
+            actions.push(SyncAction::Upload { note: note.clone() });
+        } else if sidecar.updated_at > note.updated_at {
+            if entry.has_md {
+                actions.push(SyncAction::Download {
+                    sidecar: sidecar.clone(),
+                });
+            }
+            // sidecar newer but the body is missing: broken remote
+            // state, leave the local copy alone.
+        } else if sidecar.content_hash != content_hash(&note.content) {
+            // Same second, different body: keep the local note and
+            // preserve the remote version as a conflict copy.
+            actions.push(SyncAction::ConflictCopy {
+                sidecar: sidecar.clone(),
+            });
+        } else if sidecar_meta_key(sidecar) != local_meta_key(note) {
+            // Same second, same body, different metadata: adopt the
+            // deterministically smaller tuple on both devices.
+            if sidecar_meta_key(sidecar) < local_meta_key(note) {
+                actions.push(SyncAction::Download {
+                    sidecar: sidecar.clone(),
+                });
+            } else {
+                actions.push(SyncAction::Upload { note: note.clone() });
             }
         }
+        // else: identical on both sides — nothing to do.
     }
 
     // --- local tombstones -------------------------------------------------

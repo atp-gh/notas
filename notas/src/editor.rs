@@ -738,25 +738,24 @@ impl Renderer {
                 } else {
                     self.sep(1);
                 }
-                let marker = {
-                    let list = self
-                        .lists
-                        .last_mut()
-                        .expect("Item must follow a List start");
-                    list.emitted_any = true;
-                    match list.next {
-                        Some(n) => {
-                            list.next = Some(n + 1);
-                            format!("{n}. ")
+                // `Tag::List` always precedes `Tag::Item` in
+                // pulldown-cmark's event stream, so the stack is non-empty
+                // here; fall back to a plain bullet instead of panicking if
+                // that invariant ever breaks.
+                let marker = match self.lists.last_mut() {
+                    Some(list) => {
+                        list.emitted_any = true;
+                        match list.next {
+                            Some(n) => {
+                                list.next = Some(n + 1);
+                                format!("{n}. ")
+                            }
+                            None => bullet_marker(depth),
                         }
-                        None => match depth {
-                            1 => "• ".to_owned(),
-                            2 => "◦ ".to_owned(),
-                            _ => "▪ ".to_owned(),
-                        },
                     }
+                    None => bullet_marker(depth),
                 };
-                self.item_indent = " ".repeat(2 * (depth - 1));
+                self.item_indent = " ".repeat(2 * depth.saturating_sub(1));
                 self.item_prefix = Some(format!("{}{}", self.item_indent, marker));
                 self.item_blocks.push(0);
             }
@@ -898,6 +897,15 @@ impl Renderer {
             }
             self.emit(&text, styles);
         }
+    }
+}
+
+/// The bullet marker for a list item at the given nesting depth.
+fn bullet_marker(depth: usize) -> String {
+    match depth {
+        1 => "• ".to_owned(),
+        2 => "◦ ".to_owned(),
+        _ => "▪ ".to_owned(),
     }
 }
 
