@@ -50,6 +50,16 @@ pub struct SyncStats {
 
 /// Run one full sync: plan and execute, then return the stats.
 pub async fn run_sync(pool: &SqlitePool, settings: &SyncSettings) -> Result<SyncStats, String> {
+    // Only implemented backends can sync. Reserved types (WebDAV) cannot
+    // be picked in the settings dialog — this guards against a hand-edited
+    // config file naming one.
+    if !settings.kind.is_implemented() {
+        return Err(format!(
+            "sync backend {:?} is not implemented yet",
+            settings.kind
+        ));
+    }
+
     // 1. Assign uuids to notes created since the last sync so every note
     //    has a stable cross-device identity.
     repo::ensure_note_uuids(pool)

@@ -88,8 +88,9 @@ impl Default for InterfaceSettings {
 }
 
 /// Which backend the notes sync to. The settings dialog's "Sync type"
-/// combo lists these; S3 is the only implemented backend today, with
-/// WebDAV and others expected to follow.
+/// combo lists these; S3 is the only implemented backend today. WebDAV is
+/// a reserved variant: it appears in the list, greyed out and
+/// unselectable, until an engine for it exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SyncType {
@@ -97,6 +98,12 @@ pub enum SyncType {
     /// MinIO, …).
     #[default]
     S3,
+    /// WebDAV (Nextcloud, ownCloud, …). Reserved: no engine yet, so the
+    /// settings dialog lists it greyed out and cannot select it. Serde
+    /// needs the explicit name: `rename_all = "kebab-case"` would split
+    /// the acronym into `web-d-a-v`.
+    #[serde(rename = "webdav")]
+    WebDAV,
 }
 
 impl SyncType {
@@ -104,12 +111,23 @@ impl SyncType {
     pub fn index(self) -> u32 {
         match self {
             Self::S3 => 0,
+            Self::WebDAV => 1,
         }
     }
 
     /// Inverse of [`SyncType::index`]; unknown indices map to `S3`.
-    pub fn from_index(_index: u32) -> Self {
-        Self::S3
+    pub fn from_index(index: u32) -> Self {
+        match index {
+            1 => Self::WebDAV,
+            _ => Self::S3,
+        }
+    }
+
+    /// Whether a sync engine exists for this backend yet. Backends without
+    /// one are listed in the settings but greyed out and cannot be chosen;
+    /// `run_sync` refuses them anyway if one lands in a hand-edited config.
+    pub fn is_implemented(self) -> bool {
+        matches!(self, Self::S3)
     }
 }
 
@@ -378,16 +396,22 @@ mod tests {
 
     #[test]
     fn sync_type_serde_uses_kebab_case() {
-        assert_eq!(
-            serde_json::from_str::<SyncType>("\"s3\"").unwrap(),
-            SyncType::S3
-        );
-        assert_eq!(serde_json::to_string(&SyncType::S3).unwrap(), "\"s3\"");
+        for (kind, name) in [(SyncType::S3, "s3"), (SyncType::WebDAV, "webdav")] {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{name}\""));
+            assert_eq!(
+                serde_json::from_str::<SyncType>(&format!("\"{name}\"")).unwrap(),
+                kind
+            );
+        }
     }
 
     #[test]
     fn sync_type_indices_roundtrip() {
-        let kind = SyncType::S3;
-        assert_eq!(SyncType::from_index(kind.index()), kind);
+        for kind in [SyncType::S3, SyncType::WebDAV] {
+            assert_eq!(SyncType::from_index(kind.index()), kind);
+        }
+        // S3 is implemented; the reserved WebDAV backend is not yet.
+        assert!(SyncType::S3.is_implemented());
+        assert!(!SyncType::WebDAV.is_implemented());
     }
 }

@@ -80,16 +80,16 @@ where
     page.add(&editor_group);
     window.add(&page);
 
-    // --- sync: S3-compatible storage ------------------------------
+    // --- sync: target and credentials -----------------------------
     let sync_page = adw::PreferencesPage::new();
     sync_page.set_title(tr!("Sync"));
 
     let sync_group = adw::PreferencesGroup::new();
-    sync_group.set_title(tr!("S3-compatible storage"));
+    sync_group.set_title(tr!("Sync target"));
     sync_group.set_description(Some(tr!(
-        "Notes sync as Markdown files to an S3-compatible bucket \
-         (AWS, Cloudflare R2, Backblaze B2, MinIO, …). Use a dedicated \
-         access key restricted to this bucket."
+        "Notes sync as Markdown files to the backend selected above. Only \
+         S3 is implemented so far; the fields below configure the \
+         S3-compatible bucket."
     )));
 
     // adw::EntryRow / adw::PasswordEntryRow expose their text through the
@@ -155,19 +155,75 @@ where
         });
     }
 
-    // Sync backend: the combo lists sync *types* (S3 today; WebDAV and
-    // others are expected to follow). The fields below belong to the
-    // selected type; S3 is the only implemented backend so far.
-    let type_model = gtk::StringList::new(&[tr!("S3")]);
+    // Sync backend: the combo lists sync *types*. Only implemented types
+    // (S3 today) are selectable; WebDAV is reserved and shown greyed out
+    // until an engine exists. The fields below belong to the selected
+    // type; S3 is the only implemented backend so far.
+    let type_model = gtk::StringList::new(&[tr!("S3"), tr!("WebDAV")]);
+
+    // AdwComboRow has no per-item disabled state, so the popup rows are
+    // rendered by a custom list factory. The WebDAV row is greyed out
+    // (`dim-label`, insensitive) and is neither selectable nor
+    // activatable, so pointer clicks, hover and the keyboard all ignore
+    // it — GtkListFactoryWidget's select/activate actions check those
+    // flags before doing anything.
+    let type_factory = gtk::SignalListItemFactory::new();
+    type_factory.connect_setup(move |_factory, object| {
+        if let Some(item) = object.downcast_ref::<gtk::ListItem>() {
+            let label = gtk::Label::new(None);
+            label.set_xalign(0.0);
+            label.set_valign(gtk::Align::Center);
+            item.set_child(Some(&label));
+        }
+    });
+    type_factory.connect_bind(move |_factory, object| {
+        if let Some(item) = object.downcast_ref::<gtk::ListItem>() {
+            // Model order mirrors `SyncType::index()`: S3 at 0, so only
+            // that row is enabled.
+            let enabled = item.position() == SyncType::S3.index();
+            if let Some(text) = item
+                .item()
+                .and_then(|obj| obj.downcast::<gtk::StringObject>().ok())
+                .map(|obj| obj.string().to_string())
+                && let Some(child) = item.child()
+                && let Ok(label) = child.downcast::<gtk::Label>()
+            {
+                label.set_text(&text);
+                label.set_sensitive(enabled);
+                if enabled {
+                    label.remove_css_class("dim-label");
+                } else {
+                    label.add_css_class("dim-label");
+                }
+            }
+            item.set_selectable(enabled);
+            item.set_activatable(enabled);
+        }
+    });
+
     let type_row = adw::ComboRow::new();
     type_row.set_title(tr!("Sync type"));
     type_row.set_subtitle(tr!("Backend used to sync notes"));
     type_row.set_model(Some(&type_model));
-    type_row.set_selected(settings.sync.kind.index());
+    type_row.set_list_factory(Some(&type_factory));
+    // Only implemented backends can be shown as selected; a hand-edited
+    // config naming a reserved one displays as S3 until it is changed.
+    let selected = if settings.sync.kind.is_implemented() {
+        settings.sync.kind.index()
+    } else {
+        SyncType::S3.index()
+    };
+    type_row.set_selected(selected);
     {
         let emit = emit.clone();
         type_row.connect_selected_notify(move |row| {
-            emit(AppMsg::SyncTypeChanged(SyncType::from_index(row.selected())));
+            let kind = SyncType::from_index(row.selected());
+            if !kind.is_implemented() {
+                // Reserved backends cannot be selected; snap back to S3.
+                row.set_selected(SyncType::S3.index());
+                return;
+            }
+            emit(AppMsg::SyncTypeChanged(kind));
         });
     }
 
@@ -323,11 +379,25 @@ mod tests {
         assert_eq!(combos[0].title(), "Theme");
         assert_eq!(combos[1].title(), "Sync type");
 
-        // Only S3 is implemented so far: the row reflects the current
-        // setting and is fixed at the single available entry (no change
-        // can be made until a second backend type exists).
+        // Sync type: only S3 is implemented, but WebDAV is listed as a
+        // reserved entry (greyed out and not selectable in the popup).
+        // The row reflects the current setting and starts on S3.
         let type_row = &combos[1];
         assert_eq!(type_row.selected(), SyncType::S3.index());
+        assert!(!SyncType::WebDAV.is_implemented());
+
+        // The reserved WebDAV entry can never become the selection: after
+        // the combo's lazy binding is materialized (see the theme combo
+        // above), forcing the WebDAV index snaps the row back to S3, so
+        // only the S3 change is ever emitted.
+        let _ = type_row.model();
+        type_row.set_selected(SyncType::WebDAV.index());
+        pump();
+        assert_eq!(type_row.selected(), SyncType::S3.index());
+        assert!(matches!(
+            pop(&messages),
+            AppMsg::SyncTypeChanged(SyncType::S3)
+        ));
 
         let mut entries = Vec::new();
         find_all::<adw::EntryRow>(&window, &mut entries);
