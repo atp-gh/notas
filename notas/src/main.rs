@@ -3,6 +3,7 @@ mod config;
 mod db_worker;
 mod editor;
 mod settings_window;
+mod sync;
 #[macro_use]
 mod tr;
 

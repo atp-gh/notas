@@ -11,6 +11,7 @@ pub mod error;
 pub mod models;
 pub mod repo;
 pub mod schema;
+pub mod sync;
 
 pub use error::{Error, Result};
 pub use models::{Note, Notebook, SearchHit, Tag, TagCount};

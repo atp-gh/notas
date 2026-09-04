@@ -80,6 +80,139 @@ where
     page.add(&editor_group);
     window.add(&page);
 
+    // --- sync: S3-compatible storage ------------------------------
+    let sync_page = adw::PreferencesPage::new();
+    sync_page.set_title(tr!("Sync"));
+
+    let sync_group = adw::PreferencesGroup::new();
+    sync_group.set_title(tr!("S3-compatible storage"));
+    sync_group.set_description(Some(tr!(
+        "Notes sync as Markdown files to an S3-compatible bucket \
+         (AWS, Cloudflare R2, Backblaze B2, MinIO, …). Use a dedicated \
+         access key restricted to this bucket."
+    )));
+
+    // adw::EntryRow / adw::PasswordEntryRow expose their text through the
+    // GtkEditable interface (the Rust bindings only surface a few direct
+    // methods), which is in scope via the gtk prelude.
+    let endpoint_entry = adw::EntryRow::new();
+    endpoint_entry.set_title(tr!("Endpoint (optional)"));
+    endpoint_entry.set_text(&settings.sync.endpoint);
+    {
+        let emit = emit.clone();
+        endpoint_entry.connect_changed(move |row| {
+            emit(AppMsg::SyncEndpointChanged(row.text().to_string()));
+        });
+    }
+
+    let region_entry = adw::EntryRow::new();
+    region_entry.set_title(tr!("Region"));
+    region_entry.set_text(&settings.sync.region);
+    {
+        let emit = emit.clone();
+        region_entry.connect_changed(move |row| {
+            emit(AppMsg::SyncRegionChanged(row.text().to_string()));
+        });
+    }
+
+    let bucket_entry = adw::EntryRow::new();
+    bucket_entry.set_title(tr!("Bucket"));
+    bucket_entry.set_text(&settings.sync.bucket);
+    {
+        let emit = emit.clone();
+        bucket_entry.connect_changed(move |row| {
+            emit(AppMsg::SyncBucketChanged(row.text().to_string()));
+        });
+    }
+
+    let prefix_entry = adw::EntryRow::new();
+    prefix_entry.set_title(tr!("Key prefix"));
+    prefix_entry.set_text(&settings.sync.prefix);
+    {
+        let emit = emit.clone();
+        prefix_entry.connect_changed(move |row| {
+            emit(AppMsg::SyncPrefixChanged(row.text().to_string()));
+        });
+    }
+
+    let access_key_entry = adw::EntryRow::new();
+    access_key_entry.set_title(tr!("Access key ID"));
+    access_key_entry.set_text(&settings.sync.access_key_id);
+    {
+        let emit = emit.clone();
+        access_key_entry.connect_changed(move |row| {
+            emit(AppMsg::SyncAccessKeyChanged(row.text().to_string()));
+        });
+    }
+
+    let secret_key_entry = adw::PasswordEntryRow::new();
+    secret_key_entry.set_title(tr!("Secret access key"));
+    secret_key_entry.set_text(&settings.sync.secret_access_key);
+    {
+        let emit = emit.clone();
+        secret_key_entry.connect_changed(move |row| {
+            emit(AppMsg::SyncSecretKeyChanged(row.text().to_string()));
+        });
+    }
+
+    // Provider presets fill endpoint/region with common defaults; the
+    // entries stay editable afterwards.
+    let provider_model = gtk::StringList::new(&[
+        tr!("Custom"),
+        tr!("AWS S3"),
+        tr!("Cloudflare R2"),
+        tr!("Backblaze B2"),
+        tr!("MinIO"),
+    ]);
+    let provider_row = adw::ComboRow::new();
+    provider_row.set_title(tr!("Provider"));
+    provider_row.set_subtitle(tr!("Fills the endpoint and region fields"));
+    provider_row.set_model(Some(&provider_model));
+    {
+        let endpoint = endpoint_entry.clone();
+        let region = region_entry.clone();
+        provider_row.connect_selected_notify(move |row| {
+            match row.selected() {
+                // AWS: empty endpoint + default region.
+                1 => {
+                    endpoint.set_text("");
+                    region.set_text("us-east-1");
+                }
+                // R2: region is `auto`; the endpoint is account-specific,
+                // so only the region is filled.
+                2 => region.set_text("auto"),
+                // B2: default region; the endpoint is account-specific.
+                3 => region.set_text("us-west-002"),
+                // MinIO: typical local development default.
+                4 => {
+                    endpoint.set_text("http://localhost:9000");
+                    region.set_text("us-east-1");
+                }
+                _ => {}
+            }
+        });
+    }
+
+    let last_synced_row = adw::ActionRow::new();
+    last_synced_row.set_title(tr!("Last synced"));
+    let last_synced = if settings.sync.last_synced_at.is_empty() {
+        tr!("Never").to_string()
+    } else {
+        settings.sync.last_synced_at.clone()
+    };
+    last_synced_row.set_subtitle(&last_synced);
+
+    sync_group.add(&provider_row);
+    sync_group.add(&endpoint_entry);
+    sync_group.add(&region_entry);
+    sync_group.add(&bucket_entry);
+    sync_group.add(&prefix_entry);
+    sync_group.add(&access_key_entry);
+    sync_group.add(&secret_key_entry);
+    sync_group.add(&last_synced_row);
+    sync_page.add(&sync_group);
+    window.add(&sync_page);
+
     window
 }
 
@@ -203,6 +336,33 @@ mod tests {
         assert!(matches!(pop(&messages), AppMsg::ToggleLineNumbers(true)));
         bar.set_active(false);
         assert!(matches!(pop(&messages), AppMsg::ToggleStatusBar(false)));
+
+        // Sync page: one provider combo + the theme combo, and entries
+        // that emit their field-changed messages on edit.
+        let mut combos = Vec::new();
+        find_all::<adw::ComboRow>(&window, &mut combos);
+        assert_eq!(combos.len(), 2, "theme + provider combo rows");
+        assert_eq!(combos[0].title(), "Theme");
+        assert_eq!(combos[1].title(), "Provider");
+
+        let mut entries = Vec::new();
+        find_all::<adw::EntryRow>(&window, &mut entries);
+        let bucket = entries
+            .iter()
+            .find(|r| r.title() == "Bucket")
+            .expect("bucket entry row");
+        bucket.set_text("my-notes");
+        assert!(matches!(
+            pop(&messages),
+            AppMsg::SyncBucketChanged(v) if v == "my-notes"
+        ));
+
+        let secret = find_row::<adw::PasswordEntryRow>(&window).expect("secret key row");
+        secret.set_text("s3cr3t");
+        assert!(matches!(
+            pop(&messages),
+            AppMsg::SyncSecretKeyChanged(v) if v == "s3cr3t"
+        ));
 
         assert!(
             messages.borrow().is_empty(),

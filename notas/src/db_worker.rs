@@ -56,6 +56,10 @@ pub enum DbMsg {
     Search(String),
     ExportMarkdown(PathBuf),
     Backup(PathBuf),
+    /// Run one full sync against the configured S3-compatible store.
+    /// Processed like every other message (sequentially on the worker), so
+    /// a save emitted just before it is guaranteed to be visible.
+    SyncNow(crate::config::SyncSettings),
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +79,8 @@ pub enum DbEvent {
     SearchResults(Vec<SearchHit>),
     ExportDone(Result<usize, String>),
     BackupDone(Result<(), String>),
+    SyncDone(crate::sync::SyncStats),
+    SyncFailed(String),
     Error(String),
 }
 
@@ -158,6 +164,10 @@ async fn handle(pool: SqlitePool, msg: DbMsg) -> DbEvent {
         DbMsg::Backup(dest) => match repo::backup(&pool, &dest).await {
             Ok(()) => Ok(DbEvent::BackupDone(Ok(()))),
             Err(e) => Ok(DbEvent::BackupDone(Err(format!("{e:#}")))),
+        },
+        DbMsg::SyncNow(settings) => match crate::sync::run_sync(&pool, &settings).await {
+            Ok(stats) => Ok(DbEvent::SyncDone(stats)),
+            Err(e) => Ok(DbEvent::SyncFailed(e)),
         },
     };
 

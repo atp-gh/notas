@@ -55,6 +55,7 @@ pub struct Settings {
     pub theme: ThemeSettings,
     pub editor: EditorSettings,
     pub interface: InterfaceSettings,
+    pub sync: SyncSettings,
 }
 
 /// Theme section: `"theme": { "mode": "system" }`.
@@ -83,6 +84,57 @@ impl Default for InterfaceSettings {
         Self {
             show_status_bar: true,
         }
+    }
+}
+
+/// Sync section: S3-compatible object storage target and credentials.
+///
+/// Stored in the same plaintext settings file as everything else (see
+/// `Settings::load`). Access keys are secrets — the README recommends a
+/// dedicated, bucket-scoped credential that can be revoked independently
+/// of the main account.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncSettings {
+    /// Custom endpoint URL (`https://<account>.r2.cloudflarestorage.com`
+    /// for R2, MinIO's address, …). Empty means AWS S3.
+    pub endpoint: String,
+    /// Signing region; `us-east-1` for AWS, `auto` for Cloudflare R2.
+    pub region: String,
+    /// Bucket name.
+    pub bucket: String,
+    /// Key prefix inside the bucket (`notas/` by default).
+    pub prefix: String,
+    /// S3 access key id.
+    pub access_key_id: String,
+    /// S3 secret access key.
+    pub secret_access_key: String,
+    /// Time of the last successful sync (`YYYY-MM-DD HH:MM:SS` UTC), or
+    /// empty if never.
+    pub last_synced_at: String,
+}
+
+impl Default for SyncSettings {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            region: "us-east-1".into(),
+            bucket: String::new(),
+            prefix: "notas/".into(),
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            last_synced_at: String::new(),
+        }
+    }
+}
+
+impl SyncSettings {
+    /// Whether a sync can even be attempted: a bucket and both credentials
+    /// must be present.
+    pub fn is_configured(&self) -> bool {
+        !self.bucket.trim().is_empty()
+            && !self.access_key_id.trim().is_empty()
+            && !self.secret_access_key.trim().is_empty()
     }
 }
 
@@ -182,6 +234,11 @@ mod tests {
         assert_eq!(s.theme.mode, ThemeMode::System);
         assert!(!s.editor.show_line_numbers);
         assert!(s.interface.show_status_bar);
+        // Sync defaults: AWS, `notas/` prefix, nothing configured yet.
+        assert_eq!(s.sync.region, "us-east-1");
+        assert_eq!(s.sync.prefix, "notas/");
+        assert!(s.sync.endpoint.is_empty());
+        assert!(!s.sync.is_configured());
     }
 
     #[test]
@@ -260,6 +317,11 @@ mod tests {
         settings.theme.mode = ThemeMode::Dark;
         settings.editor.show_line_numbers = true;
         settings.interface.show_status_bar = false;
+        settings.sync.bucket = "my-notes".into();
+        settings.sync.endpoint = "https://s3.example.com".into();
+        settings.sync.access_key_id = "AK".into();
+        settings.sync.secret_access_key = "SK".into();
+        settings.sync.last_synced_at = "2026-01-01 00:00:00".into();
 
         settings.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(path.clone()), settings);
@@ -275,9 +337,11 @@ mod tests {
         assert!(text.contains("\"theme\""), "{text}");
         assert!(text.contains("\"editor\""), "{text}");
         assert!(text.contains("\"interface\""), "{text}");
+        assert!(text.contains("\"sync\""), "{text}");
         assert!(text.contains("\"mode\": \"system\""), "{text}");
         assert!(text.contains("\"show_line_numbers\": false"), "{text}");
         assert!(text.contains("\"show_status_bar\": true"), "{text}");
+        assert!(text.contains("\"prefix\": \"notas/\""), "{text}");
         let _ = fs::remove_file(&path);
     }
 }

@@ -74,6 +74,14 @@ pub enum AppMsg {
     ThemeChanged(ThemeMode),
     ToggleLineNumbers(bool),
     ToggleStatusBar(bool),
+    // sync
+    SyncNow,
+    SyncEndpointChanged(String),
+    SyncRegionChanged(String),
+    SyncBucketChanged(String),
+    SyncPrefixChanged(String),
+    SyncAccessKeyChanged(String),
+    SyncSecretKeyChanged(String),
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +92,34 @@ enum ViewMode {
     Notebook(i64),
     Tag(i64),
     Search(String),
+}
+
+/// Divider positions for the three-pane layout, kept as fractions so that a
+/// window resize or maximize scales every pane proportionally instead of
+/// letting one pane absorb the whole width change.
+#[derive(Clone, Copy)]
+struct PaneRatios {
+    /// Outer divider: (sidebar + note list) / window width.
+    outer: f64,
+    /// Inner divider: sidebar / (sidebar + note list) width.
+    inner: f64,
+    /// Whether a split has been applied yet. Before that, the panes have no
+    /// real geometry to sample, so the default 1:1:2 split is used.
+    applied: bool,
+}
+
+impl Default for PaneRatios {
+    /// The default 1:1:2 split (sidebar : note list : editor): the outer
+    /// divider sits at half the window (editor gets the other half) and the
+    /// inner divider at half of the left half (sidebar and note list each
+    /// get a quarter).
+    fn default() -> Self {
+        Self {
+            outer: 0.5,
+            inner: 0.5,
+            applied: false,
+        }
+    }
 }
 
 pub struct App {
@@ -594,6 +630,7 @@ impl SimpleComponent for App {
 
         let export_btn = gtk::Button::with_label(tr!("Export Markdown…"));
         let backup_btn = gtk::Button::with_label(tr!("Backup database…"));
+        let sync_btn = gtk::Button::with_label(tr!("Sync now…"));
         let settings_btn = gtk::Button::with_label(tr!("Settings…"));
         let quit_btn = gtk::Button::with_label(tr!("Quit"));
         {
@@ -601,6 +638,8 @@ impl SimpleComponent for App {
             export_btn.connect_clicked(move |_| s(AppMsg::ExportMarkdown));
             let s = emit.clone();
             backup_btn.connect_clicked(move |_| s(AppMsg::BackupNow));
+            let s = emit.clone();
+            sync_btn.connect_clicked(move |_| s(AppMsg::SyncNow));
             let s = emit.clone();
             settings_btn.connect_clicked(move |_| s(AppMsg::OpenSettings));
             let s = emit.clone();
@@ -610,6 +649,7 @@ impl SimpleComponent for App {
         menu_box.set_margin_all(8);
         menu_box.append(&export_btn);
         menu_box.append(&backup_btn);
+        menu_box.append(&sync_btn);
         menu_box.append(&settings_btn);
         menu_box.append(&quit_btn);
         let menu_popover = gtk::Popover::new();
@@ -626,9 +666,13 @@ impl SimpleComponent for App {
         header.pack_end(&trash_btn);
 
         // ------------------------------------------------------------- layout
-        // Three panes in a 1:1:2 ratio (file tree : notes : editor). GtkPaned
-        // only supports pixel positions, so rebalance the split on window
-        // resize: tree = width/4, tree+notes = width/2, editor = the rest.
+        // Three horizontal panes (sidebar | note list | editor) nested in two
+        // GtkPaneds so both dividers can be dragged. GtkPaned only stores
+        // pixel positions, so on a window resize GTK would keep the old pixel
+        // offset and grow just one child; `rebalance` below re-applies the
+        // dividers as fractions of the new width instead. The first split
+        // defaults to 1:1:2; afterwards the user's dragged proportions are
+        // preserved.
         let middle_pane = gtk::Paned::new(gtk::Orientation::Horizontal);
         middle_pane.set_start_child(Some(&sidebar));
         middle_pane.set_end_child(Some(&middle));
@@ -637,24 +681,67 @@ impl SimpleComponent for App {
         main_pane.set_start_child(Some(&middle_pane));
         main_pane.set_end_child(Some(&editor_pane));
 
-        {
-            let tree_pane = middle_pane.clone();
-            let notes_pane = main_pane.clone();
-            window.connect_map(move |w| {
-                let ratio = {
-                    let tree_pane = tree_pane.clone();
-                    let notes_pane = notes_pane.clone();
-                    move |width: i32| {
-                        if width > 0 {
-                            tree_pane.set_position(width / 4);
-                            notes_pane.set_position(width / 2);
+        // Runs on every width change (resize, maximize, monitor move). Width
+        // notifications arrive before the new allocation, so the panes still
+        // report the previous sizes here — which is exactly what lets us
+        // sample the split the user last left the dividers at.
+        let ratios = Rc::new(RefCell::new(PaneRatios::default()));
+        let wired_surface: Rc<RefCell<Option<gtk::gdk::Surface>>> = Rc::new(RefCell::new(None));
+        let rebalance: Rc<dyn Fn(i32)> = {
+            let ratios = ratios.clone();
+            let outer_pane = main_pane.clone();
+            let inner_pane = middle_pane.clone();
+            Rc::new(move |width: i32| {
+                if width <= 0 {
+                    return;
+                }
+                let mut ratios = ratios.borrow_mut();
+                if ratios.applied {
+                    let outer_w = outer_pane.width();
+                    let inner_w = inner_pane.width();
+                    if outer_w > 0 && inner_w > 0 {
+                        let outer = outer_pane.position() as f64 / f64::from(outer_w);
+                        let inner = inner_pane.position() as f64 / f64::from(inner_w);
+                        if outer.is_finite() && inner.is_finite() {
+                            ratios.outer = outer.clamp(0.05, 0.95);
+                            ratios.inner = inner.clamp(0.05, 0.95);
                         }
                     }
-                };
-                ratio(w.width());
-                if let Some(surface) = w.surface() {
-                    surface.connect_width_notify(move |s| ratio(s.width()));
                 }
+                // The inner pane spans the outer pane's start child, so its
+                // width follows the outer divider; derive both pixel offsets
+                // from the single new total width. GtkPaned clamps the final
+                // offsets to the children's minimum sizes on allocation.
+                let outer_px = (ratios.outer * f64::from(width)).round() as i32;
+                let inner_px = (ratios.inner * f64::from(outer_px)).round() as i32;
+                eprintln!(
+                    "REBAL width={width} frac_outer={:.4} frac_inner={:.4} outer_px={outer_px} inner_px={inner_px}",
+                    ratios.outer, ratios.inner
+                );
+                outer_pane.set_position(outer_px);
+                inner_pane.set_position(inner_px);
+                ratios.applied = true;
+            })
+        };
+
+        {
+            let rebalance = rebalance.clone();
+            let wired = wired_surface.clone();
+            window.connect_map(move |w| {
+                let surface = w.surface();
+                if let Some(surface) = &surface {
+                    // Wire the width handler once per surface; a window can be
+                    // mapped again (minimize/restore) and its surface can be
+                    // recreated (monitor move), so track which one we hooked.
+                    let mut wired = wired.borrow_mut();
+                    if wired.as_ref().is_none_or(|old| old != surface) {
+                        *wired = Some(surface.clone());
+                        let rebalance = rebalance.clone();
+                        surface.connect_width_notify(move |s| rebalance(s.width()));
+                    }
+                }
+                let total = surface.as_ref().map_or_else(|| w.width(), |s| s.width());
+                rebalance(total);
             });
         }
 
@@ -1030,6 +1117,45 @@ impl App {
                 self.widgets.status_bar.set_visible(on);
                 self.settings.save();
             }
+            AppMsg::SyncNow => {
+                if !self.settings.sync.is_configured() {
+                    self.widgets
+                        .status_label
+                        .set_text(tr!("Sync: configure a bucket and keys in Settings"));
+                    return;
+                }
+                // Save unsaved edits first so the sync sees the latest
+                // content; the DB worker processes the save before the
+                // sync because messages run in order.
+                if self.dirty {
+                    self.save_note();
+                }
+                self.worker.emit(DbMsg::SyncNow(self.settings.sync.clone()));
+            }
+            AppMsg::SyncEndpointChanged(value) => {
+                self.settings.sync.endpoint = value;
+                self.settings.save();
+            }
+            AppMsg::SyncRegionChanged(value) => {
+                self.settings.sync.region = value;
+                self.settings.save();
+            }
+            AppMsg::SyncBucketChanged(value) => {
+                self.settings.sync.bucket = value;
+                self.settings.save();
+            }
+            AppMsg::SyncPrefixChanged(value) => {
+                self.settings.sync.prefix = value;
+                self.settings.save();
+            }
+            AppMsg::SyncAccessKeyChanged(value) => {
+                self.settings.sync.access_key_id = value;
+                self.settings.save();
+            }
+            AppMsg::SyncSecretKeyChanged(value) => {
+                self.settings.sync.secret_access_key = value;
+                self.settings.save();
+            }
             AppMsg::DialogSave => self.save_note(),
             AppMsg::DialogDiscard => {
                 self.dirty = false;
@@ -1169,6 +1295,37 @@ impl App {
                 }
                 Err(e) => error_dialog(&self.widgets.window, &e),
             },
+            DbEvent::SyncDone(stats) => {
+                self.settings.sync.last_synced_at = stats.last_synced_at.clone();
+                self.settings.save();
+                let mut parts = Vec::new();
+                if stats.uploaded > 0 {
+                    parts.push(format!("{} {}", stats.uploaded, tr!("up")));
+                }
+                if stats.downloaded > 0 {
+                    parts.push(format!("{} {}", stats.downloaded, tr!("down")));
+                }
+                if stats.trashed > 0 {
+                    parts.push(format!("{} {}", stats.trashed, tr!("trashed")));
+                }
+                if stats.conflicts > 0 {
+                    parts.push(format!("{} {}", stats.conflicts, tr!("conflicts")));
+                }
+                let detail = if parts.is_empty() {
+                    tr!("Nothing to sync").to_string()
+                } else {
+                    parts.join(", ")
+                };
+                self.widgets.status_label.set_text(&detail);
+                // Downloaded/trashed notes changed the lists; reload them.
+                self.worker.emit(DbMsg::LoadNotebooks);
+                self.worker.emit(DbMsg::LoadTags);
+                self.refresh_current_list();
+            }
+            DbEvent::SyncFailed(e) => {
+                self.widgets.status_label.set_text(tr!("Sync failed"));
+                error_dialog(&self.widgets.window, &e);
+            }
             DbEvent::Error(e) => error_dialog(&self.widgets.window, &e),
         }
     }

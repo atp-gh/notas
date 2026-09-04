@@ -17,10 +17,13 @@ A fast, local-first note-taking app for Linux, written in Rust.
 Workspace with two crates:
 
 - `notas-core` — pure data layer: schema, repository, FTS5 search, export,
-  backup. No GTK. Fully unit-tested (`cargo test -p notas-core`).
+  backup, and the sync *planner* (pure conflict/deletion logic, fully
+  unit-tested). No GTK. Fully unit-tested (`cargo test -p notas-core`).
 - `notas` — the GTK app. The UI thread never touches SQLite directly: every
   database operation goes through an async worker (`DbWorker`) that runs on
-  relm4's tokio runtime, keeping the UI responsive.
+  relm4's tokio runtime, keeping the UI responsive. The S3 I/O executor
+  (`sync.rs`) also runs on that worker, so a manual sync never blocks the
+  UI either.
 
 ## Building
 
@@ -51,9 +54,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 - Trash with restore / permanent delete
 - Markdown export (safety valve for the DB-only storage)
 - One-click SQLite backup (`VACUUM INTO`)
+- Manual sync to any S3-compatible store (AWS S3, Cloudflare R2, Backblaze
+  B2, MinIO, …) — ☰ menu → “Sync now…”; configuration under Settings → Sync
 - Settings (☰ menu → Settings…): theme (follow system / light / dark,
-  applied immediately), line-number gutter, status bar — persisted to
-  `$XDG_CONFIG_HOME/notas/settings.json`
+  applied immediately), line-number gutter, status bar, sync target &
+  credentials — persisted to `$XDG_CONFIG_HOME/notas/settings.json`
 - Keyboard shortcuts: Ctrl+N new note, Ctrl+S save, Ctrl+F find, Ctrl+Shift+F
   search notes, Ctrl+E preview, F3 next match, Ctrl+Q quit
 
@@ -62,8 +67,57 @@ cargo clippy --workspace --all-targets -- -D warnings
 All user-visible strings are wrapped in `tr!()` (see `notas/src/tr.rs`), so
 switching to gettext later is a mechanical change.
 
+## Sync
+
+Sync is **manual**: ☰ menu → “Sync now…” pushes local changes up and pulls
+remote changes down in one pass. There is no background auto-sync yet.
+
+Each note is identified across devices by a stable uuid (assigned on first
+sync; the SQLite `notes.id` never leaves the machine). On the bucket, under
+the configured key prefix (default `notas/`), every note is a pair of
+objects:
+
+```
+notes/<uuid>.md        — the Markdown body
+meta/<uuid>.json       — sidecar: title, notebook path, tags, trash state,
+                         updated_at, content hash
+```
+
+### Conflict and deletion rules
+
+- **Last-write-wins** on `updated_at` (UTC, second resolution).
+- Same-second *content* collision: both texts are kept — the local note
+  stays, and the remote version is imported as a new “`<title> (conflict
+  copy)`” note.
+- Same-second metadata-only difference (title, notebook, tags, trash): the
+deterministically smaller tuple wins on every device, so state converges
+instead of oscillating.
+- **Trash propagates** both ways (it's just a state in the sidecar).
+- **“Delete forever” does not propagate as a deletion**: it uploads a
+tombstone sidecar, and other devices move their copy to the trash instead
+of deleting it — a permanent delete on one device never destroys the note
+elsewhere. Deleting a note on *all* devices requires deleting each copy.
+  Restoring a note on one device resurrects it everywhere.
+
+### Known limitations (v1)
+
+- Notebook and tag **renames** only propagate once a contained note is
+  edited (the sidecar carries the *current* names at upload time).
+- If you're editing a note while syncing, the save happens first; the open
+  editor buffer is not re-synced in place (switch notes to reload).
+- Two notes with the same title but different uuids are two separate notes
+  and are never merged.
+- S3 listings are paginated, so thousands of notes are fine.
+
+### Security
+
+The access key and secret are stored **in plaintext** in
+`settings.json` (like Joplin does), entered in the UI. Use a dedicated
+credential restricted to the sync bucket only, so a leaked settings file
+only exposes this one bucket and can be revoked independently.
+
 ## Roadmap (v2)
 
 Backlinks (`[[wikilink]]`), attachments/images, spell checking, command
 palette, multiple editor tabs, custom incremental syntax highlighting,
-sync.
+automatic / real-time sync.

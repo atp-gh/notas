@@ -8,6 +8,8 @@ description = "Core data layer for Notas: schema, repository, search (no GTK)"
 thiserror.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS notes (
     title       TEXT NOT NULL DEFAULT '',
     content     TEXT NOT NULL DEFAULT '',
     is_trashed  INTEGER NOT NULL DEFAULT 0,
+    -- Stable identity across devices, assigned by the sync engine
+    -- (NULL until the first sync assigns one). Indexed in `db.rs` after
+    -- the column has been migrated in for pre-existing databases.
+    uuid        TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -34,6 +38,15 @@ CREATE TABLE IF NOT EXISTS note_tags (
 
 CREATE INDEX IF NOT EXISTS idx_notes_notebook ON notes(notebook_id);
 CREATE INDEX IF NOT EXISTS idx_notes_trashed  ON notes(is_trashed);
+
+-- Tombstones for the sync engine: uuids of notes permanently deleted on
+-- this device. They prevent a deleted note from "resurrecting" from the
+-- remote store on the next sync, and let other devices move their copy to
+-- the trash instead of deleting it.
+CREATE TABLE IF NOT EXISTS sync_tombstones (
+    uuid       TEXT PRIMARY KEY,
+    deleted_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 -- Full-text search over title + content, external content keeps the index
 -- in sync with the notes table via triggers.
