@@ -87,7 +87,33 @@ impl Default for InterfaceSettings {
     }
 }
 
-/// Sync section: S3-compatible object storage target and credentials.
+/// Which backend the notes sync to. The settings dialog's "Sync type"
+/// combo lists these; S3 is the only implemented backend today, with
+/// WebDAV and others expected to follow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyncType {
+    /// S3-compatible object storage (AWS, Cloudflare R2, Backblaze B2,
+    /// MinIO, …).
+    #[default]
+    S3,
+}
+
+impl SyncType {
+    /// Index into the sync-type combo row (label order in `settings_window`).
+    pub fn index(self) -> u32 {
+        match self {
+            Self::S3 => 0,
+        }
+    }
+
+    /// Inverse of [`SyncType::index`]; unknown indices map to `S3`.
+    pub fn from_index(_index: u32) -> Self {
+        Self::S3
+    }
+}
+
+/// Sync section: sync backend plus backend-specific target and credentials.
 ///
 /// Stored in the same plaintext settings file as everything else (see
 /// `Settings::load`). Access keys are secrets — the README recommends a
@@ -96,6 +122,8 @@ impl Default for InterfaceSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SyncSettings {
+    /// Sync backend; `S3` is the only implemented value for now.
+    pub kind: SyncType,
     /// Custom endpoint URL (`https://<account>.r2.cloudflarestorage.com`
     /// for R2, MinIO's address, …). Empty means AWS S3.
     pub endpoint: String,
@@ -117,6 +145,7 @@ pub struct SyncSettings {
 impl Default for SyncSettings {
     fn default() -> Self {
         Self {
+            kind: SyncType::S3,
             endpoint: String::new(),
             region: "us-east-1".into(),
             bucket: String::new(),
@@ -234,7 +263,9 @@ mod tests {
         assert_eq!(s.theme.mode, ThemeMode::System);
         assert!(!s.editor.show_line_numbers);
         assert!(s.interface.show_status_bar);
-        // Sync defaults: AWS, `notas/` prefix, nothing configured yet.
+        // Sync defaults: S3 backend, AWS defaults, `notas/` prefix,
+        // nothing configured yet.
+        assert_eq!(s.sync.kind, SyncType::S3);
         assert_eq!(s.sync.region, "us-east-1");
         assert_eq!(s.sync.prefix, "notas/");
         assert!(s.sync.endpoint.is_empty());
@@ -343,5 +374,20 @@ mod tests {
         assert!(text.contains("\"show_status_bar\": true"), "{text}");
         assert!(text.contains("\"prefix\": \"notas/\""), "{text}");
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sync_type_serde_uses_kebab_case() {
+        assert_eq!(
+            serde_json::from_str::<SyncType>("\"s3\"").unwrap(),
+            SyncType::S3
+        );
+        assert_eq!(serde_json::to_string(&SyncType::S3).unwrap(), "\"s3\"");
+    }
+
+    #[test]
+    fn sync_type_indices_roundtrip() {
+        let kind = SyncType::S3;
+        assert_eq!(SyncType::from_index(kind.index()), kind);
     }
 }

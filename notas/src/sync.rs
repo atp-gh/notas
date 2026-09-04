@@ -29,6 +29,8 @@ use notas_core::repo;
 use notas_core::sync::{LocalNote, RemoteEntry, Sidecar, SyncAction, content_hash, plan_sync};
 
 use crate::config::SyncSettings;
+#[cfg(test)]
+use crate::config::SyncType;
 
 /// Outcome of one sync run, reported to the status bar.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -351,6 +353,7 @@ mod e2e_tests {
         let bucket = format!("notas-e2e-{unique}");
 
         let settings = SyncSettings {
+            kind: SyncType::S3,
             endpoint,
             region: "us-east-1".into(),
             bucket: bucket.clone(),

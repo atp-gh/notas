@@ -17,7 +17,7 @@ use sqlx::SqlitePool;
 
 use notas_core::models::{Note, Notebook, SearchHit, Tag, TagCount};
 
-use crate::config::{Settings, ThemeMode};
+use crate::config::{Settings, SyncType, ThemeMode};
 use crate::db_worker::{DbEvent, DbMsg, DbWorker};
 use crate::editor::{Editor, build_editor};
 use crate::settings_window::build_settings_window;
@@ -76,6 +76,7 @@ pub enum AppMsg {
     ToggleStatusBar(bool),
     // sync
     SyncNow,
+    SyncTypeChanged(SyncType),
     SyncEndpointChanged(String),
     SyncRegionChanged(String),
     SyncBucketChanged(String),
@@ -1154,6 +1155,10 @@ impl App {
                 }
                 self.widgets.sync_label.set_text(tr!("Syncing…"));
                 self.worker.emit(DbMsg::SyncNow(self.settings.sync.clone()));
+            }
+            AppMsg::SyncTypeChanged(kind) => {
+                self.settings.sync.kind = kind;
+                self.settings.save();
             }
             AppMsg::SyncEndpointChanged(value) => {
                 self.settings.sync.endpoint = value;

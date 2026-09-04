@@ -10,7 +10,7 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use crate::app::AppMsg;
-use crate::config::{Settings, ThemeMode};
+use crate::config::{Settings, SyncType, ThemeMode};
 use crate::tr;
 
 /// Build the settings window. `emit` forwards UI events to the app. The
@@ -155,41 +155,19 @@ where
         });
     }
 
-    // Provider presets fill endpoint/region with common defaults; the
-    // entries stay editable afterwards.
-    let provider_model = gtk::StringList::new(&[
-        tr!("Custom"),
-        tr!("AWS S3"),
-        tr!("Cloudflare R2"),
-        tr!("Backblaze B2"),
-        tr!("MinIO"),
-    ]);
-    let provider_row = adw::ComboRow::new();
-    provider_row.set_title(tr!("Provider"));
-    provider_row.set_subtitle(tr!("Fills the endpoint and region fields"));
-    provider_row.set_model(Some(&provider_model));
+    // Sync backend: the combo lists sync *types* (S3 today; WebDAV and
+    // others are expected to follow). The fields below belong to the
+    // selected type; S3 is the only implemented backend so far.
+    let type_model = gtk::StringList::new(&[tr!("S3")]);
+    let type_row = adw::ComboRow::new();
+    type_row.set_title(tr!("Sync type"));
+    type_row.set_subtitle(tr!("Backend used to sync notes"));
+    type_row.set_model(Some(&type_model));
+    type_row.set_selected(settings.sync.kind.index());
     {
-        let endpoint = endpoint_entry.clone();
-        let region = region_entry.clone();
-        provider_row.connect_selected_notify(move |row| {
-            match row.selected() {
-                // AWS: empty endpoint + default region.
-                1 => {
-                    endpoint.set_text("");
-                    region.set_text("us-east-1");
-                }
-                // R2: region is `auto`; the endpoint is account-specific,
-                // so only the region is filled.
-                2 => region.set_text("auto"),
-                // B2: default region; the endpoint is account-specific.
-                3 => region.set_text("us-west-002"),
-                // MinIO: typical local development default.
-                4 => {
-                    endpoint.set_text("http://localhost:9000");
-                    region.set_text("us-east-1");
-                }
-                _ => {}
-            }
+        let emit = emit.clone();
+        type_row.connect_selected_notify(move |row| {
+            emit(AppMsg::SyncTypeChanged(SyncType::from_index(row.selected())));
         });
     }
 
@@ -202,7 +180,7 @@ where
     };
     last_synced_row.set_subtitle(&last_synced);
 
-    sync_group.add(&provider_row);
+    sync_group.add(&type_row);
     sync_group.add(&endpoint_entry);
     sync_group.add(&region_entry);
     sync_group.add(&bucket_entry);
@@ -337,13 +315,19 @@ mod tests {
         bar.set_active(false);
         assert!(matches!(pop(&messages), AppMsg::ToggleStatusBar(false)));
 
-        // Sync page: one provider combo + the theme combo, and entries
+        // Sync page: one sync-type combo + the theme combo, and entries
         // that emit their field-changed messages on edit.
         let mut combos = Vec::new();
         find_all::<adw::ComboRow>(&window, &mut combos);
-        assert_eq!(combos.len(), 2, "theme + provider combo rows");
+        assert_eq!(combos.len(), 2, "theme + sync-type combo rows");
         assert_eq!(combos[0].title(), "Theme");
-        assert_eq!(combos[1].title(), "Provider");
+        assert_eq!(combos[1].title(), "Sync type");
+
+        // Only S3 is implemented so far: the row reflects the current
+        // setting and is fixed at the single available entry (no change
+        // can be made until a second backend type exists).
+        let type_row = &combos[1];
+        assert_eq!(type_row.selected(), SyncType::S3.index());
 
         let mut entries = Vec::new();
         find_all::<adw::EntryRow>(&window, &mut entries);
