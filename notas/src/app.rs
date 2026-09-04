@@ -83,6 +83,11 @@ pub enum AppMsg {
     SyncPrefixChanged(String),
     SyncAccessKeyChanged(String),
     SyncSecretKeyChanged(String),
+    SyncUrlChanged(String),
+    SyncDirectoryChanged(String),
+    SyncUsernameChanged(String),
+    SyncPasswordChanged(String),
+    SyncInsecureTlsChanged(bool),
 }
 
 #[derive(Debug, Clone)]
@@ -1142,9 +1147,15 @@ impl App {
             }
             AppMsg::SyncNow => {
                 if !self.settings.sync.is_configured() {
-                    self.widgets
-                        .status_label
-                        .set_text(tr!("Sync: configure a bucket and keys in Settings"));
+                    let hint = match self.settings.sync.kind {
+                        SyncType::S3 => {
+                            tr!("Sync: configure a bucket and keys in Settings")
+                        }
+                        SyncType::WebDAV => {
+                            tr!("Sync: configure the server URL and password in Settings")
+                        }
+                    };
+                    self.widgets.status_label.set_text(hint);
                     return;
                 }
                 // Save unsaved edits first so the sync sees the latest
@@ -1154,34 +1165,55 @@ impl App {
                     self.save_note();
                 }
                 self.widgets.sync_label.set_text(tr!("Syncing…"));
-                self.worker.emit(DbMsg::SyncNow(self.settings.sync.clone()));
+                self.worker
+                    .emit(DbMsg::SyncNow(Box::new(self.settings.sync.clone())));
             }
             AppMsg::SyncTypeChanged(kind) => {
                 self.settings.sync.kind = kind;
                 self.settings.save();
             }
             AppMsg::SyncEndpointChanged(value) => {
-                self.settings.sync.endpoint = value;
+                self.settings.sync.s3.endpoint = value;
                 self.settings.save();
             }
             AppMsg::SyncRegionChanged(value) => {
-                self.settings.sync.region = value;
+                self.settings.sync.s3.region = value;
                 self.settings.save();
             }
             AppMsg::SyncBucketChanged(value) => {
-                self.settings.sync.bucket = value;
+                self.settings.sync.s3.bucket = value;
                 self.settings.save();
             }
             AppMsg::SyncPrefixChanged(value) => {
-                self.settings.sync.prefix = value;
+                self.settings.sync.s3.prefix = value;
                 self.settings.save();
             }
             AppMsg::SyncAccessKeyChanged(value) => {
-                self.settings.sync.access_key_id = value;
+                self.settings.sync.s3.access_key_id = value;
                 self.settings.save();
             }
             AppMsg::SyncSecretKeyChanged(value) => {
-                self.settings.sync.secret_access_key = value;
+                self.settings.sync.s3.secret_access_key = value;
+                self.settings.save();
+            }
+            AppMsg::SyncUrlChanged(value) => {
+                self.settings.sync.webdav.url = value;
+                self.settings.save();
+            }
+            AppMsg::SyncDirectoryChanged(value) => {
+                self.settings.sync.webdav.directory = value;
+                self.settings.save();
+            }
+            AppMsg::SyncUsernameChanged(value) => {
+                self.settings.sync.webdav.username = value;
+                self.settings.save();
+            }
+            AppMsg::SyncPasswordChanged(value) => {
+                self.settings.sync.webdav.password = value;
+                self.settings.save();
+            }
+            AppMsg::SyncInsecureTlsChanged(on) => {
+                self.settings.sync.webdav.insecure_tls = on;
                 self.settings.save();
             }
             AppMsg::DialogSave => self.save_note(),

@@ -56,10 +56,12 @@ pub enum DbMsg {
     Search(String),
     ExportMarkdown(PathBuf),
     Backup(PathBuf),
-    /// Run one full sync against the configured S3-compatible store.
+    /// Run one full sync against the configured backend (S3 or WebDAV).
     /// Processed like every other message (sequentially on the worker), so
-    /// a save emitted just before it is guaranteed to be visible.
-    SyncNow(crate::config::SyncSettings),
+    /// a save emitted just before it is guaranteed to be visible. Boxed
+    /// because the settings (both backends' sections) outgrew the enum
+    /// variant lint's threshold.
+    SyncNow(Box<crate::config::SyncSettings>),
 }
 
 #[derive(Debug, Clone)]
@@ -165,7 +167,7 @@ async fn handle(pool: SqlitePool, msg: DbMsg) -> DbEvent {
             Ok(()) => Ok(DbEvent::BackupDone(Ok(()))),
             Err(e) => Ok(DbEvent::BackupDone(Err(format!("{e:#}")))),
         },
-        DbMsg::SyncNow(settings) => match crate::sync::run_sync(&pool, &settings).await {
+        DbMsg::SyncNow(settings) => match crate::sync::run_sync(&pool, settings.as_ref()).await {
             Ok(stats) => Ok(DbEvent::SyncDone(stats)),
             Err(e) => Ok(DbEvent::SyncFailed(e)),
         },

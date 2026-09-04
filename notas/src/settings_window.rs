@@ -80,152 +80,157 @@ where
     page.add(&editor_group);
     window.add(&page);
 
-    // --- sync: target and credentials -----------------------------
+    // --- sync: backend + target credentials -------------------------
     let sync_page = adw::PreferencesPage::new();
     sync_page.set_title(tr!("Sync"));
 
     let sync_group = adw::PreferencesGroup::new();
     sync_group.set_title(tr!("Sync target"));
     sync_group.set_description(Some(tr!(
-        "Notes sync as Markdown files to the backend selected above. Only \
-         S3 is implemented so far; the fields below configure the \
-         S3-compatible bucket."
+        "Notes sync as Markdown files to the backend selected above; the \
+         fields shown belong to that backend."
     )));
+
+    // Backend selector: both S3 and WebDAV are implemented, so a plain
+    // combo row is enough; the row sets below are shown per selection.
+    let type_model = gtk::StringList::new(&[tr!("S3"), tr!("WebDAV")]);
+    let type_row = adw::ComboRow::new();
+    type_row.set_title(tr!("Sync type"));
+    type_row.set_subtitle(tr!("Backend used to sync notes"));
+    type_row.set_model(Some(&type_model));
+    type_row.set_selected(settings.sync.kind.index());
 
     // adw::EntryRow / adw::PasswordEntryRow expose their text through the
     // GtkEditable interface (the Rust bindings only surface a few direct
     // methods), which is in scope via the gtk prelude.
+    let mut s3_rows: Vec<gtk::Widget> = Vec::new();
+
     let endpoint_entry = adw::EntryRow::new();
     endpoint_entry.set_title(tr!("Endpoint (optional)"));
-    endpoint_entry.set_text(&settings.sync.endpoint);
+    endpoint_entry.set_text(&settings.sync.s3.endpoint);
     {
         let emit = emit.clone();
         endpoint_entry.connect_changed(move |row| {
             emit(AppMsg::SyncEndpointChanged(row.text().to_string()));
         });
     }
+    s3_rows.push(endpoint_entry.upcast::<gtk::Widget>());
 
     let region_entry = adw::EntryRow::new();
     region_entry.set_title(tr!("Region"));
-    region_entry.set_text(&settings.sync.region);
+    region_entry.set_text(&settings.sync.s3.region);
     {
         let emit = emit.clone();
         region_entry.connect_changed(move |row| {
             emit(AppMsg::SyncRegionChanged(row.text().to_string()));
         });
     }
+    s3_rows.push(region_entry.upcast::<gtk::Widget>());
 
     let bucket_entry = adw::EntryRow::new();
     bucket_entry.set_title(tr!("Bucket"));
-    bucket_entry.set_text(&settings.sync.bucket);
+    bucket_entry.set_text(&settings.sync.s3.bucket);
     {
         let emit = emit.clone();
         bucket_entry.connect_changed(move |row| {
             emit(AppMsg::SyncBucketChanged(row.text().to_string()));
         });
     }
+    s3_rows.push(bucket_entry.upcast::<gtk::Widget>());
 
     let prefix_entry = adw::EntryRow::new();
     prefix_entry.set_title(tr!("Key prefix"));
-    prefix_entry.set_text(&settings.sync.prefix);
+    prefix_entry.set_text(&settings.sync.s3.prefix);
     {
         let emit = emit.clone();
         prefix_entry.connect_changed(move |row| {
             emit(AppMsg::SyncPrefixChanged(row.text().to_string()));
         });
     }
+    s3_rows.push(prefix_entry.upcast::<gtk::Widget>());
 
     let access_key_entry = adw::EntryRow::new();
     access_key_entry.set_title(tr!("Access key ID"));
-    access_key_entry.set_text(&settings.sync.access_key_id);
+    access_key_entry.set_text(&settings.sync.s3.access_key_id);
     {
         let emit = emit.clone();
         access_key_entry.connect_changed(move |row| {
             emit(AppMsg::SyncAccessKeyChanged(row.text().to_string()));
         });
     }
+    s3_rows.push(access_key_entry.upcast::<gtk::Widget>());
 
     let secret_key_entry = adw::PasswordEntryRow::new();
     secret_key_entry.set_title(tr!("Secret access key"));
-    secret_key_entry.set_text(&settings.sync.secret_access_key);
+    secret_key_entry.set_text(&settings.sync.s3.secret_access_key);
     {
         let emit = emit.clone();
         secret_key_entry.connect_changed(move |row| {
             emit(AppMsg::SyncSecretKeyChanged(row.text().to_string()));
         });
     }
+    s3_rows.push(secret_key_entry.upcast::<gtk::Widget>());
 
-    // Sync backend: the combo lists sync *types*. Only implemented types
-    // (S3 today) are selectable; WebDAV is reserved and shown greyed out
-    // until an engine exists. The fields below belong to the selected
-    // type; S3 is the only implemented backend so far.
-    let type_model = gtk::StringList::new(&[tr!("S3"), tr!("WebDAV")]);
+    let mut webdav_rows: Vec<gtk::Widget> = Vec::new();
 
-    // AdwComboRow has no per-item disabled state, so the popup rows are
-    // rendered by a custom list factory. The WebDAV row is greyed out
-    // (`dim-label`, insensitive) and is neither selectable nor
-    // activatable, so pointer clicks, hover and the keyboard all ignore
-    // it — GtkListFactoryWidget's select/activate actions check those
-    // flags before doing anything.
-    let type_factory = gtk::SignalListItemFactory::new();
-    type_factory.connect_setup(move |_factory, object| {
-        if let Some(item) = object.downcast_ref::<gtk::ListItem>() {
-            let label = gtk::Label::new(None);
-            label.set_xalign(0.0);
-            label.set_valign(gtk::Align::Center);
-            item.set_child(Some(&label));
-        }
-    });
-    type_factory.connect_bind(move |_factory, object| {
-        if let Some(item) = object.downcast_ref::<gtk::ListItem>() {
-            // Model order mirrors `SyncType::index()`: S3 at 0, so only
-            // that row is enabled.
-            let enabled = item.position() == SyncType::S3.index();
-            if let Some(text) = item
-                .item()
-                .and_then(|obj| obj.downcast::<gtk::StringObject>().ok())
-                .map(|obj| obj.string().to_string())
-                && let Some(child) = item.child()
-                && let Ok(label) = child.downcast::<gtk::Label>()
-            {
-                label.set_text(&text);
-                label.set_sensitive(enabled);
-                if enabled {
-                    label.remove_css_class("dim-label");
-                } else {
-                    label.add_css_class("dim-label");
-                }
-            }
-            item.set_selectable(enabled);
-            item.set_activatable(enabled);
-        }
-    });
-
-    let type_row = adw::ComboRow::new();
-    type_row.set_title(tr!("Sync type"));
-    type_row.set_subtitle(tr!("Backend used to sync notes"));
-    type_row.set_model(Some(&type_model));
-    type_row.set_list_factory(Some(&type_factory));
-    // Only implemented backends can be shown as selected; a hand-edited
-    // config naming a reserved one displays as S3 until it is changed.
-    let selected = if settings.sync.kind.is_implemented() {
-        settings.sync.kind.index()
-    } else {
-        SyncType::S3.index()
-    };
-    type_row.set_selected(selected);
+    let url_entry = adw::EntryRow::new();
+    url_entry.set_title(tr!("Server URL"));
+    url_entry.set_text(&settings.sync.webdav.url);
     {
         let emit = emit.clone();
-        type_row.connect_selected_notify(move |row| {
-            let kind = SyncType::from_index(row.selected());
-            if !kind.is_implemented() {
-                // Reserved backends cannot be selected; snap back to S3.
-                row.set_selected(SyncType::S3.index());
-                return;
-            }
-            emit(AppMsg::SyncTypeChanged(kind));
+        url_entry.connect_changed(move |row| {
+            emit(AppMsg::SyncUrlChanged(row.text().to_string()));
         });
     }
+    webdav_rows.push(url_entry.upcast::<gtk::Widget>());
+
+    let directory_entry = adw::EntryRow::new();
+    directory_entry.set_title(tr!("Directory"));
+    directory_entry.set_text(&settings.sync.webdav.directory);
+    {
+        let emit = emit.clone();
+        directory_entry.connect_changed(move |row| {
+            emit(AppMsg::SyncDirectoryChanged(row.text().to_string()));
+        });
+    }
+    webdav_rows.push(directory_entry.upcast::<gtk::Widget>());
+
+    let username_entry = adw::EntryRow::new();
+    username_entry.set_title(tr!("Username"));
+    username_entry.set_text(&settings.sync.webdav.username);
+    {
+        let emit = emit.clone();
+        username_entry.connect_changed(move |row| {
+            emit(AppMsg::SyncUsernameChanged(row.text().to_string()));
+        });
+    }
+    webdav_rows.push(username_entry.upcast::<gtk::Widget>());
+
+    let password_entry = adw::PasswordEntryRow::new();
+    password_entry.set_title(tr!("Password"));
+    password_entry.set_text(&settings.sync.webdav.password);
+    {
+        let emit = emit.clone();
+        password_entry.connect_changed(move |row| {
+            emit(AppMsg::SyncPasswordChanged(row.text().to_string()));
+        });
+    }
+    webdav_rows.push(password_entry.upcast::<gtk::Widget>());
+
+    let insecure_row = adw::SwitchRow::new();
+    insecure_row.set_title(tr!("Allow insecure TLS"));
+    insecure_row.set_subtitle(tr!(
+        "Accept self-signed certificates and plain http; only for trusted \
+         servers"
+    ));
+    insecure_row.set_active(settings.sync.webdav.insecure_tls);
+    {
+        let emit = emit.clone();
+        insecure_row.connect_active_notify(move |row| {
+            emit(AppMsg::SyncInsecureTlsChanged(row.is_active()));
+        });
+    }
+    webdav_rows.push(insecure_row.upcast::<gtk::Widget>());
 
     let last_synced_row = adw::ActionRow::new();
     last_synced_row.set_title(tr!("Last synced"));
@@ -236,18 +241,45 @@ where
     };
     last_synced_row.set_subtitle(&last_synced);
 
+    // Only the active backend's rows are visible; switching the combo
+    // swaps them live (each row keeps editing its own section of the
+    // settings, so nothing is lost when toggling back and forth).
+    {
+        let s3 = s3_rows.clone();
+        let webdav = webdav_rows.clone();
+        let emit = emit.clone();
+        type_row.connect_selected_notify(move |row| {
+            let kind = SyncType::from_index(row.selected());
+            show_backend_rows(kind, &s3, &webdav);
+            emit(AppMsg::SyncTypeChanged(kind));
+        });
+    }
+
     sync_group.add(&type_row);
-    sync_group.add(&endpoint_entry);
-    sync_group.add(&region_entry);
-    sync_group.add(&bucket_entry);
-    sync_group.add(&prefix_entry);
-    sync_group.add(&access_key_entry);
-    sync_group.add(&secret_key_entry);
+    for row in &s3_rows {
+        sync_group.add(row);
+    }
+    for row in &webdav_rows {
+        sync_group.add(row);
+    }
     sync_group.add(&last_synced_row);
     sync_page.add(&sync_group);
     window.add(&sync_page);
 
+    // Reflect the configured kind after the rows are attached.
+    show_backend_rows(settings.sync.kind, &s3_rows, &webdav_rows);
+
     window
+}
+
+/// Show the rows of the selected backend and hide the other set.
+fn show_backend_rows(kind: SyncType, s3_rows: &[gtk::Widget], webdav_rows: &[gtk::Widget]) {
+    for row in s3_rows {
+        row.set_visible(kind == SyncType::S3);
+    }
+    for row in webdav_rows {
+        row.set_visible(kind == SyncType::WebDAV);
+    }
 }
 
 #[cfg(test)]
@@ -327,7 +359,11 @@ mod tests {
         let theme_row = find_row::<adw::ComboRow>(&window).expect("theme ComboRow in the dialog");
         let mut switches = Vec::new();
         find_all::<adw::SwitchRow>(&window, &mut switches);
-        assert_eq!(switches.len(), 2, "line numbers + status bar switches");
+        assert_eq!(
+            switches.len(),
+            3,
+            "line numbers + status bar + insecure-TLS switches"
+        );
         let lines = switches
             .iter()
             .find(|s| s.title() == "Show line numbers")
@@ -371,34 +407,33 @@ mod tests {
         bar.set_active(false);
         assert!(matches!(pop(&messages), AppMsg::ToggleStatusBar(false)));
 
-        // Sync page: one sync-type combo + the theme combo, and entries
-        // that emit their field-changed messages on edit.
+        // Sync page: one sync-type combo + the theme combo, and rows that
+        // emit their field-changed messages on edit.
         let mut combos = Vec::new();
         find_all::<adw::ComboRow>(&window, &mut combos);
         assert_eq!(combos.len(), 2, "theme + sync-type combo rows");
         assert_eq!(combos[0].title(), "Theme");
         assert_eq!(combos[1].title(), "Sync type");
 
-        // Sync type: only S3 is implemented, but WebDAV is listed as a
-        // reserved entry (greyed out and not selectable in the popup).
-        // The row reflects the current setting and starts on S3.
+        // Sync type: both backends are implemented and selectable; the row
+        // reflects the configured kind and starts on S3.
         let type_row = &combos[1];
         assert_eq!(type_row.selected(), SyncType::S3.index());
-        assert!(!SyncType::WebDAV.is_implemented());
 
-        // The reserved WebDAV entry can never become the selection: after
-        // the combo's lazy binding is materialized (see the theme combo
-        // above), forcing the WebDAV index snaps the row back to S3, so
-        // only the S3 change is ever emitted.
+        // Switching to WebDAV sticks (no reserved-backend snap-back) and
+        // swaps the visible field rows.
         let _ = type_row.model();
         type_row.set_selected(SyncType::WebDAV.index());
         pump();
-        assert_eq!(type_row.selected(), SyncType::S3.index());
+        assert_eq!(type_row.selected(), SyncType::WebDAV.index());
         assert!(matches!(
             pop(&messages),
-            AppMsg::SyncTypeChanged(SyncType::S3)
+            AppMsg::SyncTypeChanged(SyncType::WebDAV)
         ));
 
+        // Per-backend fields: S3 rows edit the s3 section, WebDAV rows the
+        // webdav section. Rows are looked up by title because both row
+        // sets always exist in the tree (only visibility switches).
         let mut entries = Vec::new();
         find_all::<adw::EntryRow>(&window, &mut entries);
         let bucket = entries
@@ -411,11 +446,48 @@ mod tests {
             AppMsg::SyncBucketChanged(v) if v == "my-notes"
         ));
 
-        let secret = find_row::<adw::PasswordEntryRow>(&window).expect("secret key row");
+        let url = entries
+            .iter()
+            .find(|r| r.title() == "Server URL")
+            .expect("server URL row");
+        url.set_text("https://nc.example/remote.php/dav/files/alice");
+        assert!(matches!(
+            pop(&messages),
+            AppMsg::SyncUrlChanged(v) if v == "https://nc.example/remote.php/dav/files/alice"
+        ));
+
+        // Two password rows exist (S3 secret key + WebDAV password).
+        let mut password_rows = Vec::new();
+        find_all::<adw::PasswordEntryRow>(&window, &mut password_rows);
+        assert_eq!(password_rows.len(), 2);
+        let secret = password_rows
+            .iter()
+            .find(|r| r.title() == "Secret access key")
+            .expect("secret key row");
         secret.set_text("s3cr3t");
         assert!(matches!(
             pop(&messages),
             AppMsg::SyncSecretKeyChanged(v) if v == "s3cr3t"
+        ));
+        let password = password_rows
+            .iter()
+            .find(|r| r.title() == "Password")
+            .expect("webdav password row");
+        password.set_text("app-pw");
+        assert!(matches!(
+            pop(&messages),
+            AppMsg::SyncPasswordChanged(v) if v == "app-pw"
+        ));
+
+        // The insecure-TLS switch emits its message.
+        let insecure = switches
+            .iter()
+            .find(|s| s.title() == "Allow insecure TLS")
+            .expect("insecure TLS switch");
+        insecure.set_active(true);
+        assert!(matches!(
+            pop(&messages),
+            AppMsg::SyncInsecureTlsChanged(true)
         ));
 
         assert!(

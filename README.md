@@ -21,9 +21,9 @@ Workspace with two crates:
   unit-tested). No GTK. Fully unit-tested (`cargo test -p notas-core`).
 - `notas` — the GTK app. The UI thread never touches SQLite directly: every
   database operation goes through an async worker (`DbWorker`) that runs on
-  relm4's tokio runtime, keeping the UI responsive. The S3 I/O executor
-  (`sync.rs`) also runs on that worker, so a manual sync never blocks the
-  UI either.
+  relm4's tokio runtime, keeping the UI responsive. The sync executors
+  (`sync.rs`, S3 + WebDAV backends over one shared seam) also run on that
+  worker, so a manual sync never blocks the UI either.
 
 ## Building
 
@@ -54,10 +54,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 - Trash with restore / permanent delete
 - Markdown export (safety valve for the DB-only storage)
 - One-click SQLite backup (`VACUUM INTO`)
-- Manual sync to any S3-compatible store (AWS S3, Cloudflare R2, Backblaze
-  B2, MinIO, …) — ☰ menu → “Sync now…”; configuration under Settings → Sync
+- Manual sync to any **S3-compatible store** (AWS S3, Cloudflare R2,
+  Backblaze B2, MinIO, …) or any **WebDAV server** (Nextcloud, ownCloud,
+  …) — ☰ menu → “Sync now…”; configuration under Settings → Sync
 - Settings (☰ menu → Settings…): theme (follow system / light / dark,
-  applied immediately), line-number gutter, status bar, sync target &
+  applied immediately), line-number gutter, status bar, sync backend &
   credentials — persisted to `$XDG_CONFIG_HOME/notas/settings.json`
 - Keyboard shortcuts: Ctrl+N new note, Ctrl+S save, Ctrl+F find, Ctrl+Shift+F
   search notes, Ctrl+E preview, F3 next match, Ctrl+Q quit
@@ -74,10 +75,34 @@ remote changes down in one pass. There is no background auto-sync yet.
 The status bar shows the sync state at a glance: “Syncing…” while a sync
 runs, and the time of the last successful sync afterwards.
 
+### Backends
+
+- **S3-compatible object storage** (AWS S3, Cloudflare R2, Backblaze B2,
+  MinIO, …). Configure the endpoint (empty = AWS), region, bucket, key
+  prefix (default `notas/`), and an access key/secret. The bucket itself
+  must exist already.
+- **WebDAV** (Nextcloud, ownCloud, and any RFC-4918 server). Configure:
+  - *Server URL* — a DAV collection you can write to. For Nextcloud that
+    is `https://<host>/remote.php/dav/files/<user>`.
+  - *Directory* (default `notas`) — the folder under that URL where the
+    notes live; it is created automatically on the first sync. Empty the
+    field to sync straight into the URL itself.
+  - *Username* and *password* (Basic auth). For Nextcloud, create an
+    **app password** in your account settings and use that — it can be
+    revoked without touching your main password.
+  - *Allow insecure TLS* (off by default) — accepts self-signed/
+    invalid certificates and plain `http://` URLs. Only enable this for
+    a server you trust on a network you trust: with it on, credentials
+    can be read in transit and the server's identity is not verified.
+
+The settings dialog shows the fields of the selected backend; both
+backends' configuration is kept, so switching never loses what you
+entered.
+
 Each note is identified across devices by a stable uuid (assigned on first
-sync; the SQLite `notes.id` never leaves the machine). On the bucket, under
-the configured key prefix (default `notas/`), every note is a pair of
-objects:
+sync; the SQLite `notes.id` never leaves the machine). On the remote
+store, under the configured prefix / directory, every note is a pair of
+objects — the layout is identical for both backends:
 
 ```
 notes/<uuid>.md        — the Markdown body
@@ -109,14 +134,17 @@ elsewhere. Deleting a note on *all* devices requires deleting each copy.
   editor buffer is not re-synced in place (switch notes to reload).
 - Two notes with the same title but different uuids are two separate notes
   and are never merged.
-- S3 listings are paginated, so thousands of notes are fine.
+- S3 listings are paginated and WebDAV folders are listed depth-1, so
+  thousands of notes are fine either way.
+- WebDAV auth is Basic only (Digest is not implemented yet).
 
 ### Security
 
-The access key and secret are stored **in plaintext** in
-`settings.json` (like Joplin does), entered in the UI. Use a dedicated
-credential restricted to the sync bucket only, so a leaked settings file
-only exposes this one bucket and can be revoked independently.
+The access key / password are stored **in plaintext** in
+`settings.json` (like Joplin does), entered in the UI. Use scoped
+credentials: a dedicated S3 key restricted to the sync bucket only, or a
+Nextcloud app password — so a leaked settings file only exposes that one
+bucket/account and can be revoked independently.
 
 ## Roadmap (v2)
 

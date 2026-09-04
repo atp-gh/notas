@@ -6,9 +6,13 @@
 //!
 //! Every field has a sensible default: the file may be missing or partial,
 //! unknown keys are ignored, and a corrupt file falls back to the defaults
-//! (with a logged warning) instead of crashing the app. New settings are
-//! added by appending a field with a `Default`-able type, so old files
-//! keep loading unchanged.
+//! (with a logged warning) instead of crashing the app. Unknown keys stay
+//! inert, so a file written by a newer app version keeps loading. The one
+//! exception is the sync section's own layout change (see
+//! [`SyncSettings`]): its old flat S3 fields are no longer read.
+//!
+//! Settings are stored in plaintext (sync credentials included), matching
+//! apps like Joplin; the README explains how to scope each credential.
 
 use std::fs;
 use std::io;
@@ -88,9 +92,7 @@ impl Default for InterfaceSettings {
 }
 
 /// Which backend the notes sync to. The settings dialog's "Sync type"
-/// combo lists these; S3 is the only implemented backend today. WebDAV is
-/// a reserved variant: it appears in the list, greyed out and
-/// unselectable, until an engine for it exists.
+/// combo lists these; both have working engines today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SyncType {
@@ -98,10 +100,9 @@ pub enum SyncType {
     /// MinIO, …).
     #[default]
     S3,
-    /// WebDAV (Nextcloud, ownCloud, …). Reserved: no engine yet, so the
-    /// settings dialog lists it greyed out and cannot select it. Serde
-    /// needs the explicit name: `rename_all = "kebab-case"` would split
-    /// the acronym into `web-d-a-v`.
+    /// WebDAV (Nextcloud, ownCloud, …). Serde needs the explicit name:
+    /// `rename_all = "kebab-case"` would split the acronym into
+    /// `web-d-a-v`.
     #[serde(rename = "webdav")]
     WebDAV,
 }
@@ -122,26 +123,16 @@ impl SyncType {
             _ => Self::S3,
         }
     }
-
-    /// Whether a sync engine exists for this backend yet. Backends without
-    /// one are listed in the settings but greyed out and cannot be chosen;
-    /// `run_sync` refuses them anyway if one lands in a hand-edited config.
-    pub fn is_implemented(self) -> bool {
-        matches!(self, Self::S3)
-    }
 }
 
-/// Sync section: sync backend plus backend-specific target and credentials.
+/// S3-compatible object storage target.
 ///
-/// Stored in the same plaintext settings file as everything else (see
-/// `Settings::load`). Access keys are secrets — the README recommends a
-/// dedicated, bucket-scoped credential that can be revoked independently
-/// of the main account.
+/// Credentials are secrets — the README recommends a dedicated,
+/// bucket-scoped credential that can be revoked independently of the main
+/// account.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SyncSettings {
-    /// Sync backend; `S3` is the only implemented value for now.
-    pub kind: SyncType,
+pub struct S3SyncSettings {
     /// Custom endpoint URL (`https://<account>.r2.cloudflarestorage.com`
     /// for R2, MinIO's address, …). Empty means AWS S3.
     pub endpoint: String,
@@ -155,6 +146,97 @@ pub struct SyncSettings {
     pub access_key_id: String,
     /// S3 secret access key.
     pub secret_access_key: String,
+}
+
+impl Default for S3SyncSettings {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            region: "us-east-1".into(),
+            bucket: String::new(),
+            prefix: "notas/".into(),
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+        }
+    }
+}
+
+impl S3SyncSettings {
+    /// Whether a sync can even be attempted: a bucket and both credentials
+    /// must be present.
+    pub fn is_configured(&self) -> bool {
+        !self.bucket.trim().is_empty()
+            && !self.access_key_id.trim().is_empty()
+            && !self.secret_access_key.trim().is_empty()
+    }
+}
+
+/// WebDAV target (Nextcloud, ownCloud, …).
+///
+/// The URL points at a DAV collection the user can write to (for
+/// Nextcloud, `…/remote.php/dav/files/<user>`); an optional `directory`
+/// (default `notas`) is created below it and holds the notes. Credentials
+/// are stored in plaintext in the settings file like the S3 keys — the
+/// README recommends a Nextcloud *app password*.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebDavSyncSettings {
+    /// DAV collection URL (https), or http when `insecure_tls` is set.
+    pub url: String,
+    /// Username for Basic auth.
+    pub username: String,
+    /// Password for Basic auth.
+    pub password: String,
+    /// Subfolder under the URL holding the notes (`notas` by default;
+    /// empty syncs straight into the URL).
+    pub directory: String,
+    /// Accept self-signed / invalid certificates and plain `http://`.
+    /// Off by default; turning it on sends credentials in plaintext over
+    /// plain http and skips certificate checks.
+    pub insecure_tls: bool,
+}
+
+impl Default for WebDavSyncSettings {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            username: String::new(),
+            password: String::new(),
+            directory: "notas".into(),
+            insecure_tls: false,
+        }
+    }
+}
+
+impl WebDavSyncSettings {
+    /// Whether a sync can even be attempted: a URL and both credentials
+    /// must be present.
+    pub fn is_configured(&self) -> bool {
+        !self.url.trim().is_empty()
+            && !self.username.trim().is_empty()
+            && !self.password.trim().is_empty()
+    }
+}
+
+/// Sync section: sync backend plus per-backend target sections.
+///
+/// Both backends keep their own section so switching `kind` in the
+/// settings dialog never discards the other backend's configuration. The
+/// fields live in the same plaintext settings file as everything else
+/// (see `Settings::load`).
+///
+/// Note: the settings file layout changed once (v0.1): the old flat S3
+/// fields (`endpoint`, `bucket`, …) at the top of the sync section are no
+/// longer read — re-enter them under the `s3` section after upgrading.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncSettings {
+    /// Sync backend whose section is used by `run_sync`.
+    pub kind: SyncType,
+    /// S3 target (kept even while `kind` is WebDAV).
+    pub s3: S3SyncSettings,
+    /// WebDAV target (kept even while `kind` is S3).
+    pub webdav: WebDavSyncSettings,
     /// Time of the last successful sync (`YYYY-MM-DD HH:MM:SS`, device
     /// local time), or empty if never.
     pub last_synced_at: String,
@@ -164,24 +246,21 @@ impl Default for SyncSettings {
     fn default() -> Self {
         Self {
             kind: SyncType::S3,
-            endpoint: String::new(),
-            region: "us-east-1".into(),
-            bucket: String::new(),
-            prefix: "notas/".into(),
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
+            s3: S3SyncSettings::default(),
+            webdav: WebDavSyncSettings::default(),
             last_synced_at: String::new(),
         }
     }
 }
 
 impl SyncSettings {
-    /// Whether a sync can even be attempted: a bucket and both credentials
-    /// must be present.
+    /// Whether a sync can even be attempted for the selected backend: the
+    /// backend's own `is_configured` must pass.
     pub fn is_configured(&self) -> bool {
-        !self.bucket.trim().is_empty()
-            && !self.access_key_id.trim().is_empty()
-            && !self.secret_access_key.trim().is_empty()
+        match self.kind {
+            SyncType::S3 => self.s3.is_configured(),
+            SyncType::WebDAV => self.webdav.is_configured(),
+        }
     }
 }
 
@@ -281,12 +360,16 @@ mod tests {
         assert_eq!(s.theme.mode, ThemeMode::System);
         assert!(!s.editor.show_line_numbers);
         assert!(s.interface.show_status_bar);
-        // Sync defaults: S3 backend, AWS defaults, `notas/` prefix,
-        // nothing configured yet.
+        // Sync defaults: S3 backend with AWS defaults and a `notas/`
+        // prefix; the WebDAV section defaults to a `notas` subfolder.
+        // Neither backend is configured yet.
         assert_eq!(s.sync.kind, SyncType::S3);
-        assert_eq!(s.sync.region, "us-east-1");
-        assert_eq!(s.sync.prefix, "notas/");
-        assert!(s.sync.endpoint.is_empty());
+        assert_eq!(s.sync.s3.region, "us-east-1");
+        assert_eq!(s.sync.s3.prefix, "notas/");
+        assert!(s.sync.s3.endpoint.is_empty());
+        assert_eq!(s.sync.webdav.directory, "notas");
+        assert!(s.sync.webdav.url.is_empty());
+        assert!(!s.sync.webdav.insecure_tls);
         assert!(!s.sync.is_configured());
     }
 
@@ -366,10 +449,16 @@ mod tests {
         settings.theme.mode = ThemeMode::Dark;
         settings.editor.show_line_numbers = true;
         settings.interface.show_status_bar = false;
-        settings.sync.bucket = "my-notes".into();
-        settings.sync.endpoint = "https://s3.example.com".into();
-        settings.sync.access_key_id = "AK".into();
-        settings.sync.secret_access_key = "SK".into();
+        settings.sync.kind = SyncType::WebDAV;
+        settings.sync.s3.bucket = "my-notes".into();
+        settings.sync.s3.endpoint = "https://s3.example.com".into();
+        settings.sync.s3.access_key_id = "AK".into();
+        settings.sync.s3.secret_access_key = "SK".into();
+        settings.sync.webdav.url = "https://nc.example/remote.php/dav/files/alice".into();
+        settings.sync.webdav.username = "alice".into();
+        settings.sync.webdav.password = "app-pw".into();
+        settings.sync.webdav.directory = "My Notes".into();
+        settings.sync.webdav.insecure_tls = true;
         settings.sync.last_synced_at = "2026-01-01 00:00:00".into();
 
         settings.save_to(&path).unwrap();
@@ -382,7 +471,8 @@ mod tests {
         let path = temp_settings_path("json");
         Settings::default().save_to(&path).unwrap();
         let text = fs::read_to_string(&path).unwrap();
-        // Sections are namespaced and human-readable (pretty-printed).
+        // Sections are namespaced and human-readable (pretty-printed);
+        // both sync backends keep their own section.
         assert!(text.contains("\"theme\""), "{text}");
         assert!(text.contains("\"editor\""), "{text}");
         assert!(text.contains("\"interface\""), "{text}");
@@ -390,7 +480,12 @@ mod tests {
         assert!(text.contains("\"mode\": \"system\""), "{text}");
         assert!(text.contains("\"show_line_numbers\": false"), "{text}");
         assert!(text.contains("\"show_status_bar\": true"), "{text}");
+        assert!(text.contains("\"kind\": \"s3\""), "{text}");
+        assert!(text.contains("\"s3\""), "{text}");
         assert!(text.contains("\"prefix\": \"notas/\""), "{text}");
+        assert!(text.contains("\"webdav\""), "{text}");
+        assert!(text.contains("\"url\": \"\""), "{text}");
+        assert!(text.contains("\"directory\": \"notas\""), "{text}");
         let _ = fs::remove_file(&path);
     }
 
@@ -410,8 +505,33 @@ mod tests {
         for kind in [SyncType::S3, SyncType::WebDAV] {
             assert_eq!(SyncType::from_index(kind.index()), kind);
         }
-        // S3 is implemented; the reserved WebDAV backend is not yet.
-        assert!(SyncType::S3.is_implemented());
-        assert!(!SyncType::WebDAV.is_implemented());
+    }
+
+    #[test]
+    fn is_configured_depends_on_the_selected_backend() {
+        let mut settings = Settings::default();
+        assert!(!settings.sync.is_configured());
+
+        // Filling the S3 section configures the default S3 kind.
+        settings.sync.s3.bucket = "b".into();
+        settings.sync.s3.access_key_id = "AK".into();
+        settings.sync.s3.secret_access_key = "SK".into();
+        assert!(settings.sync.is_configured());
+
+        // Switching to WebDAV checks the WebDAV section instead, which is
+        // still empty.
+        settings.sync.kind = SyncType::WebDAV;
+        assert!(!settings.sync.is_configured());
+
+        // WebDAV needs url + username + password.
+        settings.sync.webdav.url = "https://nc.example".into();
+        assert!(!settings.sync.is_configured());
+        settings.sync.webdav.username = "alice".into();
+        settings.sync.webdav.password = "pw".into();
+        assert!(settings.sync.is_configured());
+
+        // A whitespace-only password does not count.
+        settings.sync.webdav.password = " ".into();
+        assert!(!settings.sync.is_configured());
     }
 }
