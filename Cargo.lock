@@ -1617,39 +1617,28 @@ dependencies = [
 name = "notas"
 version = "0.1.0"
 dependencies = [
- "glib",
- "gtk4",
- "libadwaita",
- "notas-core",
- "pango",
- "pulldown-cmark",
- "relm4",
- "serde",
- "serde_json",
- "sourceview5",
- "sqlx",
- "tokio",
- "unicode-width",
-]
-
-[[package]]
-name = "notas-core"
-version = "0.1.0"
-dependencies = [
  "argon2",
  "chacha20poly1305",
+ "glib",
+ "gtk4",
  "hex",
+ "libadwaita",
+ "pango",
+ "pulldown-cmark",
  "rand 0.8.8",
+ "relm4",
  "reqwest",
  "reqwest_dav",
  "s3",
  "serde",
  "serde_json",
+ "sourceview5",
  "sqlx",
  "subtle",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "unicode-width",
  "wiremock",
 ]
 

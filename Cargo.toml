@@ -1,33 +1,39 @@
-[workspace]
-resolver = "2"
-members = ["notas-core", "notas"]
-
-[workspace.package]
+[package]
+name = "notas"
 version = "0.1.0"
 edition = "2024"
+description = "Notas — a fast local-first note-taking app"
 
-[workspace.dependencies]
+[dependencies]
+thiserror = "2"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+hex = "0.4"
+rand = "0.8"
+subtle = "2"
+s3 = "0.1"
+reqwest_dav = { version = "0.3", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+relm4 = { version = "0.11", features = ["libadwaita"] }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_22"] }
+libadwaita = { version = "0.9", features = ["v1_9"] }
+sourceview5 = "0.11"
+pulldown-cmark = "0.13"
+glib = "0.22"
+pango = "0.22"
+unicode-width = "0.2"
 
-# Shared lint policy for the whole workspace. `all` matches the default clippy
-# set verified by CI (`-D warnings`); pedantic/restriction lints are applied
-# per-site with `#[expect(...)]` where they earn their keep.
-[workspace.lints.clippy]
+[dev-dependencies]
+tempfile = "3"
+wiremock = "0.6"
+
+[lints.clippy]
 all = "warn"
 
-# Release build: slim the binary without changing behavior.
-#
-# - lto = "thin"   cross-crate inlining + dead-code elimination (keeps link
-#                  times sane vs. "fat")
-# - codegen-units = 1  one CGU per crate maximizes LTO's reach
-# - strip = "symbols"  drop symbol table + debug info from the shipped binary
-#
-# Deliberately NOT panic = "abort": glib's main-context futures executor uses
-# `catch_unwind` around user futures (glib-0.22 main_context_futures.rs), so
-# aborting would change panic containment semantics. Unwind tables cost a
-# little size; keeping them preserves glib's documented behavior.
 [profile.release]
 lto = true
 codegen-units = 1

@@ -34,12 +34,9 @@ cargo build --release
 
 ## Architecture
 
-A workspace with two crates:
+The application is a single Cargo package with one `src/` tree. `src/core/` is the platform-neutral application layer: command/event contracts, `notes` domain models, `storage` (SQLite and filesystem), `search`, and `sync` (planner, S3/WebDAV executor, and `crypto`). It has no GTK imports. The remaining directories contain the GTK frontend and platform adapters: `app/`, `editor/`, `notes/`, `ui/`, and `platform/{linux,windows,macos}.rs`.
 
-- **`notas-core`** — the platform-neutral application layer: `core` command/event contracts, `notes` domain models, `storage` (SQLite and filesystem), `search`, and `sync` (planner, S3/WebDAV executor, and `crypto`). It has no GTK dependency and is fully unit-tested (`cargo test -p notas-core`).
-- **`notas`** — the current GTK frontend. `app/` contains the Relm4 coordinator and worker, `editor/` and `ui/` contain GTK adapters, and `platform/` isolates OS paths (`linux.rs`, `windows.rs`, `macos.rs`). The frontend translates widget events into core messages; future native frontends can reuse `notas-core` without importing GTK.
-
-The intended dependency direction is `platform/UI -> app coordinator -> notas-core`. Core commands and events do not contain widget handles, and sync/storage code never calls GTK. Compatibility re-exports remain temporarily while the remaining GTK components are split into smaller modules.
+The dependency direction is `platform/UI -> app coordinator -> core`. Core commands and events do not contain widget handles, and sync/storage code never calls GTK. The core modules are tested as part of the single package with `cargo test`.
 
 ## Sync
 
@@ -102,10 +99,10 @@ The access key / password are stored **in plaintext** in `settings.json` (like J
 
 ```bash
 # Run the full test suite (core + Markdown renderer; GUI probes are #[ignore]d)
-cargo test --workspace
+cargo test
 
-# Lint the whole workspace with warnings as errors
-cargo clippy --workspace --all-targets -- -D warnings
+# Lint the package with warnings as errors
+cargo clippy --all-targets --all-features --locked -- -D warnings
 ```
 
 ## Tech stack

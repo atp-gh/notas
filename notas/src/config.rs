@@ -1,6 +1,0 @@
-//! GTK frontend compatibility exports for persisted application settings.
-//!
-//! Settings are core data, so their definitions live in `notas-core`; this
-//! module keeps the old import path stable while the UI is migrated.
-
-pub use notas_core::config::*;
