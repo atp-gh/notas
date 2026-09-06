@@ -497,6 +497,14 @@ impl SimpleComponent for App {
         view_title.set_halign(gtk::Align::Start);
         view_title.add_css_class("title-2");
 
+        let new_note_btn = gtk::Button::from_icon_name("document-new-symbolic");
+        new_note_btn.set_tooltip_text(Some(tr!("New note (Ctrl+N)")));
+        new_note_btn.set_valign(gtk::Align::Center);
+        {
+            let emit = emit.clone();
+            new_note_btn.connect_clicked(move |_| emit(AppMsg::NewNote));
+        }
+
         let restore_btn = gtk::Button::with_label(tr!("Restore"));
         restore_btn.set_visible(false);
         let delete_btn = gtk::Button::with_label(tr!("Delete forever"));
@@ -511,6 +519,7 @@ impl SimpleComponent for App {
 
         let middle_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         middle_header.append(&view_title);
+        middle_header.append(&new_note_btn);
         middle_header.set_hexpand(true);
         middle_header.append(&restore_btn);
         middle_header.append(&delete_btn);
@@ -649,13 +658,6 @@ impl SimpleComponent for App {
         editor_stack_area.set_vexpand(true);
 
         // ------------------------------------------------------------- header
-        let new_note_btn = gtk::Button::from_icon_name("document-new-symbolic");
-        new_note_btn.set_tooltip_text(Some(tr!("New note (Ctrl+N)")));
-        {
-            let emit = emit.clone();
-            new_note_btn.connect_clicked(move |_| emit(AppMsg::NewNote));
-        }
-
         let trash_btn = gtk::Button::from_icon_name("user-trash-symbolic");
         trash_btn.set_tooltip_text(Some(tr!("Move note to trash")));
         {
@@ -703,7 +705,6 @@ impl SimpleComponent for App {
         menu_btn.set_tooltip_text(Some(tr!("Menu")));
 
         let header = gtk::HeaderBar::new();
-        header.pack_start(&new_note_btn);
         header.pack_end(&menu_btn);
         header.pack_end(&preview_btn);
         header.pack_end(&trash_btn);
