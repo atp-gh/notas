@@ -22,7 +22,7 @@ use crate::app::db_worker::DbWorker;
 use crate::core::config::{Settings, SyncType};
 use crate::core::{DbEvent, DbMsg};
 use crate::editor::{Editor, build_editor};
-use crate::notes::{clear_flow, clear_list, row as note_row};
+use crate::notes::{clear_flow, row as note_row};
 use crate::tr;
 use crate::ui::dialogs;
 use crate::ui::settings::build_settings_window;
@@ -1270,25 +1270,18 @@ impl App {
     }
 
     fn rebuild_notes_list(&self) {
-        clear_list(&self.widgets.notes_list);
-        let mut ids = self.row_ids.borrow_mut();
-        ids.clear();
-
-        let (list, empty) = if matches!(self.mode, ViewMode::Trash) {
-            (&self.trashed, self.trashed.is_empty())
+        let list = if matches!(self.mode, ViewMode::Trash) {
+            &self.trashed
         } else {
-            (&self.notes, self.notes.is_empty())
+            &self.notes
         };
-        self.widgets.notes_empty.set_visible(empty);
-        for note in list {
-            ids.push(note.id);
-            self.widgets
-                .notes_list
-                .append(&note_row(&note.title, &note.updated_at));
-        }
-        // Release the `row_ids` guard before re-borrowing it in
-        // `select_note_row`; without this the RefCell panics.
-        drop(ids);
+        crate::notes::list::render_notes(
+            &self.widgets.notes_list,
+            &self.widgets.notes_empty,
+            &self.row_ids,
+            list,
+            note_row,
+        );
 
         if let Some(id) = self.current_note {
             self.select_note_row(id);
@@ -1296,17 +1289,13 @@ impl App {
     }
 
     fn render_search_results(&self, hits: Vec<SearchHit>) {
-        clear_list(&self.widgets.notes_list);
-        let mut ids = self.row_ids.borrow_mut();
-        ids.clear();
-        self.widgets.notes_empty.set_visible(hits.is_empty());
-        for hit in &hits {
-            ids.push(hit.id);
-            self.widgets
-                .notes_list
-                .append(&note_row(&hit.title, &hit.snippet));
-        }
-        drop(ids);
+        crate::notes::list::render_search(
+            &self.widgets.notes_list,
+            &self.widgets.notes_empty,
+            &self.row_ids,
+            &hits,
+            note_row,
+        );
     }
 
     fn select_note_row(&self, id: i64) {

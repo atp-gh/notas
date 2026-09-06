@@ -4,6 +4,7 @@
 //! widgets separate from the application coordinator prevents GTK row
 //! bookkeeping from leaking into core note operations.
 
+pub(crate) mod list;
 pub(crate) mod notebook;
 pub(crate) mod sidebar;
 

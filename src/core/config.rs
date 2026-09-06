@@ -1,8 +1,7 @@
 //! Application settings.
 //!
-//! A small JSON file kept at `$XDG_CONFIG_HOME/notas/settings.json`
-//! (falling back to `~/.config/notas/settings.json`), mirroring
-//! The storage layer owns data paths; this module owns config serialization.
+//! Settings serialization. Filesystem locations are supplied by the platform
+//! adapter; this module owns only the data format and persistence operations.
 //!
 //! Every field has a sensible default: the file may be missing or partial,
 //! unknown keys are ignored, and a corrupt file falls back to the defaults
@@ -384,7 +383,7 @@ impl Settings {
 
     /// Persist to a specific file, replacing it atomically so a crash
     /// mid-write can never leave a truncated settings file behind.
-    fn save_to(&self, path: &Path) -> io::Result<()> {
+    pub fn save_to(&self, path: &Path) -> io::Result<()> {
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(dir)?;
         let text = serde_json::to_string_pretty(self).map_err(io::Error::other)?;

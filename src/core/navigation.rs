@@ -1,4 +1,4 @@
-//! Frontend-neutral navigation types.
+//! Navigation state shared by all frontends.
 
 /// Built-in top-level note views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,7 +11,7 @@ pub enum ViewId {
     Trash,
 }
 
-/// Current navigation mode shared by frontends.
+/// Current navigation mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewMode {
     /// All non-deleted notes.
