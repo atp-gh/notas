@@ -29,7 +29,7 @@
 //! # Examples
 //!
 //! ```
-//! use notas::core::sync::crypto::Cipher;
+//! use notas::sync::crypto::Cipher;
 //!
 //! let cipher = Cipher::derive("correct horse battery staple", [0; 16]).unwrap();
 //! let blob = cipher.encrypt(b"secret").unwrap();

@@ -18,9 +18,9 @@ pub enum Error {
     #[error("note with id {0} does not exist")]
     NoteNotFound(i64),
 
-    /// An encryption failure from [`crate::core::sync::crypto`].
+    /// An encryption failure from [`crate::sync::crypto`].
     #[error(transparent)]
-    Crypto(#[from] crate::core::sync::crypto::CryptoError),
+    Crypto(#[from] crate::sync::crypto::CryptoError),
 }
 
 /// Convenience alias used across the crate.

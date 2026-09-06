@@ -93,7 +93,7 @@ async fn handle(pool: SqlitePool, msg: DbMsg) -> DbEvent {
             Err(e) => Ok(DbEvent::BackupDone(Err(format!("{e:#}")))),
         },
         DbMsg::SyncNow(settings) => {
-            match crate::core::sync::executor::run_sync(&pool, settings.as_ref()).await {
+            match crate::sync::executor::run_sync(&pool, settings.as_ref()).await {
                 Ok(stats) => Ok(DbEvent::SyncDone(stats)),
                 Err(e) => Ok(DbEvent::SyncFailed(e)),
             }

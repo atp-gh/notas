@@ -34,7 +34,7 @@ cargo build --release
 
 ## Architecture
 
-The application is a single Cargo package with one `src/` tree. `src/core/` is the platform-neutral application layer: command/event contracts, `notes` domain models, `storage` (SQLite and filesystem), `search`, and `sync` (planner, S3/WebDAV executor, and `crypto`). It has no GTK imports. The remaining directories contain the GTK frontend and platform adapters: `app/`, `editor/`, `notes/`, `ui/`, and `platform/{linux,windows,macos}.rs`.
+The application is a single Cargo package with one `src/` tree. `src/core/` is the platform-neutral application layer: command/event contracts and shared state. Its sibling core services are `notes/`, `storage/`, `search/`, and `sync/` (planner, S3/WebDAV executor, and `crypto`). None of these modules import GTK. The remaining directories contain the GTK frontend and platform adapters: `app/`, `editor/`, `ui/`, and `platform/{linux,windows,macos}.rs`.
 
 The dependency direction is `platform/UI -> app coordinator -> core`. Core commands and events do not contain widget handles, and sync/storage code never calls GTK. The core modules are tested as part of the single package with `cargo test`.
 

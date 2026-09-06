@@ -336,7 +336,7 @@ where
                 // Enforce the minimum here so a weak password can't be
                 // enabled in the first place; the sync engine enforces it
                 // again as the source of truth.
-                if password_row.text().len() < crate::core::sync::crypto::MIN_PASSWORD_LEN {
+                if password_row.text().len() < crate::sync::crypto::MIN_PASSWORD_LEN {
                     guard.set(true);
                     row.set_active(false);
                     guard.set(false);

@@ -9,7 +9,6 @@ pub mod notes;
 pub mod search;
 pub mod state;
 pub mod storage;
-pub mod sync;
 pub mod ui;
 
 pub use error::{Error, Result};
@@ -18,7 +17,7 @@ use std::path::PathBuf;
 
 use self::config::{SyncSettings, SyncType, ThemeMode};
 use self::notes::models::{Note, Notebook, SearchHit, Tag, TagCount};
-use self::sync::SyncStats;
+use crate::sync::SyncStats;
 
 pub use self::ui::{ViewId, ViewMode};
 

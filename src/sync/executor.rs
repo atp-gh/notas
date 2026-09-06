@@ -1,6 +1,6 @@
 //! Sync engine: S3-compatible object storage and WebDAV backends.
 //!
-//! The pure planning logic lives in `crate::core::sync` (see its module doc
+//! The pure planning logic lives in `crate::sync` (see its module doc
 //! for the object layout, conflict rules and tombstone semantics). This
 //! module is the executor: each backend implements the `SyncStore` seam
 //! — list the remote index, fetch/upload markdown bodies and sidecars —
@@ -15,7 +15,7 @@
 //! backend's `meta/.encryption-verifier` object, writing it on a
 //! never-encrypted backend, and aborting on a wrong password before any
 //! note traffic), then every store call seals objects on upload and opens
-//! them on download. See [`crate::core::sync::crypto`] for the algorithm and blob
+//! them on download. See [`crate::sync::crypto`] for the algorithm and blob
 //! format.
 //!
 //! ## Backends
@@ -43,8 +43,8 @@ use s3::{AddressingStyle, Auth as S3Auth, Client as S3Client, Credentials};
 use sqlx::SqlitePool;
 
 use crate::core::storage::repo;
-use crate::core::sync::crypto::{self, Cipher, CryptoError, Verifier};
-use crate::core::sync::{
+use crate::sync::crypto::{self, Cipher, CryptoError, Verifier};
+use crate::sync::{
     LocalNote, RemoteEntry, Sidecar, SyncAction, SyncStats, content_hash, plan_sync,
 };
 
@@ -58,7 +58,7 @@ use crate::core::config::{S3SyncSettings, SyncSettings, SyncType, WebDavSyncSett
 /// seals objects on upload and opens them on download. The verifier
 /// methods read/write `meta/.encryption-verifier`, the object that carries
 /// the key salt and a wrong-password check (see
-/// [`crate::core::sync::crypto::Verifier`]).
+/// [`crate::sync::crypto::Verifier`]).
 trait SyncStore {
     /// Prepare the backend for note traffic (WebDAV creates its
     /// collections; a no-op for S3). Runs before the verifier is touched

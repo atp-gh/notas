@@ -3,6 +3,7 @@ pub mod core;
 mod editor;
 mod notes;
 mod platform;
+pub mod sync;
 mod ui;
 #[macro_use]
 mod tr;

@@ -1059,7 +1059,7 @@ impl App {
                 // user hears it in the status bar instead of a sync error.
                 if self.settings.sync.encryption.enabled
                     && self.settings.sync.encryption.password.trim().len()
-                        < crate::core::sync::crypto::MIN_PASSWORD_LEN
+                        < crate::sync::crypto::MIN_PASSWORD_LEN
                 {
                     self.widgets.status_label.set_text(tr!(
                         "Sync: the encryption password must be at least 8 characters"
