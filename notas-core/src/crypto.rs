@@ -25,6 +25,16 @@
 //! XChaCha20-Poly1305 authenticates the ciphertext and appends a 16-byte
 //! tag, so a wrong key, a tampered blob, or a foreign plaintext object all
 //! fail decryption loudly instead of producing garbage.
+//!
+//! # Examples
+//!
+//! ```
+//! use notas_core::crypto::Cipher;
+//!
+//! let cipher = Cipher::derive("correct horse battery staple", [0; 16]).unwrap();
+//! let blob = cipher.encrypt(b"secret").unwrap();
+//! assert_eq!(cipher.decrypt(&blob).unwrap(), b"secret");
+//! ```
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -45,8 +55,9 @@ const MAGIC: &[u8] = b"NOTASENC";
 /// versions explicitly instead of misreading them.
 const VERSION: u8 = 1;
 
-/// Argon2id salt length (16 bytes is the OWASP minimum).
-const SALT_LEN: usize = 16;
+/// Argon2id salt length (16 bytes is the OWASP minimum). Public so
+/// callers can size salt buffers without duplicating the constant.
+pub const SALT_LEN: usize = 16;
 
 /// XChaCha20-Poly1305 nonce length (192 bits, random-nonce safe).
 const NONCE_LEN: usize = 24;
@@ -97,6 +108,12 @@ impl Cipher {
     ///
     /// Devices must pass the **same salt** (read from the backend's
     /// verifier or from an object header) to end up with the same key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Argon2id parameters or the derivation
+    /// itself fail (a misconfiguration or a host that refuses the
+    /// requested memory cost).
     pub fn derive(password: &str, salt: [u8; SALT_LEN]) -> Result<Self, String> {
         let key = derive_key(password, &salt)?;
         Ok(Self { key, salt })
@@ -106,6 +123,10 @@ impl Cipher {
     ///
     /// Used when a backend has never been encrypted: the salt is persisted
     /// via the verifier so later syncs (and other devices) reuse it.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Cipher::derive`].
     pub fn generate(password: &str) -> Result<Self, String> {
         let mut salt = [0u8; SALT_LEN];
         OsRng.fill_bytes(&mut salt);
@@ -113,11 +134,17 @@ impl Cipher {
     }
 
     /// The salt this cipher was derived from.
+    #[must_use]
     pub fn salt(&self) -> [u8; SALT_LEN] {
         self.salt
     }
 
     /// Seal a plaintext into a self-describing encrypted blob.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the AEAD refuses the input (never for
+    /// valid input — the random nonce is drawn from the OS RNG).
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
         // A fresh random nonce per object: with 192-bit nonces, random
         // nonce collisions are astronomically unlikely (and, unlike GCM,
@@ -143,6 +170,12 @@ impl Cipher {
     /// Fails on anything that is not a notas blob, on an unsupported
     /// version, and — thanks to the authentication tag — on any blob
     /// sealed under a different key (wrong password) or tampered with.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a malformed blob (bad magic or version), a
+    /// blob too short to carry a header, or an authentication failure
+    /// (wrong password, tampering, or data encrypted under another key).
     pub fn decrypt(&self, blob: &[u8]) -> Result<Vec<u8>, String> {
         if blob.len() < HEADER_LEN {
             return Err("not an encrypted notas blob (too short)".to_string());
@@ -167,6 +200,10 @@ impl Cipher {
     }
 
     /// Build the verifier object for this cipher's salt and key.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Cipher::encrypt`].
     pub fn verifier(&self) -> Result<Verifier, String> {
         let check = self.encrypt(VERIFIER_PLAINTEXT)?;
         Ok(Verifier {
@@ -178,16 +215,35 @@ impl Cipher {
     /// Constant-time check that a stored verifier matches this cipher:
     /// the verifier's check value must decrypt and equal the known
     /// plaintext. `false` means the password is wrong.
+    #[must_use]
     pub fn verify(&self, verifier: &Verifier) -> bool {
-        let check = match hex::decode(&verifier.check) {
-            Ok(bytes) => bytes,
-            Err(_) => return false,
+        let Ok(check) = hex::decode(&verifier.check) else {
+            return false;
         };
-        let opened = match self.decrypt(&check) {
-            Ok(bytes) => bytes,
-            Err(_) => return false,
+        let Ok(opened) = self.decrypt(&check) else {
+            return false;
         };
         opened.len() == VERIFIER_PLAINTEXT.len() && bool::from(opened.ct_eq(VERIFIER_PLAINTEXT))
+    }
+}
+
+impl Verifier {
+    /// Decode the hex-encoded salt into bytes for [`Cipher::derive`].
+    ///
+    /// The salt length lives in this module, so callers never duplicate
+    /// the constant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the salt is not valid hex or not exactly
+    /// [`SALT_LEN`] bytes (a verifier written by a different version, or
+    /// a corrupt/foreign verifier object).
+    pub fn salt_bytes(&self) -> Result<[u8; SALT_LEN], String> {
+        let bytes = hex::decode(&self.salt)
+            .map_err(|e| format!("the verifier's salt is not valid hex: {e}"))?;
+        bytes
+            .try_into()
+            .map_err(|_| "the verifier's salt has the wrong length".to_string())
     }
 }
 
@@ -301,14 +357,22 @@ mod tests {
     fn verifier_salt_roundtrips_through_hex() {
         let cipher = cipher(PASSWORD);
         let verifier = cipher.verifier().expect("verifier");
-        let salt: [u8; SALT_LEN] = hex::decode(&verifier.salt)
-            .expect("hex salt")
-            .try_into()
-            .expect("salt length");
+        let salt = verifier.salt_bytes().expect("salt bytes");
         // The same salt must reproduce the same key, so a verifier written
         // by device A works for device B.
         let other = Cipher::derive(PASSWORD, salt).expect("derive");
         assert!(other.verify(&verifier));
+        assert_eq!(salt, cipher.salt());
+    }
+
+    #[test]
+    fn verifier_salt_rejects_bad_hex_and_wrong_length() {
+        let verifier = cipher(PASSWORD).verifier().expect("verifier");
+        let mut bad = verifier.clone();
+        bad.salt = "not hex!".into();
+        assert!(bad.salt_bytes().is_err(), "non-hex salt must fail");
+        bad.salt = "abcd".into();
+        assert!(bad.salt_bytes().is_err(), "short salt must fail");
     }
 
     #[test]

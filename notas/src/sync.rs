@@ -157,7 +157,19 @@ async fn run_sync_with(
                 stats.uploaded += 1;
             }
             SyncAction::Download { sidecar } => {
-                let content = store.get_md(cipher.as_ref(), &sidecar.uuid).await?;
+                let content = match store.get_md(cipher.as_ref(), &sidecar.uuid).await {
+                    Ok(content) => content,
+                    // Corrupt/foreign body (or, with encryption, a blob
+                    // that fails to open): skip the note instead of
+                    // aborting the whole sync; the next sync retries it.
+                    Err(e) => {
+                        eprintln!(
+                            "notas: skipping note {} — cannot download it: {e}",
+                            sidecar.uuid
+                        );
+                        continue;
+                    }
+                };
                 repo::apply_remote_note(pool, &sidecar, &content)
                     .await
                     .map_err(|e| format!("{e:#}"))?;
@@ -170,7 +182,16 @@ async fn run_sync_with(
                 stats.trashed += 1;
             }
             SyncAction::ConflictCopy { sidecar } => {
-                let content = store.get_md(cipher.as_ref(), &sidecar.uuid).await?;
+                let content = match store.get_md(cipher.as_ref(), &sidecar.uuid).await {
+                    Ok(content) => content,
+                    // Same tolerance as downloads: a remote body that
+                    // cannot be fetched/opened is skipped, keeping the
+                    // local note and the rest of the sync intact.
+                    Err(e) => {
+                        eprintln!("notas: skipping conflict copy for {} — {e}", sidecar.uuid);
+                        continue;
+                    }
+                };
                 repo::create_conflict_copy(pool, &sidecar, &content)
                     .await
                     .map_err(|e| format!("{e:#}"))?;
@@ -249,7 +270,7 @@ async fn resolve_cipher(
         Some(bytes) => {
             let verifier: Verifier = serde_json::from_slice(&bytes)
                 .map_err(|e| format!("cannot read the encryption verifier on the backend: {e}"))?;
-            let cipher = Cipher::derive(password, decode_verifier_salt(&verifier.salt)?)?;
+            let cipher = Cipher::derive(password, verifier.salt_bytes()?)?;
             if !cipher.verify(&verifier) {
                 return Err(
                     "the encryption password is wrong — enter the password that encrypted \
@@ -268,15 +289,6 @@ async fn resolve_cipher(
             Ok(Some(cipher))
         }
     }
-}
-
-/// Parse the hex-encoded salt out of a verifier object.
-fn decode_verifier_salt(hex_salt: &str) -> Result<[u8; 16], String> {
-    let bytes =
-        hex::decode(hex_salt).map_err(|e| format!("the verifier's salt is not valid hex: {e}"))?;
-    bytes
-        .try_into()
-        .map_err(|_| "the verifier's salt has the wrong length".to_string())
 }
 
 /// Seal a plaintext body for upload when encryption is active.
