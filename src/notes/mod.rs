@@ -4,6 +4,8 @@
 //! widgets separate from the application coordinator prevents GTK row
 //! bookkeeping from leaking into core note operations.
 
+pub(crate) mod notebook;
+
 use gtk::prelude::*;
 use relm4::RelmWidgetExt;
 

@@ -1425,23 +1425,8 @@ impl App {
 
     // ------------------------------------------------------------ rebuilds
 
-    #[expect(
-        deprecated,
-        reason = "notebook sidebar uses gtk::TreeView; migrating to gtk::ColumnView is a separate UI task"
-    )]
     fn rebuild_notebook_tree(&self) {
-        self.widgets.notebook_store.clear();
-        let mut iters: std::collections::HashMap<i64, gtk::TreeIter> =
-            std::collections::HashMap::new();
-        for nb in &self.notebooks {
-            let parent = nb.parent_id.and_then(|p| iters.get(&p).cloned());
-            let iter = self.widgets.notebook_store.insert_with_values(
-                parent.as_ref(),
-                None,
-                &[(0, &nb.id), (1, &nb.name)],
-            );
-            iters.insert(nb.id, iter);
-        }
+        crate::notes::notebook::rebuild_tree(&self.widgets.notebook_store, &self.notebooks);
     }
 
     fn rebuild_tag_flow(&self) {

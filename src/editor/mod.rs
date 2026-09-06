@@ -10,7 +10,7 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagE
 use sourceview5::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
-use crate::core::markdown::{Span, Style};
+use crate::core::markdown::{self, Span, Style};
 use crate::ui::protocol::AppMsg;
 
 /// Text tags used by the Markdown preview, created once per buffer.
@@ -479,8 +479,6 @@ where
 // ---------------------------------------------------------------------------
 
 /// Horizontal rule drawn in the preview.
-const RULE_LINE: &str = "────────────────────────────────────────";
-
 /// Per-list state: ordered counter or bullets, and whether any item rendered.
 struct ListState {
     /// `Some(n)` for ordered lists (next number to emit), `None` for bullets.
@@ -728,10 +726,10 @@ impl Renderer {
                                 list.next = Some(n + 1);
                                 format!("{n}. ")
                             }
-                            None => bullet_marker(depth),
+                            None => markdown::bullet_marker(depth),
                         }
                     }
-                    None => bullet_marker(depth),
+                    None => markdown::bullet_marker(depth),
                 };
                 self.item_indent = " ".repeat(2 * depth.saturating_sub(1));
                 self.item_prefix = Some(format!("{}{}", self.item_indent, marker));
@@ -850,7 +848,7 @@ impl Renderer {
         for (row_index, row) in table.rows.iter().enumerate() {
             let cells: Vec<String> = (0..cols)
                 .map(|i| {
-                    pad_cell(
+                    markdown::pad_cell(
                         row.get(i).map(String::as_str).unwrap_or(""),
                         widths[i],
                         *table.alignments.get(i).unwrap_or(&Alignment::None),
@@ -879,27 +877,6 @@ impl Renderer {
 }
 
 /// The bullet marker for a list item at the given nesting depth.
-fn bullet_marker(depth: usize) -> String {
-    match depth {
-        1 => "• ".to_owned(),
-        2 => "◦ ".to_owned(),
-        _ => "▪ ".to_owned(),
-    }
-}
-
-/// Pad a table cell to its column width, honouring the column alignment.
-fn pad_cell(cell: &str, width: usize, align: Alignment) -> String {
-    let pad = width.saturating_sub(cell.width());
-    match align {
-        Alignment::Right => format!("{}{}", " ".repeat(pad), cell),
-        Alignment::Center => {
-            let left = pad / 2;
-            format!("{}{}{}", " ".repeat(left), cell, " ".repeat(pad - left))
-        }
-        _ => format!("{}{}", cell, " ".repeat(pad)),
-    }
-}
-
 /// Parse `md` into styled spans (pure; no GTK involved).
 fn build_spans(md: &str) -> Vec<Span> {
     let options = Options::ENABLE_TABLES
@@ -916,7 +893,7 @@ fn build_spans(md: &str) -> Vec<Span> {
             Event::SoftBreak | Event::HardBreak => renderer.line_break(),
             Event::Rule => {
                 renderer.block_start();
-                renderer.emit(RULE_LINE, vec![Style::Dim]);
+                renderer.emit(markdown::RULE_LINE, vec![Style::Dim]);
             }
             Event::TaskListMarker(checked) => renderer.task_marker(checked),
             _ => {}
@@ -1071,7 +1048,10 @@ mod tests {
 
     #[test]
     fn rules_get_their_own_line() {
-        assert_eq!(rendered("a\n\n---\n\nb"), format!("a\n\n{RULE_LINE}\n\nb"));
+        assert_eq!(
+            rendered("a\n\n---\n\nb"),
+            format!("a\n\n{}\n\nb", markdown::RULE_LINE)
+        );
     }
 
     #[test]
