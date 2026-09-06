@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Release (linux/amd64, gnu)
+    runs-on: ubuntu-latest
+    # Arch container: rolling GTK (4.22+ / libadwaita 1.9+) satisfies the
+    # build-time minimums enforced by gtk4-sys/libadwaita-sys via system-deps,
+    # and matches the newest-GTK target platforms (Arch, NixOS).
+    container: archlinux:latest
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel pkgconf \
+            git rust \
+            gtk4 libadwaita gtksourceview5
+
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin notas
+
+      - name: Package release artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -C target/release -czf \
+            "dist/notas-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz" notas
+          sha256sum dist/*.tar.gz > dist/SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
