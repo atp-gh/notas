@@ -53,10 +53,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 - Find & replace (Ctrl+F, F3, Replace all)
 - Trash with restore / permanent delete
 - Markdown export (safety valve for the DB-only storage)
-- One-click SQLite backup (`VACUUM INTO`)
-- Manual sync to any **S3-compatible store** (AWS S3, Cloudflare R2,
+- One-click SQLite backup (`VACUUM INTO`)- Manual sync to any **S3-compatible store** (AWS S3, Cloudflare R2,
   Backblaze B2, MinIO, …) or any **WebDAV server** (Nextcloud, ownCloud,
-  …) — ☰ menu → “Sync now…”; configuration under Settings → Sync
+  …) — ☰ menu → “Sync now…”;
+  configuration under Settings → Sync
+- Optional **end-to-end encryption** for synced notes (Settings → Sync →
+  Encryption): every object on the backend is sealed with
+  XChaCha20-Poly1305 under a key derived from your password via Argon2id
 - Settings (☰ menu → Settings…): theme (follow system / light / dark,
   applied immediately), line-number gutter, status bar, sync backend &
   credentials — persisted to `$XDG_CONFIG_HOME/notas/settings.json`
@@ -108,7 +111,41 @@ objects — the layout is identical for both backends:
 notes/<uuid>.md        — the Markdown body
 meta/<uuid>.json       — sidecar: title, notebook path, tags, trash state,
                          updated_at, content hash
+meta/.encryption-verifier — plaintext metadata about the encryption
+                         (salt + password check), only present when
+                         encryption is enabled
 ```
+
+### Encryption
+
+With **Settings → Sync → Encryption → “Encrypt synced notes”** on, every
+object uploaded (markdown bodies, sidecars, tombstones) is sealed with
+**XChaCha20-Poly1305** under a key derived from the password via
+**Argon2id**. The backend only ever stores ciphertext plus random uuids.
+
+- Enter the **same password on every device** that syncs: each device
+  derives the same key from the same password and salt, so notes encrypted
+  on one device decrypt on another. There is no password recovery — a
+  lost password means the backend data is unreadable.
+- Enabling encryption **re-uploads everything**: the first sync after
+  enabling writes every local note encrypted over its plaintext copy on
+  the backend (and writes the verifier object). Enable it on a device
+  that holds the notes you want to keep.
+- A wrong password is caught **before any note traffic**: the sync reads
+  the verifier object first, derives the key, and aborts with a clear
+  error on mismatch, instead of overwriting encrypted data with garbage.
+- Disabling encryption asks for the current password, then re-uploads
+  everything in plaintext on the next sync. A device that syncs with
+  encryption off against an encrypted backend is refused.
+- The password is stored in **plaintext in the settings file**, like the
+  sync credentials (Joplin-style): it protects against *backend* compromise,
+  not against theft of this machine.
+- The Argon2id salt is not secret; it travels in the verifier object and
+  in every blob header, so deleting the verifier object does not lose
+  data (the salt is recovered from the objects themselves).
+- S3 buckets with **object versioning** enabled may retain the old
+  plaintext versions after re-encryption — purge old versions if the
+  backend must not see plaintext at all.
 
 ### Conflict and deletion rules
 

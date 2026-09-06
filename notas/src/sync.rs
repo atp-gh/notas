@@ -8,6 +8,16 @@
 //! store operations, then updates the local database. It runs on the DB
 //! worker's tokio runtime, never on the UI thread.
 //!
+//! ## Encryption
+//!
+//! When enabled in Settings, end-to-end encryption is transparent to the
+//! planner: [`run_sync_with`] resolves a [`Cipher`] up front (reading the
+//! backend's `meta/.encryption-verifier` object, writing it on a
+//! never-encrypted backend, and aborting on a wrong password before any
+//! note traffic), then every store call seals objects on upload and opens
+//! them on download. See [`notas_core::crypto`] for the algorithm and blob
+//! format.
+//!
 //! ## Backends
 //!
 //! - **S3** (`S3Store`): an empty endpoint uses AWS S3
@@ -32,6 +42,7 @@ use reqwest_dav::{Auth as DavAuth, Client as DavClient, ClientBuilder as DavClie
 use s3::{AddressingStyle, Auth as S3Auth, Client as S3Client, Credentials};
 use sqlx::SqlitePool;
 
+use notas_core::crypto::{self, Cipher, Verifier};
 use notas_core::repo;
 use notas_core::sync::{LocalNote, RemoteEntry, Sidecar, SyncAction, content_hash, plan_sync};
 
@@ -55,16 +66,35 @@ pub struct SyncStats {
 
 /// The storage primitives the planner's actions map onto. Implemented by
 /// every sync backend; the rest of [`run_sync_with`] is shared.
+///
+/// Encryption is transparent to the planner: a [`Cipher`] is passed into
+/// every method when end-to-end encryption is enabled, and each backend
+/// seals objects on upload and opens them on download. The verifier
+/// methods read/write `meta/.encryption-verifier`, the object that carries
+/// the key salt and a wrong-password check (see
+/// [`notas_core::crypto::Verifier`]).
 trait SyncStore {
+    /// Prepare the backend for note traffic (WebDAV creates its
+    /// collections; a no-op for S3). Runs before the verifier is touched
+    /// so a fresh backend can receive one.
+    async fn ensure_ready(&self) -> Result<(), String>;
     /// List the whole remote store, fetching every sidecar, and build the
-    /// remote index the planner needs.
-    async fn list(&self) -> Result<HashMap<String, RemoteEntry>, String>;
-    /// Fetch the markdown body of a note.
-    async fn get_md(&self, uuid: &str) -> Result<String, String>;
-    /// Upload a note's markdown body and sidecar.
-    async fn put_note(&self, note: &LocalNote) -> Result<(), String>;
-    /// Upload a sidecar alone (used for tombstones).
-    async fn put_sidecar(&self, sidecar: &Sidecar) -> Result<(), String>;
+    /// remote index the planner needs. Sidecars are decrypted with `cipher`
+    /// when encryption is active; ones that fail to decrypt are logged and
+    /// skipped (the planner re-uploads a matching local note).
+    async fn list(&self, cipher: Option<&Cipher>) -> Result<HashMap<String, RemoteEntry>, String>;
+    /// Fetch the markdown body of a note, decrypted when a cipher is active.
+    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &str) -> Result<String, String>;
+    /// Upload a note's markdown body and sidecar (encrypted when a cipher
+    /// is active).
+    async fn put_note(&self, cipher: Option<&Cipher>, note: &LocalNote) -> Result<(), String>;
+    /// Upload a sidecar alone, used for tombstones (encrypted likewise).
+    async fn put_sidecar(&self, cipher: Option<&Cipher>, sidecar: &Sidecar) -> Result<(), String>;
+    /// Read the encryption verifier object, or `None` when the backend has
+    /// never been encrypted (or the object was deleted).
+    async fn get_verifier(&self) -> Result<Option<Vec<u8>>, String>;
+    /// Write the encryption verifier object.
+    async fn put_verifier(&self, bytes: &[u8]) -> Result<(), String>;
 }
 
 /// Run one full sync against the configured backend, then return stats.
@@ -72,11 +102,11 @@ pub async fn run_sync(pool: &SqlitePool, settings: &SyncSettings) -> Result<Sync
     match settings.kind {
         SyncType::S3 => {
             let store = S3Store::new(&settings.s3)?;
-            run_sync_with(pool, &store).await
+            run_sync_with(pool, &store, settings).await
         }
         SyncType::WebDAV => {
             let store = WebDavStore::new(&settings.webdav)?;
-            run_sync_with(pool, &store).await
+            run_sync_with(pool, &store, settings).await
         }
     }
 }
@@ -84,7 +114,18 @@ pub async fn run_sync(pool: &SqlitePool, settings: &SyncSettings) -> Result<Sync
 /// Plan and execute one sync against any [`SyncStore`]: build both
 /// indexes, run the pure planner, execute every action, and record the
 /// run's timestamp.
-async fn run_sync_with(pool: &SqlitePool, store: &impl SyncStore) -> Result<SyncStats, String> {
+async fn run_sync_with(
+    pool: &SqlitePool,
+    store: &impl SyncStore,
+    settings: &SyncSettings,
+) -> Result<SyncStats, String> {
+    // 0. Backend readiness + encryption state. Resolving the cipher reads
+    //    (or, on a never-encrypted backend, writes) the verifier object, so
+    //    a wrong password aborts before any note traffic can clobber the
+    //    remote copy.
+    store.ensure_ready().await?;
+    let cipher = resolve_cipher(store, settings).await?;
+
     // 1. Assign uuids to notes created since the last sync so every note
     //    has a stable cross-device identity.
     repo::ensure_note_uuids(pool)
@@ -92,7 +133,7 @@ async fn run_sync_with(pool: &SqlitePool, store: &impl SyncStore) -> Result<Sync
         .map_err(|e| format!("{e:#}"))?;
 
     // 2. Remote index + local index + tombstones.
-    let remote = store.list().await?;
+    let remote = store.list(cipher.as_ref()).await?;
     let local = repo::sync_local_index(pool)
         .await
         .map_err(|e| format!("{e:#}"))?;
@@ -112,11 +153,11 @@ async fn run_sync_with(pool: &SqlitePool, store: &impl SyncStore) -> Result<Sync
     for action in actions {
         match action {
             SyncAction::Upload { note } => {
-                store.put_note(&note).await?;
+                store.put_note(cipher.as_ref(), &note).await?;
                 stats.uploaded += 1;
             }
             SyncAction::Download { sidecar } => {
-                let content = store.get_md(&sidecar.uuid).await?;
+                let content = store.get_md(cipher.as_ref(), &sidecar.uuid).await?;
                 repo::apply_remote_note(pool, &sidecar, &content)
                     .await
                     .map_err(|e| format!("{e:#}"))?;
@@ -129,7 +170,7 @@ async fn run_sync_with(pool: &SqlitePool, store: &impl SyncStore) -> Result<Sync
                 stats.trashed += 1;
             }
             SyncAction::ConflictCopy { sidecar } => {
-                let content = store.get_md(&sidecar.uuid).await?;
+                let content = store.get_md(cipher.as_ref(), &sidecar.uuid).await?;
                 repo::create_conflict_copy(pool, &sidecar, &content)
                     .await
                     .map_err(|e| format!("{e:#}"))?;
@@ -146,7 +187,7 @@ async fn run_sync_with(pool: &SqlitePool, store: &impl SyncStore) -> Result<Sync
                     updated_at: deleted_at,
                     content_hash: String::new(),
                 };
-                store.put_sidecar(&sidecar).await?;
+                store.put_sidecar(cipher.as_ref(), &sidecar).await?;
                 stats.uploaded += 1;
             }
         }
@@ -160,6 +201,98 @@ async fn run_sync_with(pool: &SqlitePool, store: &impl SyncStore) -> Result<Sync
         .map_err(|e| format!("{e:#}"))?;
 
     Ok(stats)
+}
+
+/// Establish the encryption state for one sync run.
+///
+/// - **Encryption disabled**: refuse the sync when the backend is already
+///   encrypted (a verifier exists) — otherwise the plaintext uploads would
+///   silently replace the encrypted data. Plain backends proceed as before.
+/// - **Encryption enabled, verifier present**: derive the key from the
+///   password and verify it against the verifier's check value. A mismatch
+///   aborts the whole sync: with a wrong password every sidecar would fail
+///   to decrypt and the planner would re-upload local notes over the
+///   encrypted originals, destroying them.
+/// - **Encryption enabled, no verifier**: the backend has never been
+///   encrypted (fresh bucket, or plaintext data being migrated). Generate a
+///   fresh salt and persist the verifier so every device derives the same
+///   key. The migration itself is handled by the planner: plaintext
+///   sidecars fail to open and are skipped, so matching local notes
+///   re-upload encrypted (overwrite-in-place).
+async fn resolve_cipher(
+    store: &impl SyncStore,
+    settings: &SyncSettings,
+) -> Result<Option<Cipher>, String> {
+    let enc = &settings.encryption;
+    let verifier_bytes = store.get_verifier().await?;
+
+    if !enc.enabled {
+        if verifier_bytes.is_some() {
+            return Err(
+                "this backend is encrypted — enable “Encrypt synced notes” in Settings and \
+                 enter the encryption password"
+                    .to_string(),
+            );
+        }
+        return Ok(None);
+    }
+
+    let password = enc.password.trim();
+    if password.len() < crypto::MIN_PASSWORD_LEN {
+        return Err(format!(
+            "the encryption password must be at least {} characters",
+            crypto::MIN_PASSWORD_LEN
+        ));
+    }
+
+    match verifier_bytes {
+        Some(bytes) => {
+            let verifier: Verifier = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("cannot read the encryption verifier on the backend: {e}"))?;
+            let cipher = Cipher::derive(password, decode_verifier_salt(&verifier.salt)?)?;
+            if !cipher.verify(&verifier) {
+                return Err(
+                    "the encryption password is wrong — enter the password that encrypted \
+                     this backend"
+                        .to_string(),
+                );
+            }
+            Ok(Some(cipher))
+        }
+        None => {
+            let cipher = Cipher::generate(password)?;
+            let verifier = cipher.verifier()?;
+            let bytes = serde_json::to_vec(&verifier)
+                .map_err(|e| format!("cannot build the verifier: {e}"))?;
+            store.put_verifier(&bytes).await?;
+            Ok(Some(cipher))
+        }
+    }
+}
+
+/// Parse the hex-encoded salt out of a verifier object.
+fn decode_verifier_salt(hex_salt: &str) -> Result<[u8; 16], String> {
+    let bytes =
+        hex::decode(hex_salt).map_err(|e| format!("the verifier's salt is not valid hex: {e}"))?;
+    bytes
+        .try_into()
+        .map_err(|_| "the verifier's salt has the wrong length".to_string())
+}
+
+/// Seal a plaintext body for upload when encryption is active.
+fn encrypt_body(cipher: Option<&Cipher>, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    match cipher {
+        Some(c) => c.encrypt(plaintext),
+        None => Ok(plaintext.to_vec()),
+    }
+}
+
+/// Open a downloaded object when encryption is active.
+fn decrypt_body(cipher: Option<&Cipher>, blob: &[u8]) -> Result<Vec<u8>, String> {
+    match cipher {
+        Some(c) => c.decrypt(blob),
+        None => Ok(blob.to_vec()),
+    }
 }
 
 // ------------------------------------------------------------- S3 backend
@@ -186,20 +319,32 @@ impl S3Store {
 }
 
 impl SyncStore for S3Store {
-    async fn list(&self) -> Result<HashMap<String, RemoteEntry>, String> {
-        list_remote(&self.client, &self.bucket, &self.prefix).await
+    async fn ensure_ready(&self) -> Result<(), String> {
+        Ok(())
     }
 
-    async fn get_md(&self, uuid: &str) -> Result<String, String> {
-        get_md(&self.client, &self.bucket, &self.prefix, uuid).await
+    async fn list(&self, cipher: Option<&Cipher>) -> Result<HashMap<String, RemoteEntry>, String> {
+        list_remote(&self.client, &self.bucket, &self.prefix, cipher).await
     }
 
-    async fn put_note(&self, note: &LocalNote) -> Result<(), String> {
-        put_note(&self.client, &self.bucket, &self.prefix, note).await
+    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &str) -> Result<String, String> {
+        get_md(&self.client, &self.bucket, &self.prefix, cipher, uuid).await
     }
 
-    async fn put_sidecar(&self, sidecar: &Sidecar) -> Result<(), String> {
-        put_sidecar(&self.client, &self.bucket, &self.prefix, sidecar).await
+    async fn put_note(&self, cipher: Option<&Cipher>, note: &LocalNote) -> Result<(), String> {
+        put_note(&self.client, &self.bucket, &self.prefix, cipher, note).await
+    }
+
+    async fn put_sidecar(&self, cipher: Option<&Cipher>, sidecar: &Sidecar) -> Result<(), String> {
+        put_sidecar(&self.client, &self.bucket, &self.prefix, cipher, sidecar).await
+    }
+
+    async fn get_verifier(&self) -> Result<Option<Vec<u8>>, String> {
+        get_verifier(&self.client, &self.bucket, &self.prefix).await
+    }
+
+    async fn put_verifier(&self, bytes: &[u8]) -> Result<(), String> {
+        put_verifier(&self.client, &self.bucket, &self.prefix, bytes).await
     }
 }
 
@@ -258,12 +403,21 @@ fn meta_key(prefix: &str, uuid: &str) -> String {
     format!("{prefix}meta/{uuid}.json")
 }
 
+/// Key of the encryption verifier object. It lives inside `meta/` but has
+/// no `.json` suffix, so the listing parsers ([`parse_key`] and its WebDAV
+/// counterpart) never mistake it for a note sidecar.
+fn verifier_key(prefix: &str) -> String {
+    format!("{prefix}meta/.encryption-verifier")
+}
+
 /// List the whole prefix and fetch every sidecar, building the remote
-/// index the planner needs.
+/// index the planner needs. Sidecars are decrypted when `cipher` is set;
+/// ones that fail to open are logged and skipped like unparseable ones.
 async fn list_remote(
     client: &S3Client,
     bucket: &str,
     prefix: &str,
+    cipher: Option<&Cipher>,
 ) -> Result<HashMap<String, RemoteEntry>, String> {
     let mut remote: HashMap<String, RemoteEntry> = HashMap::new();
     let mut pager = client
@@ -307,7 +461,14 @@ async fn list_remote(
                 continue;
             }
         };
-        match serde_json::from_slice::<Sidecar>(&bytes) {
+        let plain = match decrypt_body(cipher, &bytes) {
+            Ok(plain) => plain,
+            Err(e) => {
+                eprintln!("notas: cannot decrypt sidecar for {uuid}: {e}");
+                continue;
+            }
+        };
+        match serde_json::from_slice::<Sidecar>(&plain) {
             Ok(sidecar) => {
                 remote.entry(uuid).or_default().sidecar = Some(sidecar);
             }
@@ -333,6 +494,7 @@ async fn put_note(
     client: &S3Client,
     bucket: &str,
     prefix: &str,
+    cipher: Option<&Cipher>,
     note: &LocalNote,
 ) -> Result<(), String> {
     let sidecar = Sidecar {
@@ -345,31 +507,34 @@ async fn put_note(
         updated_at: note.updated_at.clone(),
         content_hash: content_hash(&note.content),
     };
+    let body = encrypt_body(cipher, note.content.as_bytes())?;
     client
         .objects()
         .put(bucket, md_key(prefix, &note.uuid))
         .content_type("text/markdown; charset=utf-8")
         .map_err(|e| format!("{e:#}"))?
-        .body_bytes(note.content.clone())
+        .body_bytes(body)
         .send()
         .await
         .map_err(|e| format!("{e:#}"))?;
-    put_sidecar(client, bucket, prefix, &sidecar).await
+    put_sidecar(client, bucket, prefix, cipher, &sidecar).await
 }
 
 async fn put_sidecar(
     client: &S3Client,
     bucket: &str,
     prefix: &str,
+    cipher: Option<&Cipher>,
     sidecar: &Sidecar,
 ) -> Result<(), String> {
     let json = serde_json::to_string(sidecar).map_err(|e| format!("{e:#}"))?;
+    let body = encrypt_body(cipher, json.as_bytes())?;
     client
         .objects()
         .put(bucket, meta_key(prefix, &sidecar.uuid))
         .content_type("application/json")
         .map_err(|e| format!("{e:#}"))?
-        .body_bytes(json)
+        .body_bytes(body)
         .send()
         .await
         .map_err(|e| format!("{e:#}"))?;
@@ -380,6 +545,7 @@ async fn get_md(
     client: &S3Client,
     bucket: &str,
     prefix: &str,
+    cipher: Option<&Cipher>,
     uuid: &str,
 ) -> Result<String, String> {
     let output = client
@@ -389,7 +555,44 @@ async fn get_md(
         .await
         .map_err(|e| format!("{e:#}"))?;
     let bytes = output.bytes().await.map_err(|e| format!("{e:#}"))?;
-    String::from_utf8(bytes.to_vec()).map_err(|e| format!("note {uuid} is not valid UTF-8: {e}"))
+    let plain = decrypt_body(cipher, &bytes)?;
+    String::from_utf8(plain).map_err(|e| format!("note {uuid} is not valid UTF-8: {e}"))
+}
+
+/// Fetch the verifier object; a 404 (never encrypted) is `None`.
+async fn get_verifier(
+    client: &S3Client,
+    bucket: &str,
+    prefix: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    let key = verifier_key(prefix);
+    let output = match client.objects().get(bucket, &key).send().await {
+        Ok(output) => output,
+        // A missing object is the normal "never encrypted" answer.
+        Err(e) if e.status().is_some_and(|s| s.as_u16() == 404) => return Ok(None),
+        Err(e) => return Err(format!("cannot read the encryption verifier: {e:#}")),
+    };
+    let bytes = output.bytes().await.map_err(|e| format!("{e:#}"))?;
+    Ok(Some(bytes.to_vec()))
+}
+
+/// Write the verifier object.
+async fn put_verifier(
+    client: &S3Client,
+    bucket: &str,
+    prefix: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    client
+        .objects()
+        .put(bucket, verifier_key(prefix))
+        .content_type("application/json")
+        .map_err(|e| format!("{e:#}"))?
+        .body_bytes(bytes.to_vec())
+        .send()
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(())
 }
 
 // --------------------------------------------------------- WebDAV backend
@@ -491,8 +694,13 @@ impl WebDavStore {
     }
 
     /// GET one sidecar; `None` when the server says 404 (it vanished
-    /// between listing and fetching, or the file is foreign).
-    async fn get_sidecar(&self, uuid: &str) -> Result<Option<Sidecar>, String> {
+    /// between listing and fetching, or the file is foreign), or when the
+    /// ciphertext fails to decrypt or parse.
+    async fn get_sidecar(
+        &self,
+        cipher: Option<&Cipher>,
+        uuid: &str,
+    ) -> Result<Option<Sidecar>, String> {
         let path = format!("{}/{uuid}.json", self.meta_collection());
         let response = self.client.get_raw(&path).await.map_err(webdav_error)?;
         let code = response.status().as_u16();
@@ -506,7 +714,14 @@ impl WebDavStore {
             .bytes()
             .await
             .map_err(|e| format!("cannot read sidecar for {uuid}: {e}"))?;
-        match serde_json::from_slice::<Sidecar>(&bytes) {
+        let plain = match decrypt_body(cipher, &bytes) {
+            Ok(plain) => plain,
+            Err(e) => {
+                eprintln!("notas: cannot decrypt sidecar for {uuid}: {e}");
+                return Ok(None);
+            }
+        };
+        match serde_json::from_slice::<Sidecar>(&plain) {
             Ok(sidecar) => Ok(Some(sidecar)),
             Err(e) => {
                 eprintln!("notas: ignoring unparseable sidecar for {uuid}: {e}");
@@ -515,8 +730,9 @@ impl WebDavStore {
         }
     }
 
-    /// PUT one file with an explicit content type.
-    async fn put(&self, path: &str, content_type: &str, body: String) -> Result<(), String> {
+    /// PUT one file with an explicit content type. The body is bytes so
+    /// encrypted objects (binary ciphertext) need no base64 round-trip.
+    async fn put(&self, path: &str, content_type: &str, body: Vec<u8>) -> Result<(), String> {
         let builder = self
             .client
             .start_request(reqwest::Method::PUT, path)
@@ -535,12 +751,51 @@ impl WebDavStore {
             Err(webdav_status_error("upload", code))
         }
     }
+
+    /// Path of the encryption verifier object, inside the meta collection
+    /// but without a `.json` suffix so the collection listing never
+    /// mistakes it for a note sidecar.
+    fn verifier_path(&self) -> String {
+        format!("{}/.encryption-verifier", self.meta_collection())
+    }
+
+    /// GET the verifier object; `None` when the server says 404 (the
+    /// backend has never been encrypted).
+    async fn get_verifier(&self) -> Result<Option<Vec<u8>>, String> {
+        let response = self
+            .client
+            .get_raw(&self.verifier_path())
+            .await
+            .map_err(webdav_error)?;
+        let code = response.status().as_u16();
+        if code == 404 {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(webdav_status_error("read encryption verifier", code));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| format!("cannot read the encryption verifier: {e}"))?;
+        Ok(Some(bytes.to_vec()))
+    }
+
+    /// PUT the verifier object.
+    async fn put_verifier(&self, bytes: &[u8]) -> Result<(), String> {
+        self.put(&self.verifier_path(), "application/json", bytes.to_vec())
+            .await
+    }
 }
 
 impl SyncStore for WebDavStore {
-    async fn list(&self) -> Result<HashMap<String, RemoteEntry>, String> {
-        self.ensure_collections().await?;
+    async fn ensure_ready(&self) -> Result<(), String> {
+        // Runs before the verifier is touched so a fresh backend can
+        // receive the verifier object.
+        self.ensure_collections().await
+    }
 
+    async fn list(&self, cipher: Option<&Cipher>) -> Result<HashMap<String, RemoteEntry>, String> {
         let mut remote: HashMap<String, RemoteEntry> = HashMap::new();
         // Same shape as the S3 index: the notes collection marks `has_md`,
         // the meta collection creates the entry, then sidecars are read.
@@ -559,14 +814,14 @@ impl SyncStore for WebDavStore {
 
         let uuids: Vec<String> = remote.keys().cloned().collect();
         for uuid in uuids {
-            match self.get_sidecar(&uuid).await {
+            match self.get_sidecar(cipher, &uuid).await {
                 Ok(Some(sidecar)) => {
                     remote.entry(uuid).or_default().sidecar = Some(sidecar);
                 }
                 Ok(None) => {
-                    // Vanished or unparseable: leave the entry without a
-                    // sidecar; the planner re-uploads if a local note
-                    // matches, and ignores it otherwise.
+                    // Vanished, undecryptable or unparseable: leave the
+                    // entry without a sidecar; the planner re-uploads if a
+                    // local note matches, and ignores it otherwise.
                 }
                 Err(e) => eprintln!("notas: cannot read sidecar for {uuid}: {e}"),
             }
@@ -574,7 +829,7 @@ impl SyncStore for WebDavStore {
         Ok(remote)
     }
 
-    async fn get_md(&self, uuid: &str) -> Result<String, String> {
+    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &str) -> Result<String, String> {
         let path = format!("{}/{uuid}.md", self.notes_collection());
         let response = self.client.get_raw(&path).await.map_err(webdav_error)?;
         let code = response.status().as_u16();
@@ -585,11 +840,11 @@ impl SyncStore for WebDavStore {
             .bytes()
             .await
             .map_err(|e| format!("cannot read note {uuid}: {e}"))?;
-        String::from_utf8(bytes.to_vec())
-            .map_err(|e| format!("note {uuid} is not valid UTF-8: {e}"))
+        let plain = decrypt_body(cipher, &bytes)?;
+        String::from_utf8(plain).map_err(|e| format!("note {uuid} is not valid UTF-8: {e}"))
     }
 
-    async fn put_note(&self, note: &LocalNote) -> Result<(), String> {
+    async fn put_note(&self, cipher: Option<&Cipher>, note: &LocalNote) -> Result<(), String> {
         let sidecar = Sidecar {
             uuid: note.uuid.clone(),
             title: note.title.clone(),
@@ -601,19 +856,25 @@ impl SyncStore for WebDavStore {
             content_hash: content_hash(&note.content),
         };
         let md_path = format!("{}/{}.md", self.notes_collection(), note.uuid);
-        self.put(
-            &md_path,
-            "text/markdown; charset=utf-8",
-            note.content.clone(),
-        )
-        .await?;
-        self.put_sidecar(&sidecar).await
+        let body = encrypt_body(cipher, note.content.as_bytes())?;
+        self.put(&md_path, "text/markdown; charset=utf-8", body)
+            .await?;
+        self.put_sidecar(cipher, &sidecar).await
     }
 
-    async fn put_sidecar(&self, sidecar: &Sidecar) -> Result<(), String> {
+    async fn put_sidecar(&self, cipher: Option<&Cipher>, sidecar: &Sidecar) -> Result<(), String> {
         let path = format!("{}/{}.json", self.meta_collection(), sidecar.uuid);
         let json = serde_json::to_string(sidecar).map_err(|e| format!("{e:#}"))?;
-        self.put(&path, "application/json", json).await
+        let body = encrypt_body(cipher, json.as_bytes())?;
+        self.put(&path, "application/json", body).await
+    }
+
+    async fn get_verifier(&self) -> Result<Option<Vec<u8>>, String> {
+        self.get_verifier().await
+    }
+
+    async fn put_verifier(&self, bytes: &[u8]) -> Result<(), String> {
+        self.put_verifier(bytes).await
     }
 }
 
@@ -793,6 +1054,7 @@ mod webdav_tests {
     use wiremock::matchers::{basic_auth, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    use crate::config::EncryptionSettings;
     use notas_core::db;
 
     /// Test settings pointing at the mock server (plain http, so the
@@ -902,6 +1164,7 @@ mod webdav_tests {
             kind: SyncType::WebDAV,
             s3: S3SyncSettings::default(),
             webdav: webdav_settings(&server.uri()),
+            encryption: EncryptionSettings::default(),
             last_synced_at: String::new(),
         };
         let stats = run_sync(&pool, &settings).await.expect("webdav sync");
@@ -968,6 +1231,7 @@ mod webdav_tests {
             kind: SyncType::WebDAV,
             s3: S3SyncSettings::default(),
             webdav: webdav_settings(&server.uri()),
+            encryption: EncryptionSettings::default(),
             last_synced_at: String::new(),
         };
         let stats = run_sync(&pool, &settings).await.expect("webdav sync");
@@ -1043,6 +1307,7 @@ mod webdav_tests {
             kind: SyncType::WebDAV,
             s3: S3SyncSettings::default(),
             webdav: webdav_settings(&server.uri()),
+            encryption: EncryptionSettings::default(),
             last_synced_at: String::new(),
         };
         let stats = run_sync(&pool, &settings).await.expect("webdav sync");
@@ -1068,11 +1333,353 @@ mod webdav_tests {
             kind: SyncType::WebDAV,
             s3: S3SyncSettings::default(),
             webdav: webdav_settings(&server.uri()),
+            encryption: EncryptionSettings::default(),
             last_synced_at: String::new(),
         };
         let err = run_sync(&pool, &settings).await.unwrap_err();
         assert!(err.contains("401"), "{err}");
         assert!(err.contains("app password"), "{err}");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Encryption password shared by the encrypted-backend tests.
+    const ENC_PASSWORD: &str = "correct horse battery staple";
+
+    /// SyncSettings with WebDAV + encryption enabled for `password`.
+    fn encrypted_settings(url: &str, password: &str) -> SyncSettings {
+        SyncSettings {
+            kind: SyncType::WebDAV,
+            s3: S3SyncSettings::default(),
+            webdav: webdav_settings(url),
+            encryption: EncryptionSettings {
+                enabled: true,
+                password: password.into(),
+            },
+            last_synced_at: String::new(),
+        }
+    }
+
+    /// A deterministic cipher for one test (fixed salt) so the fixture
+    /// blobs and the client under test derive the same key.
+    fn test_cipher(password: &str) -> Cipher {
+        Cipher::derive(password, [3u8; 16]).expect("derive")
+    }
+
+    /// Seal a complete remote note under `cipher` and return the three
+    /// fixture bodies: verifier JSON, encrypted sidecar, encrypted body.
+    fn sealed_remote(
+        cipher: &Cipher,
+        uuid: &str,
+        title: &str,
+        body: &str,
+    ) -> (String, Vec<u8>, Vec<u8>) {
+        let sidecar = Sidecar {
+            uuid: uuid.into(),
+            title: title.into(),
+            notebook: None,
+            tags: vec!["work".into()],
+            trashed: false,
+            deleted: false,
+            updated_at: "2026-01-02 03:04:05".into(),
+            content_hash: content_hash(body),
+        };
+        let verifier = serde_json::to_string(&cipher.verifier().expect("verifier")).unwrap();
+        (
+            verifier,
+            cipher
+                .encrypt(&serde_json::to_string(&sidecar).unwrap().into_bytes())
+                .expect("seal sidecar"),
+            cipher.encrypt(body.as_bytes()).expect("seal body"),
+        )
+    }
+
+    #[tokio::test]
+    async fn webdav_executor_encrypts_uploaded_notes() {
+        let server = MockServer::start().await;
+        accept_mkcol(&server).await;
+        Mock::given(method("PROPFIND"))
+            .and(path("/notas/notes"))
+            .respond_with(
+                ResponseTemplate::new(207).set_body_string(empty_multistatus("/notas/notes")),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PROPFIND"))
+            .and(path("/notas/meta"))
+            .respond_with(
+                ResponseTemplate::new(207).set_body_string(empty_multistatus("/notas/meta")),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = temp_db_dir("enc-upload");
+        let pool = db::connect(dir.join("a.db")).await.unwrap();
+        let note = repo::create_note(&pool, None, "Hello").await.unwrap();
+        repo::update_note(&pool, note.id, "Hello", "body one")
+            .await
+            .unwrap();
+        repo::ensure_note_uuids(&pool).await.unwrap();
+        let uuid = repo::sync_local_index(&pool).await.unwrap()[0].uuid.clone();
+
+        let verifier_path = "/notas/meta/.encryption-verifier";
+        // A fresh backend: no verifier yet, so the sync establishes one.
+        Mock::given(method("GET"))
+            .and(path(verifier_path))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(verifier_path))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let md_path = format!("/notas/notes/{uuid}.md");
+        let meta_path = format!("/notas/meta/{uuid}.json");
+        Mock::given(method("PUT"))
+            .and(path(md_path.clone()))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // The uploaded body must not contain the plaintext: `body_string_contains`
+        // never matches binary ciphertext (invalid UTF-8), so any hit means
+        // the note went up in clear.
+        Mock::given(method("PUT"))
+            .and(path(md_path))
+            .and(wiremock::matchers::body_string_contains("body one"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(meta_path))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let settings = encrypted_settings(&server.uri(), ENC_PASSWORD);
+        let stats = run_sync(&pool, &settings).await.expect("encrypted sync");
+        assert_eq!(stats.uploaded, 1);
+        server.verify().await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn webdav_executor_downloads_and_decrypts_remote_notes() {
+        let server = MockServer::start().await;
+        accept_mkcol(&server).await;
+        let uuid = "01234567-89ab-4cde-8f01-23456789abcd".to_string();
+        let (verifier_json, sidecar_blob, md_blob) =
+            sealed_remote(&test_cipher(ENC_PASSWORD), &uuid, "Remote", "remote body");
+        let md_href = format!("/notas/notes/{uuid}.md");
+        let meta_href = format!("/notas/meta/{uuid}.json");
+
+        Mock::given(method("PROPFIND"))
+            .and(path("/notas/notes"))
+            .respond_with(
+                ResponseTemplate::new(207)
+                    .set_body_string(multistatus(std::slice::from_ref(&md_href))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PROPFIND"))
+            .and(path("/notas/meta"))
+            .respond_with(
+                ResponseTemplate::new(207)
+                    .set_body_string(multistatus(std::slice::from_ref(&meta_href))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/notas/meta/.encryption-verifier"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(verifier_json))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/notas/meta/{uuid}.json")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(sidecar_blob))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/notas/notes/{uuid}.md")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(md_blob))
+            .mount(&server)
+            .await;
+
+        let dir = temp_db_dir("enc-download");
+        let pool = db::connect(dir.join("a.db")).await.unwrap();
+        let settings = encrypted_settings(&server.uri(), ENC_PASSWORD);
+        let stats = run_sync(&pool, &settings).await.expect("encrypted sync");
+        assert_eq!(stats.downloaded, 1);
+
+        let notes = repo::list_all_notes(&pool).await.unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "Remote");
+        assert_eq!(notes[0].content, "remote body");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn webdav_executor_aborts_on_wrong_encryption_password() {
+        let server = MockServer::start().await;
+        accept_mkcol(&server).await;
+        let uuid = "01234567-89ab-4cde-8f01-23456789abcd".to_string();
+        let (verifier_json, _, _) =
+            sealed_remote(&test_cipher(ENC_PASSWORD), &uuid, "Remote", "body");
+
+        Mock::given(method("GET"))
+            .and(path("/notas/meta/.encryption-verifier"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(verifier_json))
+            .mount(&server)
+            .await;
+        // The wrong password must abort before any listing or note traffic:
+        // with it, every sidecar would fail to decrypt and the planner
+        // would re-upload local notes over the encrypted originals.
+        Mock::given(method("PROPFIND"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let dir = temp_db_dir("enc-wrong-pw");
+        let pool = db::connect(dir.join("a.db")).await.unwrap();
+        let settings = encrypted_settings(&server.uri(), "not the right password");
+        let err = run_sync(&pool, &settings).await.unwrap_err();
+        assert!(err.contains("password"), "{err}");
+        server.verify().await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn webdav_executor_refuses_plaintext_sync_of_an_encrypted_backend() {
+        let server = MockServer::start().await;
+        accept_mkcol(&server).await;
+        let uuid = "01234567-89ab-4cde-8f01-23456789abcd".to_string();
+        let (verifier_json, _, _) =
+            sealed_remote(&test_cipher(ENC_PASSWORD), &uuid, "Remote", "body");
+
+        Mock::given(method("GET"))
+            .and(path("/notas/meta/.encryption-verifier"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(verifier_json))
+            .mount(&server)
+            .await;
+        Mock::given(method("PROPFIND"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let dir = temp_db_dir("enc-refuse");
+        let pool = db::connect(dir.join("a.db")).await.unwrap();
+        // Encryption disabled: syncing would upload plaintext over the
+        // encrypted remote data, so the sync must refuse instead.
+        let settings = SyncSettings {
+            kind: SyncType::WebDAV,
+            s3: S3SyncSettings::default(),
+            webdav: webdav_settings(&server.uri()),
+            encryption: EncryptionSettings::default(),
+            last_synced_at: String::new(),
+        };
+        let err = run_sync(&pool, &settings).await.unwrap_err();
+        assert!(err.contains("encrypted"), "{err}");
+        server.verify().await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn webdav_executor_migrates_plaintext_remote_when_encryption_is_enabled() {
+        // Q3(a): enabling encryption on a backend that already holds
+        // plaintext notes. The plaintext sidecar fails to open (missing
+        // magic) and is skipped, so the matching local note re-uploads
+        // encrypted over the same key (overwrite-in-place).
+        let server = MockServer::start().await;
+        accept_mkcol(&server).await;
+        let uuid = "01234567-89ab-4cde-8f01-23456789abcd".to_string();
+        let md_href = format!("/notas/notes/{uuid}.md");
+        let meta_href = format!("/notas/meta/{uuid}.json");
+        let plain_sidecar = serde_json::to_string(&Sidecar {
+            uuid: uuid.clone(),
+            title: "Old".into(),
+            notebook: None,
+            tags: Vec::new(),
+            trashed: false,
+            deleted: false,
+            updated_at: "2000-01-01 00:00:00".into(),
+            content_hash: content_hash("old body"),
+        })
+        .unwrap();
+
+        Mock::given(method("PROPFIND"))
+            .and(path("/notas/notes"))
+            .respond_with(
+                ResponseTemplate::new(207)
+                    .set_body_string(multistatus(std::slice::from_ref(&md_href))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PROPFIND"))
+            .and(path("/notas/meta"))
+            .respond_with(
+                ResponseTemplate::new(207)
+                    .set_body_string(multistatus(std::slice::from_ref(&meta_href))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/notas/meta/.encryption-verifier"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/notas/meta/.encryption-verifier"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/notas/meta/{uuid}.json")))
+            .respond_with(ResponseTemplate::new(200).set_body_string(plain_sidecar))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/notas/notes/{uuid}.md")))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/notas/meta/{uuid}.json")))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = temp_db_dir("enc-migrate");
+        let pool = db::connect(dir.join("a.db")).await.unwrap();
+        let note = repo::create_note(&pool, None, "Old").await.unwrap();
+        repo::update_note(&pool, note.id, "Old", "old body")
+            .await
+            .unwrap();
+        repo::ensure_note_uuids(&pool).await.unwrap();
+        sqlx::query("UPDATE notes SET uuid = ?1 WHERE id = ?2")
+            .bind(&uuid)
+            .bind(note.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let settings = encrypted_settings(&server.uri(), ENC_PASSWORD);
+        let stats = run_sync(&pool, &settings).await.expect("migrating sync");
+        assert_eq!(stats.uploaded, 1);
+        server.verify().await;
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1083,6 +1690,7 @@ mod webdav_tests {
 #[cfg(test)]
 mod e2e_tests {
     use super::*;
+    use crate::config::EncryptionSettings;
     use notas_core::db;
 
     /// End-to-end sync between two fresh databases through a real
@@ -1127,6 +1735,7 @@ mod e2e_tests {
             kind: SyncType::S3,
             s3,
             webdav: WebDavSyncSettings::default(),
+            encryption: EncryptionSettings::default(),
             last_synced_at: String::new(),
         };
 
@@ -1229,6 +1838,104 @@ mod e2e_tests {
                 last_synced_at: stats.last_synced_at.clone(),
             }
         );
+
+        pool_a.close().await;
+        pool_b.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The user-facing encryption scenario, end to end: device A encrypts
+    /// and uploads, device B downloads and decrypts with the same password.
+    /// Manual, needs a running S3-compatible server (see the doc comment on
+    /// [`sync_e2e_minio`] for how to start MinIO).
+    #[tokio::test]
+    #[ignore = "requires a running S3-compatible server (see doc comment)"]
+    async fn sync_e2e_minio_encrypted() {
+        const PASSWORD: &str = "correct horse battery staple";
+        let endpoint = std::env::var("NOTAS_TEST_S3_ENDPOINT")
+            .unwrap_or_else(|_| "http://localhost:9000".into());
+        let key = std::env::var("NOTAS_TEST_S3_KEY").unwrap_or_else(|_| "minioadmin".into());
+        let secret = std::env::var("NOTAS_TEST_S3_SECRET").unwrap_or_else(|_| "minioadmin".into());
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let bucket = format!("notas-e2e-enc-{unique}");
+
+        let s3 = S3SyncSettings {
+            endpoint,
+            region: "us-east-1".into(),
+            bucket: bucket.clone(),
+            prefix: "notas/".into(),
+            access_key_id: key,
+            secret_access_key: secret,
+        };
+        let settings = SyncSettings {
+            kind: SyncType::S3,
+            s3: s3.clone(),
+            webdav: WebDavSyncSettings::default(),
+            encryption: EncryptionSettings {
+                enabled: true,
+                password: PASSWORD.into(),
+            },
+            last_synced_at: String::new(),
+        };
+
+        let client = build_client(&s3).expect("client");
+        client
+            .buckets()
+            .create(&bucket)
+            .send()
+            .await
+            .expect("create bucket");
+
+        let dir = std::env::temp_dir().join(format!("notas-sync-e2e-enc-{unique}"));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let pool_a = db::connect(dir.join("a.db")).await.expect("db a");
+        let pool_b = db::connect(dir.join("b.db")).await.expect("db b");
+
+        // --- device A: create + encrypt + upload -------------------------
+        let n1 = repo::create_note(&pool_a, None, "Secret").await.unwrap();
+        repo::update_note(&pool_a, n1.id, "Secret", "classified body")
+            .await
+            .unwrap();
+        let stats = run_sync(&pool_a, &settings).await.expect("A sync");
+        assert_eq!(stats.uploaded, 1, "A uploads the encrypted note");
+
+        // The object on the backend must not contain the plaintext.
+        let uuid = repo::sync_local_index(&pool_a).await.unwrap()[0]
+            .uuid
+            .clone();
+        let obj = client
+            .objects()
+            .get(&bucket, format!("notas/notes/{uuid}.md"))
+            .send()
+            .await
+            .expect("get object");
+        let bytes = obj.bytes().await.expect("object bytes");
+        assert!(
+            !bytes
+                .windows("classified body".len())
+                .any(|w| w == b"classified body"),
+            "remote object must not contain the plaintext body"
+        );
+
+        // --- device B: download + decrypt with the same password ---------
+        let stats = run_sync(&pool_b, &settings).await.expect("B sync");
+        assert_eq!(stats.downloaded, 1, "B downloads and decrypts the note");
+        let notes_b = repo::list_all_notes(&pool_b).await.unwrap();
+        assert_eq!(notes_b.len(), 1);
+        assert_eq!(notes_b[0].title, "Secret");
+        assert_eq!(notes_b[0].content, "classified body");
+
+        // --- a second sync is a no-op -------------------------------------
+        let stats = run_sync(&pool_a, &settings).await.expect("A sync #2");
+        assert_eq!(stats.uploaded, 0);
+        assert_eq!(stats.downloaded, 0);
 
         pool_a.close().await;
         pool_b.close().await;

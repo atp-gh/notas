@@ -88,6 +88,8 @@ pub enum AppMsg {
     SyncUsernameChanged(String),
     SyncPasswordChanged(String),
     SyncInsecureTlsChanged(bool),
+    SyncEncryptionEnabledChanged(bool),
+    SyncEncryptionPasswordChanged(String),
 }
 
 #[derive(Debug, Clone)]
@@ -1123,6 +1125,17 @@ impl App {
                     self.widgets.status_label.set_text(hint);
                     return;
                 }
+                // The sync engine enforces this too; fail fast here so the
+                // user hears it in the status bar instead of a sync error.
+                if self.settings.sync.encryption.enabled
+                    && self.settings.sync.encryption.password.trim().len()
+                        < notas_core::crypto::MIN_PASSWORD_LEN
+                {
+                    self.widgets.status_label.set_text(tr!(
+                        "Sync: the encryption password must be at least 8 characters"
+                    ));
+                    return;
+                }
                 // Save unsaved edits first so the sync sees the latest
                 // content; the DB worker processes the save before the
                 // sync because messages run in order.
@@ -1179,6 +1192,14 @@ impl App {
             }
             AppMsg::SyncInsecureTlsChanged(on) => {
                 self.settings.sync.webdav.insecure_tls = on;
+                self.settings.save();
+            }
+            AppMsg::SyncEncryptionEnabledChanged(on) => {
+                self.settings.sync.encryption.enabled = on;
+                self.settings.save();
+            }
+            AppMsg::SyncEncryptionPasswordChanged(value) => {
+                self.settings.sync.encryption.password = value;
                 self.settings.save();
             }
             AppMsg::DialogSave => self.save_note(),

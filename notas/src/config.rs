@@ -171,6 +171,25 @@ impl S3SyncSettings {
     }
 }
 
+/// End-to-end encryption for synced notes.
+///
+/// When enabled, every object uploaded to the backend (markdown bodies and
+/// sidecars alike) is sealed with XChaCha20-Poly1305 under a key derived
+/// from [`EncryptionSettings::password`] via Argon2id — the backend only
+/// ever sees ciphertext. The password is stored in plaintext in the
+/// settings file like the sync credentials (Joplin-style): it protects
+/// against backend/server compromise, **not** against theft of this
+/// machine. It must be re-entered on every device that syncs.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EncryptionSettings {
+    /// Whether uploaded objects are encrypted.
+    pub enabled: bool,
+    /// The encryption password (≥ 8 characters when enabled). Shared
+    /// across both sync backends; same value needed on every device.
+    pub password: String,
+}
+
 /// WebDAV target (Nextcloud, ownCloud, …).
 ///
 /// The URL points at a DAV collection the user can write to (for
@@ -237,6 +256,8 @@ pub struct SyncSettings {
     pub s3: S3SyncSettings,
     /// WebDAV target (kept even while `kind` is S3).
     pub webdav: WebDavSyncSettings,
+    /// End-to-end encryption, shared by both backends.
+    pub encryption: EncryptionSettings,
     /// Time of the last successful sync (`YYYY-MM-DD HH:MM:SS`, device
     /// local time), or empty if never.
     pub last_synced_at: String,
@@ -248,6 +269,7 @@ impl Default for SyncSettings {
             kind: SyncType::S3,
             s3: S3SyncSettings::default(),
             webdav: WebDavSyncSettings::default(),
+            encryption: EncryptionSettings::default(),
             last_synced_at: String::new(),
         }
     }
@@ -370,6 +392,9 @@ mod tests {
         assert_eq!(s.sync.webdav.directory, "notas");
         assert!(s.sync.webdav.url.is_empty());
         assert!(!s.sync.webdav.insecure_tls);
+        // Encryption: off by default, no password.
+        assert!(!s.sync.encryption.enabled);
+        assert!(s.sync.encryption.password.is_empty());
         assert!(!s.sync.is_configured());
     }
 
@@ -459,6 +484,8 @@ mod tests {
         settings.sync.webdav.password = "app-pw".into();
         settings.sync.webdav.directory = "My Notes".into();
         settings.sync.webdav.insecure_tls = true;
+        settings.sync.encryption.enabled = true;
+        settings.sync.encryption.password = "correct horse battery staple".into();
         settings.sync.last_synced_at = "2026-01-01 00:00:00".into();
 
         settings.save_to(&path).unwrap();
@@ -486,6 +513,8 @@ mod tests {
         assert!(text.contains("\"webdav\""), "{text}");
         assert!(text.contains("\"url\": \"\""), "{text}");
         assert!(text.contains("\"directory\": \"notas\""), "{text}");
+        assert!(text.contains("\"encryption\""), "{text}");
+        assert!(text.contains("\"enabled\": false"), "{text}");
         let _ = fs::remove_file(&path);
     }
 

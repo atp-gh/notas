@@ -6,6 +6,7 @@
 
 #![deny(missing_docs)]
 
+pub mod crypto;
 pub mod db;
 pub mod error;
 pub mod models;

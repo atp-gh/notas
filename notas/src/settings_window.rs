@@ -6,6 +6,9 @@
 //! the change to the live UI and saves the settings file. There is no
 //! "Apply" button, matching GNOME conventions.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
@@ -264,10 +267,110 @@ where
     }
     sync_group.add(&last_synced_row);
     sync_page.add(&sync_group);
+
+    // --- sync: end-to-end encryption -------------------------------
+    // One global switch + password pair shared by both backends. The rows
+    // stay visible when disabled (they are inert then) so the password can
+    // be entered before flipping the switch on.
+    let enc_group = adw::PreferencesGroup::new();
+    enc_group.set_title(tr!("Encryption"));
+    enc_group.set_description(Some(tr!(
+        "Encrypt every note before it is uploaded, so the backend only ever \
+         stores ciphertext. Enter the same password on every device that \
+         syncs."
+    )));
+
+    let enc_switch = adw::SwitchRow::new();
+    enc_switch.set_title(tr!("Encrypt synced notes"));
+    enc_switch.set_subtitle(tr!(
+        "Backend files are sealed (XChaCha20-Poly1305 + Argon2id)"
+    ));
+
+    let enc_password = adw::PasswordEntryRow::new();
+    enc_password.set_title(tr!("Encryption password"));
+
+    let enc_confirm = adw::PasswordEntryRow::new();
+    enc_confirm.set_title(tr!("Confirm password"));
+
+    // The password row persists to the settings; the confirm row only
+    // flags a mismatch live (immediate-effect dialog, no Apply button).
+    {
+        let emit = emit.clone();
+        enc_password.connect_changed(move |row| {
+            emit(AppMsg::SyncEncryptionPasswordChanged(
+                row.text().to_string(),
+            ));
+        });
+    }
+    {
+        let password_row = enc_password.clone();
+        enc_confirm.connect_changed(move |row| {
+            if row.text() != password_row.text() {
+                row.add_css_class("error");
+            } else {
+                row.remove_css_class("error");
+            }
+        });
+    }
+
+    // The password stored when the dialog was built, used to confirm a
+    // disable (typing it proves the user knows the key before the backend
+    // is re-exposed as plaintext).
+    let stored_password = settings.sync.encryption.password.clone();
+    // Suppresses the notify handler while we flip the switch ourselves.
+    let guard = Rc::new(Cell::new(false));
+    {
+        let guard = guard.clone();
+        let emit = emit.clone();
+        let password_row = enc_password.clone();
+        let stored = stored_password.clone();
+        let switch = enc_switch.clone();
+        enc_switch.connect_active_notify(move |row| {
+            let on = row.is_active();
+            if guard.get() {
+                return;
+            }
+            if on {
+                // Enforce the minimum here so a weak password can't be
+                // enabled in the first place; the sync engine enforces it
+                // again as the source of truth.
+                if password_row.text().len() < notas_core::crypto::MIN_PASSWORD_LEN {
+                    guard.set(true);
+                    row.set_active(false);
+                    guard.set(false);
+                    error_alert(
+                        tr!("Encryption password too short"),
+                        tr!("The encryption password must be at least 8 characters."),
+                    );
+                    return;
+                }
+                emit(AppMsg::SyncEncryptionEnabledChanged(true));
+            } else if !stored.is_empty() {
+                // Keep the switch on until the current password is entered.
+                guard.set(true);
+                row.set_active(true);
+                guard.set(false);
+                confirm_disable_encryption(&stored, emit.clone(), switch.clone(), guard.clone());
+            } else {
+                emit(AppMsg::SyncEncryptionEnabledChanged(false));
+            }
+        });
+    }
+
+    enc_group.add(&enc_switch);
+    enc_group.add(&enc_password);
+    enc_group.add(&enc_confirm);
+    sync_page.add(&enc_group);
     window.add(&sync_page);
 
     // Reflect the configured kind after the rows are attached.
     show_backend_rows(settings.sync.kind, &s3_rows, &webdav_rows);
+
+    // Initialize the switch without firing the handler (the initial value
+    // is a programmatic set, not a user action).
+    guard.set(true);
+    enc_switch.set_active(settings.sync.encryption.enabled);
+    guard.set(false);
 
     window
 }
@@ -280,6 +383,64 @@ fn show_backend_rows(kind: SyncType, s3_rows: &[gtk::Widget], webdav_rows: &[gtk
     for row in webdav_rows {
         row.set_visible(kind == SyncType::WebDAV);
     }
+}
+
+/// Small alert dialog for settings validation failures.
+fn error_alert(title: &str, body: &str) {
+    let dialog = adw::AlertDialog::new(Some(title), Some(body));
+    dialog.add_response("ok", tr!("OK"));
+    dialog.set_default_response(Some("ok"));
+    dialog.present(None::<&gtk::Window>);
+}
+
+/// Ask for the current encryption password before disabling encryption:
+/// disabling re-uploads everything to the backend in plaintext, so the
+/// toggle alone must not be able to expose the notes. On a wrong answer
+/// the switch simply stays on.
+#[expect(
+    deprecated,
+    reason = "gtk::Dialog is deprecated since 4.10; keep until adw::AlertDialog can host custom content"
+)]
+fn confirm_disable_encryption(
+    stored: &str,
+    emit: impl Fn(AppMsg) + 'static + Clone,
+    switch: adw::SwitchRow,
+    guard: Rc<Cell<bool>>,
+) {
+    let dialog = gtk::Dialog::with_buttons(
+        Some(tr!("Disable encryption")),
+        None::<&gtk::Window>,
+        gtk::DialogFlags::MODAL,
+        &[
+            (tr!("Cancel"), gtk::ResponseType::Cancel),
+            (tr!("Disable"), gtk::ResponseType::Ok),
+        ],
+    );
+    dialog.set_default_response(gtk::ResponseType::Ok);
+    let entry = gtk::PasswordEntry::new();
+    entry.set_placeholder_text(Some(tr!("Encryption password")));
+    entry.set_activates_default(true);
+    dialog.content_area().append(&entry);
+    dialog.set_size_request(360, -1);
+    let stored = stored.to_string();
+    let entry2 = entry.clone();
+    let emit2 = emit.clone();
+    dialog.connect_response(move |d, resp| {
+        if resp == gtk::ResponseType::Ok && entry2.text() == stored {
+            guard.set(true);
+            switch.set_active(false);
+            guard.set(false);
+            emit2(AppMsg::SyncEncryptionEnabledChanged(false));
+        } else if resp == gtk::ResponseType::Ok {
+            error_alert(
+                tr!("Wrong password"),
+                tr!("The password does not match the one used to encrypt this backend."),
+            );
+        }
+        d.close();
+    });
+    dialog.present();
+    entry.grab_focus();
 }
 
 #[cfg(test)]
@@ -361,8 +522,8 @@ mod tests {
         find_all::<adw::SwitchRow>(&window, &mut switches);
         assert_eq!(
             switches.len(),
-            3,
-            "line numbers + status bar + insecure-TLS switches"
+            4,
+            "line numbers + status bar + insecure-TLS + encryption switches"
         );
         let lines = switches
             .iter()
@@ -456,10 +617,11 @@ mod tests {
             AppMsg::SyncUrlChanged(v) if v == "https://nc.example/remote.php/dav/files/alice"
         ));
 
-        // Two password rows exist (S3 secret key + WebDAV password).
+        // Four password rows exist (S3 secret key + WebDAV password +
+        // encryption password + confirm).
         let mut password_rows = Vec::new();
         find_all::<adw::PasswordEntryRow>(&window, &mut password_rows);
-        assert_eq!(password_rows.len(), 2);
+        assert_eq!(password_rows.len(), 4);
         let secret = password_rows
             .iter()
             .find(|r| r.title() == "Secret access key")
@@ -477,6 +639,29 @@ mod tests {
         assert!(matches!(
             pop(&messages),
             AppMsg::SyncPasswordChanged(v) if v == "app-pw"
+        ));
+
+        // Encryption: entering a password emits its message; flipping the
+        // switch on with a valid password enables encryption. (With an
+        // empty password the switch snaps back and shows an alert instead
+        // of emitting, which the probe avoids by filling the field first.)
+        let enc_password = password_rows
+            .iter()
+            .find(|r| r.title() == "Encryption password")
+            .expect("encryption password row");
+        let enc_switch = switches
+            .iter()
+            .find(|s| s.title() == "Encrypt synced notes")
+            .expect("encryption switch");
+        enc_password.set_text("correct horse battery staple");
+        assert!(matches!(
+            pop(&messages),
+            AppMsg::SyncEncryptionPasswordChanged(v) if v == "correct horse battery staple"
+        ));
+        enc_switch.set_active(true);
+        assert!(matches!(
+            pop(&messages),
+            AppMsg::SyncEncryptionEnabledChanged(true)
         ));
 
         // The insecure-TLS switch emits its message.
