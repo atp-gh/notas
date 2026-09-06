@@ -55,7 +55,7 @@ impl ThemeMode {
 }
 
 /// Top-level settings, written as one JSON object with namespaced sections.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Theme preferences.
@@ -66,6 +66,17 @@ pub struct Settings {
     pub interface: InterfaceSettings,
     /// Synchronization preferences.
     pub sync: SyncSettings,
+    #[serde(skip)]
+    path: Option<PathBuf>,
+}
+
+impl PartialEq for Settings {
+    fn eq(&self, other: &Self) -> bool {
+        self.theme == other.theme
+            && self.editor == other.editor
+            && self.interface == other.interface
+            && self.sync == other.sync
+    }
 }
 
 /// Theme section: `"theme": { "mode": "system" }`.
@@ -333,8 +344,11 @@ impl Settings {
     /// for callers that use the conventional XDG location.
     pub fn load_from(path: PathBuf) -> Self {
         match fs::read_to_string(&path) {
-            Ok(contents) => match serde_json::from_str(&contents) {
-                Ok(settings) => settings,
+            Ok(contents) => match serde_json::from_str::<Self>(&contents) {
+                Ok(mut settings) => {
+                    settings.path = Some(path.clone());
+                    settings
+                }
                 Err(err) => {
                     eprintln!(
                         "notas: settings file {} is invalid, using defaults: {err}",
@@ -353,8 +367,14 @@ impl Settings {
 
     /// Write the settings atomically (temp file + rename), logging failures.
     pub fn save(&self) {
-        let path = settings_path();
-        if let Err(err) = self.save_to(&path) {
+        let default_path;
+        let path = if let Some(path) = self.path.as_deref() {
+            path
+        } else {
+            default_path = settings_path();
+            &default_path
+        };
+        if let Err(err) = self.save_to(path) {
             eprintln!(
                 "notas: failed to save settings to {}: {err}",
                 path.display()

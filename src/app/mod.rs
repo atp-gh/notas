@@ -19,7 +19,7 @@ use sqlx::SqlitePool;
 use crate::core::notes::models::{Note, Notebook, SearchHit, Tag, TagCount};
 
 use crate::app::db_worker::DbWorker;
-use crate::core::config::{Settings, SyncType, ThemeMode};
+use crate::core::config::{Settings, SyncType};
 use crate::core::{DbEvent, DbMsg};
 use crate::editor::{Editor, build_editor};
 use crate::notes::{clear_flow, clear_list, row as note_row};
@@ -27,6 +27,7 @@ use crate::tr;
 use crate::ui::dialogs;
 use crate::ui::settings::build_settings_window;
 use crate::ui::status::sync_indicator_text;
+use crate::ui::theme;
 pub use crate::ui::{AppMsg, ViewId, ViewMode};
 
 type AppSender = relm4::Sender<AppMsg>;
@@ -187,7 +188,7 @@ impl SimpleComponent for App {
         // Apply the persisted color scheme before anything reads the style
         // manager (the editor picks up its initial GtkSourceView scheme and
         // preview palette from `is_dark()` at build time).
-        apply_theme(settings.theme.mode);
+        theme::apply(settings.theme.mode);
 
         let loading = Rc::new(Cell::new(false));
         let allow_close = Rc::new(Cell::new(false));
@@ -1029,7 +1030,7 @@ impl App {
             }
             AppMsg::ThemeChanged(mode) => {
                 self.settings.theme.mode = mode;
-                apply_theme(mode);
+                theme::apply(mode);
                 self.settings.save();
             }
             AppMsg::ToggleLineNumbers(on) => {
@@ -1565,18 +1566,6 @@ impl App {
 // ---------------------------------------------------------------------------
 // Row & dialog helpers
 // ---------------------------------------------------------------------------
-
-/// Apply a color scheme to libadwaita's style manager. The editor and
-/// preview follow automatically through the `dark-notify` hook wired in
-/// `editor::build_editor`, so one call switches the whole app.
-fn apply_theme(mode: ThemeMode) {
-    let scheme = match mode {
-        ThemeMode::System => adw::ColorScheme::Default,
-        ThemeMode::Light => adw::ColorScheme::ForceLight,
-        ThemeMode::Dark => adw::ColorScheme::ForceDark,
-    };
-    adw::StyleManager::default().set_color_scheme(scheme);
-}
 
 #[cfg(test)]
 mod tests {
