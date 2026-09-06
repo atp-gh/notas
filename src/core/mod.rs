@@ -5,10 +5,7 @@
 pub mod config;
 pub mod error;
 pub mod markdown;
-pub mod notes;
-pub mod search;
 pub mod state;
-pub mod storage;
 pub mod ui;
 
 pub use error::{Error, Result};
@@ -16,7 +13,7 @@ pub use error::{Error, Result};
 use std::path::PathBuf;
 
 use self::config::{SyncSettings, SyncType, ThemeMode};
-use self::notes::models::{Note, Notebook, SearchHit, Tag, TagCount};
+use crate::domain_notes::{Note, Notebook, SearchHit, Tag, TagCount};
 use crate::sync::SyncStats;
 
 pub use self::ui::{ViewId, ViewMode};

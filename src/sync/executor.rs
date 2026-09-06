@@ -42,7 +42,7 @@ use reqwest_dav::{Auth as DavAuth, Client as DavClient, ClientBuilder as DavClie
 use s3::{AddressingStyle, Auth as S3Auth, Client as S3Client, Credentials};
 use sqlx::SqlitePool;
 
-use crate::core::storage::repo;
+use crate::storage::repo;
 use crate::sync::crypto::{self, Cipher, CryptoError, Verifier};
 use crate::sync::{
     LocalNote, RemoteEntry, Sidecar, SyncAction, SyncStats, content_hash, plan_sync,
@@ -1057,7 +1057,7 @@ mod webdav_tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::core::config::EncryptionSettings;
-    use crate::core::storage::db;
+    use crate::storage::db;
 
     /// Test settings pointing at the mock server (plain http, so the
     /// insecure-TLS option is on).
@@ -1783,7 +1783,7 @@ mod webdav_tests {
 mod e2e_tests {
     use super::*;
     use crate::core::config::EncryptionSettings;
-    use crate::core::storage::db;
+    use crate::storage::db;
 
     /// End-to-end sync between two fresh databases through a real
     /// S3-compatible store. Manual: needs one running locally, e.g.

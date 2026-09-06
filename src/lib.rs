@@ -4,4 +4,8 @@
 //! same `core` tree so integration tests and future frontends can reuse it.
 
 pub mod core;
+#[path = "notes/model.rs"]
+pub mod domain_notes;
+pub mod search;
+pub mod storage;
 pub mod sync;

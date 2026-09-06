@@ -16,7 +16,7 @@ use relm4::{ComponentParts, ComponentSender, Controller, SimpleComponent};
 use sourceview5::prelude::*;
 use sqlx::SqlitePool;
 
-use crate::core::notes::models::{Note, Notebook, SearchHit, Tag, TagCount};
+use notas::domain_notes::{Note, Notebook, SearchHit, Tag, TagCount};
 
 use crate::app::db_worker::DbWorker;
 use crate::core::config::{Settings, SyncType};

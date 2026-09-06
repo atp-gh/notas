@@ -5,8 +5,8 @@
 //! receives [`DbEvent`]s. This keeps the UI responsive no matter how big
 //! the database gets.
 
-use crate::core::storage::repo;
 pub use crate::core::{DbEvent, DbMsg};
+use crate::storage::repo;
 use relm4::Worker;
 use relm4::prelude::*;
 use sqlx::SqlitePool;

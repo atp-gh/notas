@@ -9,7 +9,7 @@ use std::path::Path;
 use sqlx::{AssertSqlSafe, FromRow, SqlitePool};
 
 use crate::core::Result;
-use crate::core::notes::models::{Note, Notebook, SearchHit, Tag, TagCount};
+use crate::domain_notes::{Note, Notebook, SearchHit, Tag, TagCount};
 use crate::sync::{LocalNote, Sidecar};
 
 // ---------------------------------------------------------------------------
@@ -217,7 +217,7 @@ pub async fn list_trashed(pool: &SqlitePool) -> Result<Vec<Note>> {
 /// whitespace-separated token becomes a quoted phrase.
 /// Full-text search over title + content, newest first, capped at 200 hits.
 pub async fn search(pool: &SqlitePool, query: &str) -> Result<Vec<SearchHit>> {
-    let match_expr = crate::core::search::fts_query(query);
+    let match_expr = crate::search::fts_query(query);
     if match_expr.trim().is_empty() {
         return Ok(Vec::new());
     }

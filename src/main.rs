@@ -9,7 +9,9 @@ mod tr;
 // Reuse the library target's single core/sync module instances. Keeping the
 // binary as a thin frontend avoids compiling two distinct copies of core
 // types (which can otherwise make integration between targets surprising).
-pub use notas::{core, sync};
+#[allow(dead_code)]
+pub use notas::domain_notes;
+pub use notas::{core, search, storage, sync};
 
 use std::process::ExitCode;
 
@@ -33,7 +35,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let pool = match rt.block_on(crate::core::storage::db::connect(
+    let pool = match rt.block_on(crate::storage::db::connect(
         platform_paths.data_dir.join("notas.db"),
     )) {
         Ok(pool) => pool,
