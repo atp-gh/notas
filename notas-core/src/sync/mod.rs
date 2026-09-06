@@ -7,7 +7,7 @@
 //!
 //! ## Model
 //!
-//! Every note is identified across devices by a stable [`uuid`]; the local
+//! Every note is identified across devices by a stable UUID; the local
 //! SQLite `notes.id` is device-specific and never leaves the machine. Each
 //! note exists on the remote store as a pair of objects:
 //!
@@ -32,6 +32,9 @@
 //! UTC), which are zero-padded and therefore compare chronologically as
 //! plain strings. They have one-second resolution, which is why ties need
 //! explicit handling.
+
+pub mod crypto;
+pub mod executor;
 
 use std::collections::{HashMap, HashSet};
 
@@ -129,6 +132,21 @@ pub enum SyncAction {
         /// When the note was deleted locally (`YYYY-MM-DD HH:MM:SS` UTC).
         deleted_at: String,
     },
+}
+
+/// Summary of one completed synchronization run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncStats {
+    /// Notes uploaded, including tombstones.
+    pub uploaded: usize,
+    /// Notes downloaded and applied locally.
+    pub downloaded: usize,
+    /// Local notes moved to the trash by a remote tombstone.
+    pub trashed: usize,
+    /// Conflict copies created from remote content.
+    pub conflicts: usize,
+    /// Local timestamp used for display and persistence.
+    pub last_synced_at: String,
 }
 
 /// FNV-1a 64-bit hash of the markdown content, hex-encoded. Used only for

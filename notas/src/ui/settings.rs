@@ -12,9 +12,9 @@ use std::rc::Rc;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
-use crate::app::AppMsg;
 use crate::config::{Settings, SyncType, ThemeMode};
 use crate::tr;
+use crate::ui::AppMsg;
 
 /// Build the settings window. `emit` forwards UI events to the app. The
 /// window is modal and transient for the main window (the app presents it

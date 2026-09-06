@@ -4,8 +4,9 @@
 //! The widget tree is built imperatively in `init` and stored inside the
 //! model so that message handlers can touch widgets directly.
 
+pub mod db_worker;
+
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -17,90 +18,18 @@ use sqlx::SqlitePool;
 
 use notas_core::models::{Note, Notebook, SearchHit, Tag, TagCount};
 
+use crate::app::db_worker::DbWorker;
 use crate::config::{Settings, SyncType, ThemeMode};
-use crate::db_worker::{DbEvent, DbMsg, DbWorker};
 use crate::editor::{Editor, build_editor};
-use crate::settings_window::build_settings_window;
+use crate::notes::{clear_flow, clear_list, row as note_row};
 use crate::tr;
+use crate::ui::dialogs;
+use crate::ui::settings::build_settings_window;
+use crate::ui::status::sync_indicator_text;
+pub use crate::ui::{AppMsg, ViewId, ViewMode};
+use notas_core::core::{DbEvent, DbMsg};
 
 type AppSender = relm4::Sender<AppMsg>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ViewId {
-    All,
-    Unfiled,
-    Trash,
-}
-
-#[derive(Debug, Clone)]
-pub enum AppMsg {
-    Db(DbEvent),
-    SelectView(ViewId),
-    SelectNotebook(i64),
-    SelectTag(Option<i64>),
-    SelectNote(i64),
-    SearchChanged(String),
-    NewNote,
-    NewNotebook(String),
-    RenameNotebook { id: i64, name: String },
-    DeleteNotebook(i64),
-    RenameTag { id: i64, name: String },
-    DeleteTag(i64),
-    TrashNote,
-    RestoreNote,
-    DeleteForever,
-    DeleteForeverConfirmed,
-    SaveNote,
-    TitleChanged,
-    ContentChanged,
-    TogglePreview,
-    FocusSearch,
-    FocusFind,
-    FindChanged(String),
-    FindNext,
-    FindPrev,
-    ReplaceAll(String),
-    TagsEdited(Vec<String>),
-    ExportMarkdown,
-    ExportTo(PathBuf),
-    BackupNow,
-    BackupTo(PathBuf),
-    DialogSave,
-    DialogDiscard,
-    DialogCancel,
-    CloseRequested,
-    // settings
-    OpenSettings,
-    ThemeChanged(ThemeMode),
-    ToggleLineNumbers(bool),
-    ToggleStatusBar(bool),
-    // sync
-    SyncNow,
-    SyncTypeChanged(SyncType),
-    SyncEndpointChanged(String),
-    SyncRegionChanged(String),
-    SyncBucketChanged(String),
-    SyncPrefixChanged(String),
-    SyncAccessKeyChanged(String),
-    SyncSecretKeyChanged(String),
-    SyncUrlChanged(String),
-    SyncDirectoryChanged(String),
-    SyncUsernameChanged(String),
-    SyncPasswordChanged(String),
-    SyncInsecureTlsChanged(bool),
-    SyncEncryptionEnabledChanged(bool),
-    SyncEncryptionPasswordChanged(String),
-}
-
-#[derive(Debug, Clone)]
-enum ViewMode {
-    All,
-    Unfiled,
-    Trash,
-    Notebook(i64),
-    Tag(i64),
-    Search(String),
-}
 
 /// Establish the initial 1:1:2 split (sidebar | note list | editor) once the
 /// panes have their first real allocation, then leave every later resize to
@@ -337,7 +266,7 @@ impl SimpleComponent for App {
             let win = window.clone();
             let sender = app_sender.clone();
             new_nb_btn.connect_clicked(move |_| {
-                prompt_input(
+                dialogs::input(
                     &win,
                     &sender,
                     tr!("New notebook"),
@@ -389,7 +318,7 @@ impl SimpleComponent for App {
             let sender = app_sender.clone();
             rename_nb_btn.connect_clicked(move |_| {
                 let id = pending.get();
-                prompt_input(
+                dialogs::input(
                     &win,
                     &sender,
                     tr!("Rename notebook"),
@@ -459,7 +388,7 @@ impl SimpleComponent for App {
             let sender = app_sender.clone();
             rename_tag_btn.connect_clicked(move |_| {
                 let id = pending.get();
-                prompt_input(
+                dialogs::input(
                     &win,
                     &sender,
                     tr!("Rename tag"),
@@ -875,11 +804,7 @@ impl App {
         match msg {
             AppMsg::Db(event) => self.handle_db_event(event),
             AppMsg::SelectView(view) => {
-                self.mode = match view {
-                    ViewId::All => ViewMode::All,
-                    ViewId::Unfiled => ViewMode::Unfiled,
-                    ViewId::Trash => ViewMode::Trash,
-                };
+                self.mode = notas_core::core::state::mode_for_view(view);
                 self.refresh_current_list();
                 self.update_view_title();
                 self.update_trash_buttons();
@@ -912,7 +837,7 @@ impl App {
                 }
                 if self.dirty {
                     self.pending_open = Some(id);
-                    unsaved_dialog(&self.widgets.window, app_sender);
+                    dialogs::unsaved(&self.widgets.window, app_sender);
                 } else {
                     self.worker.emit(DbMsg::LoadNote(id));
                 }
@@ -934,7 +859,7 @@ impl App {
             AppMsg::NewNote => {
                 if self.dirty && self.current_note.is_some() {
                     self.pending_new_note = true;
-                    unsaved_dialog(&self.widgets.window, app_sender);
+                    dialogs::unsaved(&self.widgets.window, app_sender);
                 } else {
                     self.create_note_now();
                 }
@@ -980,7 +905,7 @@ impl App {
             }
             AppMsg::DeleteForever => {
                 if self.selected_trashed.is_some() {
-                    confirm_dialog(
+                    dialogs::confirm(
                         &self.widgets.window,
                         app_sender,
                         tr!("Delete permanently"),
@@ -1000,9 +925,13 @@ impl App {
                 // loading a note sets the entry/buffer programmatically,
                 // which also fires "changed", and reverting an edit back to
                 // the saved text must clear the flag.
-                let dirty = self.current_note.is_some()
-                    && (self.current_title() != self.saved_title
-                        || self.current_content() != self.saved_content);
+                let dirty = notas_core::core::state::editor_is_dirty(
+                    self.current_note,
+                    &self.current_title(),
+                    &self.current_content(),
+                    &self.saved_title,
+                    &self.saved_content,
+                );
                 self.set_dirty(dirty);
             }
             AppMsg::TogglePreview => {
@@ -1224,7 +1153,7 @@ impl App {
             AppMsg::CloseRequested => {
                 if self.dirty {
                     self.pending_close = true;
-                    unsaved_dialog(&self.widgets.window, app_sender);
+                    dialogs::unsaved(&self.widgets.window, app_sender);
                 } else {
                     self.finish_close();
                 }
@@ -1334,13 +1263,13 @@ impl App {
                         .status_label
                         .set_text(&format!("Exported {n} notes"));
                 }
-                Err(e) => error_dialog(&self.widgets.window, &e),
+                Err(e) => dialogs::error(&self.widgets.window, &e),
             },
             DbEvent::BackupDone(result) => match result {
                 Ok(()) => {
                     self.widgets.status_label.set_text(tr!("Backup created"));
                 }
-                Err(e) => error_dialog(&self.widgets.window, &e),
+                Err(e) => dialogs::error(&self.widgets.window, &e),
             },
             DbEvent::SyncDone(stats) => {
                 self.settings.sync.last_synced_at = stats.last_synced_at.clone();
@@ -1379,9 +1308,9 @@ impl App {
                     .sync_label
                     .set_text(&sync_indicator_text(&self.settings.sync.last_synced_at));
                 self.widgets.status_label.set_text(tr!("Sync failed"));
-                error_dialog(&self.widgets.window, &e);
+                dialogs::error(&self.widgets.window, &e);
             }
-            DbEvent::Error(e) => error_dialog(&self.widgets.window, &e),
+            DbEvent::Error(e) => dialogs::error(&self.widgets.window, &e),
         }
     }
 
@@ -1515,7 +1444,7 @@ impl App {
     }
 
     fn rebuild_tag_flow(&self) {
-        clear_flow_box(&self.widgets.tag_flow);
+        clear_flow(&self.widgets.tag_flow);
         let mut ids = self.tag_ids.borrow_mut();
         ids.clear();
         for tag in &self.tags {
@@ -1562,7 +1491,7 @@ impl App {
     }
 
     fn rebuild_notes_list(&self) {
-        clear_list_box(&self.widgets.notes_list);
+        clear_list(&self.widgets.notes_list);
         let mut ids = self.row_ids.borrow_mut();
         ids.clear();
 
@@ -1588,7 +1517,7 @@ impl App {
     }
 
     fn render_search_results(&self, hits: Vec<SearchHit>) {
-        clear_list_box(&self.widgets.notes_list);
+        clear_list(&self.widgets.notes_list);
         let mut ids = self.row_ids.borrow_mut();
         ids.clear();
         self.widgets.notes_empty.set_visible(hits.is_empty());
@@ -1612,7 +1541,7 @@ impl App {
     }
 
     fn rebuild_tag_editor(&self) {
-        clear_flow_box(&self.widgets.tag_editor_flow);
+        clear_flow(&self.widgets.tag_editor_flow);
         let names: Vec<String> = self.note_tags.iter().map(|t| t.name.clone()).collect();
         for tag in &self.note_tags {
             let chip = gtk::Button::with_label(&format!("× {}", tag.name));
@@ -1637,52 +1566,6 @@ impl App {
 // Row & dialog helpers
 // ---------------------------------------------------------------------------
 
-/// Persistent text for the status-bar sync indicator. Empty (never
-/// synced) shows a hint; otherwise the local time of the last run.
-fn sync_indicator_text(last_synced_at: &str) -> String {
-    if last_synced_at.is_empty() {
-        tr!("Never synced").to_string()
-    } else {
-        format!("{} {last_synced_at}", tr!("Last synced"))
-    }
-}
-
-/// Remove every child row from a `ListBox`.
-fn clear_list_box(list: &gtk::ListBox) {
-    while let Some(child) = list.first_child() {
-        list.remove(&child);
-    }
-}
-
-/// Remove every child chip from a `FlowBox`.
-fn clear_flow_box(flow: &gtk::FlowBox) {
-    while let Some(child) = flow.first_child() {
-        flow.remove(&child);
-    }
-}
-
-fn note_row(title: &str, subtitle: &str) -> gtk::ListBoxRow {
-    let row = gtk::ListBoxRow::new();
-    row.set_activatable(true);
-    let title_label = gtk::Label::new(None);
-    title_label.set_xalign(0.0);
-    title_label.set_ellipsize(pango::EllipsizeMode::End);
-    title_label.set_markup(&format!("<b>{}</b>", glib::markup_escape_text(title)));
-    let sub_label = gtk::Label::new(None);
-    sub_label.set_xalign(0.0);
-    sub_label.set_ellipsize(pango::EllipsizeMode::End);
-    sub_label.set_markup(&format!(
-        "<span size='small' foreground='#8f8f8f'>{}</span>",
-        glib::markup_escape_text(subtitle)
-    ));
-    let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    vbox.set_margin_all(6);
-    vbox.append(&title_label);
-    vbox.append(&sub_label);
-    row.set_child(Some(&vbox));
-    row
-}
-
 /// Apply a color scheme to libadwaita's style manager. The editor and
 /// preview follow automatically through the `dark-notify` hook wired in
 /// `editor::build_editor`, so one call switches the whole app.
@@ -1693,98 +1576,6 @@ fn apply_theme(mode: ThemeMode) {
         ThemeMode::Dark => adw::ColorScheme::ForceDark,
     };
     adw::StyleManager::default().set_color_scheme(scheme);
-}
-
-fn unsaved_dialog(window: &adw::ApplicationWindow, sender: &AppSender) {
-    let dialog = adw::AlertDialog::new(
-        Some(tr!("Unsaved changes")),
-        Some(tr!("The current note has unsaved changes.")),
-    );
-    dialog.add_response("cancel", tr!("Cancel"));
-    dialog.add_response("discard", tr!("Discard"));
-    dialog.add_response("save", tr!("Save"));
-    dialog.set_default_response(Some("save"));
-    dialog.set_close_response("cancel");
-    dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
-    let s = sender.clone();
-    dialog.connect_response(None::<&str>, move |_d, resp| {
-        let msg = match resp {
-            "save" => AppMsg::DialogSave,
-            "discard" => AppMsg::DialogDiscard,
-            _ => AppMsg::DialogCancel,
-        };
-        let _ = s.send(msg);
-    });
-    dialog.present(Some(window));
-}
-
-fn confirm_dialog(
-    window: &adw::ApplicationWindow,
-    sender: &AppSender,
-    title: &str,
-    body: &str,
-    msg: AppMsg,
-) {
-    let dialog = adw::AlertDialog::new(Some(title), Some(body));
-    dialog.add_response("cancel", tr!("Cancel"));
-    dialog.add_response("confirm", tr!("Delete"));
-    dialog.set_default_response(Some("cancel"));
-    dialog.set_close_response("cancel");
-    dialog.set_response_appearance("confirm", adw::ResponseAppearance::Destructive);
-    let s = sender.clone();
-    dialog.connect_response(None::<&str>, move |_d, resp| {
-        if resp == "confirm" {
-            let _ = s.send(msg.clone());
-        }
-    });
-    dialog.present(Some(window));
-}
-
-fn error_dialog(window: &adw::ApplicationWindow, message: &str) {
-    let dialog = adw::AlertDialog::new(Some(tr!("Error")), Some(message));
-    dialog.add_response("ok", tr!("OK"));
-    dialog.set_default_response(Some("ok"));
-    dialog.present(Some(window));
-}
-
-#[expect(
-    deprecated,
-    reason = "gtk::Dialog is deprecated since 4.10; keep until adw::AlertDialog can host custom content"
-)]
-fn prompt_input(
-    window: &adw::ApplicationWindow,
-    sender: &AppSender,
-    title: &str,
-    placeholder: &str,
-    initial: &str,
-    ok: impl Fn(String) -> AppMsg + 'static,
-) {
-    let dialog = gtk::Dialog::with_buttons(
-        Some(title),
-        Some(window),
-        gtk::DialogFlags::MODAL,
-        &[
-            (tr!("Cancel"), gtk::ResponseType::Cancel),
-            (tr!("OK"), gtk::ResponseType::Ok),
-        ],
-    );
-    dialog.set_default_response(gtk::ResponseType::Ok);
-    let entry = gtk::Entry::new();
-    entry.set_placeholder_text(Some(placeholder));
-    entry.set_text(initial);
-    entry.set_activates_default(true);
-    dialog.content_area().append(&entry);
-    dialog.set_size_request(360, -1);
-    let s = sender.clone();
-    let entry2 = entry.clone();
-    dialog.connect_response(move |d, resp| {
-        if resp == gtk::ResponseType::Ok {
-            let _ = s.send(ok(entry2.text().to_string()));
-        }
-        d.close();
-    });
-    dialog.present();
-    entry.grab_focus();
 }
 
 #[cfg(test)]

@@ -1624,16 +1624,12 @@ dependencies = [
  "pango",
  "pulldown-cmark",
  "relm4",
- "reqwest",
- "reqwest_dav",
- "s3",
  "serde",
  "serde_json",
  "sourceview5",
  "sqlx",
  "tokio",
  "unicode-width",
- "wiremock",
 ]
 
 [[package]]
@@ -1644,6 +1640,9 @@ dependencies = [
  "chacha20poly1305",
  "hex",
  "rand 0.8.8",
+ "reqwest",
+ "reqwest_dav",
+ "s3",
  "serde",
  "serde_json",
  "sqlx",
@@ -1651,6 +1650,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "wiremock",
 ]
 
 [[package]]

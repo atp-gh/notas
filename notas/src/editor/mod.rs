@@ -10,7 +10,8 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagE
 use sourceview5::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::AppMsg;
+use crate::ui::protocol::AppMsg;
+use notas_core::markdown::{Span, Style};
 
 /// Text tags used by the Markdown preview, created once per buffer.
 pub struct PreviewTags {
@@ -476,29 +477,6 @@ where
 // ---------------------------------------------------------------------------
 // Markdown -> styled spans
 // ---------------------------------------------------------------------------
-
-/// A visual style that maps to one `gtk::TextTag` in the preview.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Style {
-    Bold,
-    Italic,
-    Strike,
-    Code,
-    CodeBlock,
-    Link,
-    Dim,
-    Heading(u32),
-    Quote(u32),
-    Table,
-}
-
-/// A run of text carrying the styles active at that position.
-struct Span {
-    text: String,
-    styles: Vec<Style>,
-    /// Destination URL when this span sits inside a link, else `None`.
-    url: Option<String>,
-}
 
 /// Horizontal rule drawn in the preview.
 const RULE_LINE: &str = "────────────────────────────────────────";

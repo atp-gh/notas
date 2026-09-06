@@ -36,8 +36,10 @@ cargo build --release
 
 A workspace with two crates:
 
-- **`notas-core`** — the pure data layer: schema, repository, FTS5 search, export, backup, and the sync _planner_ (pure conflict/deletion logic). No GTK. Fully unit-tested (`cargo test -p notas-core`).
-- **`notas`** — the GTK app. The `DbWorker` runs every database operation on relm4's tokio runtime, keeping the UI responsive. The sync executors (`sync.rs`, S3 + WebDAV backends over one shared seam) run there too, so a manual sync never blocks the UI.
+- **`notas-core`** — the platform-neutral application layer: `core` command/event contracts, `notes` domain models, `storage` (SQLite and filesystem), `search`, and `sync` (planner, S3/WebDAV executor, and `crypto`). It has no GTK dependency and is fully unit-tested (`cargo test -p notas-core`).
+- **`notas`** — the current GTK frontend. `app/` contains the Relm4 coordinator and worker, `editor/` and `ui/` contain GTK adapters, and `platform/` isolates OS paths (`linux.rs`, `windows.rs`, `macos.rs`). The frontend translates widget events into core messages; future native frontends can reuse `notas-core` without importing GTK.
+
+The intended dependency direction is `platform/UI -> app coordinator -> notas-core`. Core commands and events do not contain widget handles, and sync/storage code never calls GTK. Compatibility re-exports remain temporarily while the remaining GTK components are split into smaller modules.
 
 ## Sync
 

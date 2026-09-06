@@ -1,9 +1,9 @@
 mod app;
 mod config;
-mod db_worker;
 mod editor;
-mod settings_window;
-mod sync;
+mod notes;
+mod platform;
+mod ui;
 #[macro_use]
 mod tr;
 
@@ -35,7 +35,10 @@ fn main() -> ExitCode {
         }
     };
 
-    let settings = Settings::load();
+    // Resolve platform paths once during startup; platform-specific services
+    // can be injected into core without exposing GTK or OS environment APIs.
+    let platform_paths = platform::paths();
+    let settings = Settings::load_from(platform_paths.config_dir.join("settings.json"));
     let relm_app = RelmApp::new("io.github.notas.Notas");
     relm_app.run::<App>(AppInit { pool, settings });
     ExitCode::SUCCESS

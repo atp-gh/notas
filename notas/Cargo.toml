@@ -18,19 +18,6 @@ pango = "0.22"
 unicode-width = "0.2"
 sqlx.workspace = true
 tokio.workspace = true
-# Lean S3-compatible client (async + rustls by default), used by the sync
-# engine. Works with AWS S3, Cloudflare R2, Backblaze B2, MinIO, …
-s3 = "0.1"
-# WebDAV client over reqwest (async, PROPFIND/list included) for the
-# Nextcloud/ownCloud backend. rustls to match the rest of the stack.
-reqwest_dav = { version = "0.3", default-features = false, features = ["rustls-tls"] }
-# Direct reqwest dependency: the WebDAV backend builds its own agent so it
-# can set timeouts and opt into skipping certificate validation.
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-
-[dev-dependencies]
-# In-process HTTP mock used by the WebDAV executor integration tests.
-wiremock = "0.6"
 
 [lints]
 workspace = true

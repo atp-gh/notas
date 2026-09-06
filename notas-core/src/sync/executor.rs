@@ -2,20 +2,20 @@
 //!
 //! The pure planning logic lives in `notas_core::sync` (see its module doc
 //! for the object layout, conflict rules and tombstone semantics). This
-//! module is the executor: each backend implements the [`SyncStore`] seam
+//! module is the executor: each backend implements the `SyncStore` seam
 //! — list the remote index, fetch/upload markdown bodies and sidecars —
-//! and a shared [`run_sync_with`] turns a [`SyncAction`] plan into actual
+//! and a shared `run_sync_with` turns a [`SyncAction`] plan into actual
 //! store operations, then updates the local database. It runs on the DB
 //! worker's tokio runtime, never on the UI thread.
 //!
 //! ## Encryption
 //!
 //! When enabled in Settings, end-to-end encryption is transparent to the
-//! planner: [`run_sync_with`] resolves a [`Cipher`] up front (reading the
+//! planner: `run_sync_with` resolves a [`Cipher`] up front (reading the
 //! backend's `meta/.encryption-verifier` object, writing it on a
 //! never-encrypted backend, and aborting on a wrong password before any
 //! note traffic), then every store call seals objects on upload and opens
-//! them on download. See [`notas_core::crypto`] for the algorithm and blob
+//! them on download. See [`crate::sync::crypto`] for the algorithm and blob
 //! format.
 //!
 //! ## Backends
@@ -42,27 +42,13 @@ use reqwest_dav::{Auth as DavAuth, Client as DavClient, ClientBuilder as DavClie
 use s3::{AddressingStyle, Auth as S3Auth, Client as S3Client, Credentials};
 use sqlx::SqlitePool;
 
-use notas_core::crypto::{self, Cipher, CryptoError, Verifier};
-use notas_core::repo;
-use notas_core::sync::{LocalNote, RemoteEntry, Sidecar, SyncAction, content_hash, plan_sync};
+use crate::crypto::{self, Cipher, CryptoError, Verifier};
+use crate::repo;
+use crate::sync::{
+    LocalNote, RemoteEntry, Sidecar, SyncAction, SyncStats, content_hash, plan_sync,
+};
 
 use crate::config::{S3SyncSettings, SyncSettings, SyncType, WebDavSyncSettings};
-
-/// Outcome of one sync run, reported to the status bar.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyncStats {
-    /// Notes uploaded (including tombstones).
-    pub uploaded: usize,
-    /// Notes downloaded and applied locally.
-    pub downloaded: usize,
-    /// Local notes moved to the trash by a remote tombstone.
-    pub trashed: usize,
-    /// Conflict copies created from remote content.
-    pub conflicts: usize,
-    /// `YYYY-MM-DD HH:MM:SS` timestamp of this run, in the device's local
-    /// time — it exists only to be shown in the UI.
-    pub last_synced_at: String,
-}
 
 /// The storage primitives the planner's actions map onto. Implemented by
 /// every sync backend; the rest of [`run_sync_with`] is shared.
@@ -1071,7 +1057,7 @@ mod webdav_tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::config::EncryptionSettings;
-    use notas_core::db;
+    use crate::db;
 
     /// Test settings pointing at the mock server (plain http, so the
     /// insecure-TLS option is on).
@@ -1797,7 +1783,7 @@ mod webdav_tests {
 mod e2e_tests {
     use super::*;
     use crate::config::EncryptionSettings;
-    use notas_core::db;
+    use crate::db;
 
     /// End-to-end sync between two fresh databases through a real
     /// S3-compatible store. Manual: needs one running locally, e.g.

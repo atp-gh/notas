@@ -5,86 +5,11 @@
 //! receives [`DbEvent`]s. This keeps the UI responsive no matter how big
 //! the database gets.
 
-use std::path::PathBuf;
-
-use notas_core::models::{Note, Notebook, SearchHit, Tag, TagCount};
+pub use notas_core::core::{DbEvent, DbMsg};
 use notas_core::repo;
 use relm4::Worker;
 use relm4::prelude::*;
 use sqlx::SqlitePool;
-
-#[derive(Debug)]
-pub enum DbMsg {
-    LoadNotebooks,
-    LoadTags,
-    /// Load the note list for a notebook.
-    LoadNotes(i64),
-    LoadUnfiled,
-    LoadAll,
-    LoadTrashed,
-    LoadByTag(i64),
-    /// Load a single note's full content.
-    LoadNote(i64),
-    CreateNote(Option<i64>),
-    UpdateNote {
-        id: i64,
-        title: String,
-        content: String,
-    },
-    TrashNote(i64),
-    RestoreNote(i64),
-    DeleteForever(i64),
-    CreateNotebook {
-        parent: Option<i64>,
-        name: String,
-    },
-    RenameNotebook {
-        id: i64,
-        name: String,
-    },
-    DeleteNotebook(i64),
-    RenameTag {
-        id: i64,
-        name: String,
-    },
-    DeleteTag(i64),
-    SetTags {
-        note_id: i64,
-        names: Vec<String>,
-    },
-    LoadNoteTags(i64),
-    Search(String),
-    ExportMarkdown(PathBuf),
-    Backup(PathBuf),
-    /// Run one full sync against the configured backend (S3 or WebDAV).
-    /// Processed like every other message (sequentially on the worker), so
-    /// a save emitted just before it is guaranteed to be visible. Boxed
-    /// because the settings (both backends' sections) outgrew the enum
-    /// variant lint's threshold.
-    SyncNow(Box<crate::config::SyncSettings>),
-}
-
-#[derive(Debug, Clone)]
-pub enum DbEvent {
-    Notebooks(Vec<Notebook>),
-    Tags(Vec<TagCount>),
-    Notes(Vec<Note>),
-    Trashed(Vec<Note>),
-    NoteLoaded(Note),
-    NoteCreated(Note),
-    NoteSaved { id: i64 },
-    NoteTrashed { id: i64 },
-    NoteRestored { id: i64 },
-    NoteDeletedForever { id: i64 },
-    DataChanged,
-    NoteTags(Vec<Tag>),
-    SearchResults(Vec<SearchHit>),
-    ExportDone(Result<usize, String>),
-    BackupDone(Result<(), String>),
-    SyncDone(crate::sync::SyncStats),
-    SyncFailed(String),
-    Error(String),
-}
 
 pub struct DbWorker {
     pool: SqlitePool,
@@ -167,10 +92,12 @@ async fn handle(pool: SqlitePool, msg: DbMsg) -> DbEvent {
             Ok(()) => Ok(DbEvent::BackupDone(Ok(()))),
             Err(e) => Ok(DbEvent::BackupDone(Err(format!("{e:#}")))),
         },
-        DbMsg::SyncNow(settings) => match crate::sync::run_sync(&pool, settings.as_ref()).await {
-            Ok(stats) => Ok(DbEvent::SyncDone(stats)),
-            Err(e) => Ok(DbEvent::SyncFailed(e)),
-        },
+        DbMsg::SyncNow(settings) => {
+            match notas_core::sync::executor::run_sync(&pool, settings.as_ref()).await {
+                Ok(stats) => Ok(DbEvent::SyncDone(stats)),
+                Err(e) => Ok(DbEvent::SyncFailed(e)),
+            }
+        }
     };
 
     match result {
