@@ -10,7 +10,7 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagE
 use sourceview5::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
-use crate::core::markdown::{self, Span, Style};
+use crate::core::markdown::{self, RenderedMarkdown, Span, Style};
 use crate::ui::protocol::AppMsg;
 
 /// Text tags used by the Markdown preview, created once per buffer.
@@ -953,7 +953,8 @@ pub fn render_markdown(buffer: &gtk::TextBuffer, tags: &PreviewTags, md: &str) {
     buffer.set_text("");
     let mut link_ranges = Vec::new();
     let mut end = buffer.end_iter();
-    for span in build_spans(md) {
+    let rendered = RenderedMarkdown::new(build_spans(md));
+    for span in rendered.spans() {
         // `insert` invalidates `start`, so remember the offset and rebuild
         // the iterator afterwards instead of copying it (copying produced
         // a stale iter that made `apply_tag` fail with a Gtk-CRITICAL).

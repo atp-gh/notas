@@ -36,6 +36,24 @@ pub struct Span {
     pub url: Option<String>,
 }
 
+/// Platform-neutral result of rendering a Markdown document.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct RenderedMarkdown {
+    spans: Vec<Span>,
+}
+
+impl RenderedMarkdown {
+    /// Build a rendered document from its ordered text spans.
+    pub fn new(spans: Vec<Span>) -> Self {
+        Self { spans }
+    }
+
+    /// Borrow the ordered spans for a frontend renderer.
+    pub fn spans(&self) -> &[Span] {
+        &self.spans
+    }
+}
+
 /// Horizontal rule used by the plain Markdown renderer.
 pub const RULE_LINE: &str = "────────────────────────────────────────";
 
@@ -79,5 +97,15 @@ mod tests {
         assert_eq!(pad_cell("a", 3, pulldown_cmark::Alignment::Right), "  a");
         assert_eq!(pad_cell("a", 3, pulldown_cmark::Alignment::Center), " a ");
         assert_eq!(pad_cell("a", 3, pulldown_cmark::Alignment::Left), "a  ");
+    }
+
+    #[test]
+    fn rendered_markdown_exposes_spans_without_owning_a_frontend() {
+        let rendered = RenderedMarkdown::new(vec![Span {
+            text: "hello".into(),
+            styles: vec![Style::Bold],
+            url: None,
+        }]);
+        assert_eq!(rendered.spans()[0].text, "hello");
     }
 }
