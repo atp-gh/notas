@@ -5,6 +5,7 @@
 //! bookkeeping from leaking into core note operations.
 
 pub(crate) mod notebook;
+pub(crate) mod sidebar;
 
 use gtk::prelude::*;
 use relm4::RelmWidgetExt;

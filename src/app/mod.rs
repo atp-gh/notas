@@ -28,7 +28,7 @@ use crate::ui::dialogs;
 use crate::ui::settings::build_settings_window;
 use crate::ui::status::sync_indicator_text;
 use crate::ui::theme;
-pub use crate::ui::{AppMsg, ViewId, ViewMode};
+pub use crate::ui::{AppMsg, ViewMode};
 
 type AppSender = relm4::Sender<AppMsg>;
 
@@ -173,10 +173,6 @@ impl SimpleComponent for App {
             .build()
     }
 
-    #[expect(
-        deprecated,
-        reason = "notebook sidebar uses gtk::TreeView; migrating to gtk::ColumnView is a separate UI task"
-    )]
     fn init(
         init: Self::Init,
         window: Self::Root,
@@ -211,216 +207,13 @@ impl SimpleComponent for App {
         };
 
         // ------------------------------------------------------------- sidebar
-        let search_entry = gtk::SearchEntry::new();
-        search_entry.set_placeholder_text(Some(tr!("Search notes…")));
-        search_entry.set_margin_bottom(6);
-        {
-            let emit = emit.clone();
-            search_entry.connect_search_changed(move |entry| {
-                emit(AppMsg::SearchChanged(entry.text().to_string()));
-            });
-        }
-
-        let view_list = gtk::ListBox::new();
-        view_list.set_selection_mode(gtk::SelectionMode::Single);
-        view_list.set_activate_on_single_click(true);
-        for (label, id) in [
-            (tr!("All notes"), ViewId::All),
-            (tr!("Unfiled"), ViewId::Unfiled),
-            (tr!("Trash"), ViewId::Trash),
-        ] {
-            let row = gtk::ListBoxRow::new();
-            row.set_widget_name(match id {
-                ViewId::All => "all",
-                ViewId::Unfiled => "unfiled",
-                ViewId::Trash => "trash",
-            });
-            row.set_child(Some(&gtk::Label::new(Some(label))));
-            row.set_activatable(true);
-            view_list.append(&row);
-        }
-        {
-            let emit = emit.clone();
-            view_list.connect_row_selected(move |_list, row| {
-                if let Some(row) = row {
-                    let view = match row.widget_name().as_str() {
-                        "trash" => ViewId::Trash,
-                        "unfiled" => ViewId::Unfiled,
-                        _ => ViewId::All,
-                    };
-                    emit(AppMsg::SelectView(view));
-                }
-            });
-        }
-
-        let notebooks_label = gtk::Label::new(Some(tr!("Notebooks")));
-        notebooks_label.set_halign(gtk::Align::Start);
-        notebooks_label.set_margin_top(10);
-        notebooks_label.set_margin_bottom(4);
-        notebooks_label.add_css_class("heading");
-
-        let new_nb_btn = gtk::Button::from_icon_name("folder-new-symbolic");
-        new_nb_btn.set_tooltip_text(Some(tr!("New notebook")));
-        new_nb_btn.set_halign(gtk::Align::End);
-        new_nb_btn.set_valign(gtk::Align::Center);
-        {
-            let win = window.clone();
-            let sender = app_sender.clone();
-            new_nb_btn.connect_clicked(move |_| {
-                dialogs::input(
-                    &win,
-                    &sender,
-                    tr!("New notebook"),
-                    tr!("Notebook name…"),
-                    "",
-                    AppMsg::NewNotebook,
-                );
-            });
-        }
-
-        let notebooks_header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        notebooks_header.append(&notebooks_label);
-        notebooks_header.append(&new_nb_btn);
-
-        let notebook_store = gtk::TreeStore::new(&[glib::Type::I64, glib::Type::STRING]);
-        let notebook_tree = gtk::TreeView::with_model(&notebook_store);
-        notebook_tree.set_headers_visible(false);
-        notebook_tree.set_activate_on_single_click(true);
-        notebook_tree.set_hexpand(true);
-        {
-            let column = gtk::TreeViewColumn::new();
-            let renderer = gtk::CellRendererText::new();
-            column.pack_start(&renderer, true);
-            column.add_attribute(&renderer, "text", 1);
-            notebook_tree.append_column(&column);
-        }
-        {
-            let emit = emit.clone();
-            notebook_tree.connect_row_activated(move |tree, path, _col| {
-                if let Some(model) = tree.model()
-                    && let Some(iter) = model.iter(path)
-                {
-                    let id: i64 = model.get_value(&iter, 0).get().unwrap_or(0);
-                    emit(AppMsg::SelectNotebook(id));
-                }
-            });
-        }
-
-        // Right-click context menu on the notebook tree: rename / delete.
-        let tree_menu = gtk::Popover::new();
-        let rename_nb_btn = gtk::Button::with_label(tr!("Rename…"));
-        rename_nb_btn.set_halign(gtk::Align::Fill);
-        let delete_nb_btn = gtk::Button::with_label(tr!("Delete notebook"));
-        delete_nb_btn.set_halign(gtk::Align::Fill);
-        delete_nb_btn.add_css_class("destructive-action");
-        {
-            let win = window.clone();
-            let pending = pending_nb.clone();
-            let sender = app_sender.clone();
-            rename_nb_btn.connect_clicked(move |_| {
-                let id = pending.get();
-                dialogs::input(
-                    &win,
-                    &sender,
-                    tr!("Rename notebook"),
-                    tr!("Notebook name…"),
-                    "",
-                    move |name| AppMsg::RenameNotebook { id, name },
-                );
-            });
-        }
-        {
-            let emit = emit.clone();
-            let pending = pending_nb.clone();
-            delete_nb_btn.connect_clicked(move |_| {
-                emit(AppMsg::DeleteNotebook(pending.get()));
-            });
-        }
-        let tree_menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        tree_menu_box.set_margin_all(8);
-        tree_menu_box.append(&rename_nb_btn);
-        tree_menu_box.append(&delete_nb_btn);
-        tree_menu.set_child(Some(&tree_menu_box));
-        {
-            let tree = notebook_tree.clone();
-            let menu = tree_menu.clone();
-            let pending = pending_nb.clone();
-            let gesture = gtk::GestureClick::new();
-            gesture.set_button(3);
-            gesture.connect_pressed(move |_g, _n, x, y| {
-                if let Some((path, _col, _x, _y)) = tree.path_at_pos(x as i32, y as i32)
-                    && let Some(path) = path
-                    && let Some(model) = tree.model()
-                    && let Some(iter) = model.iter(&path)
-                {
-                    let id: i64 = model.get_value(&iter, 0).get().unwrap_or(0);
-                    pending.set(id);
-                    menu.set_parent(&tree);
-                    menu.present();
-                }
-            });
-            notebook_tree.add_controller(gesture);
-        }
-
-        let tree_scroll = gtk::ScrolledWindow::new();
-        tree_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-        tree_scroll.set_child(Some(&notebook_tree));
-        tree_scroll.set_vexpand(true);
-
-        let tags_label = gtk::Label::new(Some(tr!("Tags")));
-        tags_label.set_halign(gtk::Align::Start);
-        tags_label.set_margin_top(10);
-        tags_label.set_margin_bottom(4);
-        tags_label.add_css_class("heading");
-
-        let tag_flow = gtk::FlowBox::new();
-        tag_flow.set_selection_mode(gtk::SelectionMode::None);
-        tag_flow.set_min_children_per_line(1);
-
-        let tag_menu = gtk::Popover::new();
-        let rename_tag_btn = gtk::Button::with_label(tr!("Rename…"));
-        rename_tag_btn.set_halign(gtk::Align::Fill);
-        let delete_tag_btn = gtk::Button::with_label(tr!("Delete tag"));
-        delete_tag_btn.set_halign(gtk::Align::Fill);
-        delete_tag_btn.add_css_class("destructive-action");
-        {
-            let win = window.clone();
-            let pending = pending_tag.clone();
-            let sender = app_sender.clone();
-            rename_tag_btn.connect_clicked(move |_| {
-                let id = pending.get();
-                dialogs::input(
-                    &win,
-                    &sender,
-                    tr!("Rename tag"),
-                    tr!("Tag name…"),
-                    "",
-                    move |name| AppMsg::RenameTag { id, name },
-                );
-            });
-        }
-        {
-            let emit = emit.clone();
-            let pending = pending_tag.clone();
-            delete_tag_btn.connect_clicked(move |_| {
-                emit(AppMsg::DeleteTag(pending.get()));
-            });
-        }
-        let tag_menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        tag_menu_box.set_margin_all(8);
-        tag_menu_box.append(&rename_tag_btn);
-        tag_menu_box.append(&delete_tag_btn);
-        tag_menu.set_child(Some(&tag_menu_box));
-
-        let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        sidebar.set_width_request(230);
-        sidebar.set_margin_all(8);
-        sidebar.append(&search_entry);
-        sidebar.append(&view_list);
-        sidebar.append(&notebooks_header);
-        sidebar.append(&tree_scroll);
-        sidebar.append(&tags_label);
-        sidebar.append(&tag_flow);
+        let sidebar_parts =
+            crate::notes::sidebar::build(&window, &app_sender, &pending_nb, &pending_tag);
+        let sidebar = sidebar_parts.root;
+        let search_entry = sidebar_parts.search_entry;
+        let notebook_store = sidebar_parts.notebook_store;
+        let tag_flow = sidebar_parts.tag_flow;
+        let tag_menu = sidebar_parts.tag_menu;
 
         // ------------------------------------------------------------- middle
         let view_title = gtk::Label::new(Some(tr!("All notes")));

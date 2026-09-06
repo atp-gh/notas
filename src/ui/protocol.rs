@@ -6,4 +6,4 @@
 //! Windows-native, or macOS-native.
 
 pub use crate::core::AppMsg;
-pub use crate::core::ui::{ViewId, ViewMode};
+pub use crate::core::ui::ViewMode;
