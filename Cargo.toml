@@ -16,3 +16,19 @@ thiserror = "2"
 # per-site with `#[expect(...)]` where they earn their keep.
 [workspace.lints.clippy]
 all = "warn"
+
+# Release build: slim the binary without changing behavior.
+#
+# - lto = "thin"   cross-crate inlining + dead-code elimination (keeps link
+#                  times sane vs. "fat")
+# - codegen-units = 1  one CGU per crate maximizes LTO's reach
+# - strip = "symbols"  drop symbol table + debug info from the shipped binary
+#
+# Deliberately NOT panic = "abort": glib's main-context futures executor uses
+# `catch_unwind` around user futures (glib-0.22 main_context_futures.rs), so
+# aborting would change panic containment semantics. Unwind tables cost a
+# little size; keeping them preserves glib's documented behavior.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
