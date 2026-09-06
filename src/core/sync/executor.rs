@@ -15,7 +15,7 @@
 //! backend's `meta/.encryption-verifier` object, writing it on a
 //! never-encrypted backend, and aborting on a wrong password before any
 //! note traffic), then every store call seals objects on upload and opens
-//! them on download. See [`crate::sync::crypto`] for the algorithm and blob
+//! them on download. See [`crate::core::sync::crypto`] for the algorithm and blob
 //! format.
 //!
 //! ## Backends
@@ -42,8 +42,8 @@ use reqwest_dav::{Auth as DavAuth, Client as DavClient, ClientBuilder as DavClie
 use s3::{AddressingStyle, Auth as S3Auth, Client as S3Client, Credentials};
 use sqlx::SqlitePool;
 
-use crate::core::crypto::{self, Cipher, CryptoError, Verifier};
-use crate::core::repo;
+use crate::core::storage::repo;
+use crate::core::sync::crypto::{self, Cipher, CryptoError, Verifier};
 use crate::core::sync::{
     LocalNote, RemoteEntry, Sidecar, SyncAction, SyncStats, content_hash, plan_sync,
 };
@@ -58,7 +58,7 @@ use crate::core::config::{S3SyncSettings, SyncSettings, SyncType, WebDavSyncSett
 /// seals objects on upload and opens them on download. The verifier
 /// methods read/write `meta/.encryption-verifier`, the object that carries
 /// the key salt and a wrong-password check (see
-/// [`crate::core::crypto::Verifier`]).
+/// [`crate::core::sync::crypto::Verifier`]).
 trait SyncStore {
     /// Prepare the backend for note traffic (WebDAV creates its
     /// collections; a no-op for S3). Runs before the verifier is touched
@@ -1057,7 +1057,7 @@ mod webdav_tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::core::config::EncryptionSettings;
-    use crate::core::db;
+    use crate::core::storage::db;
 
     /// Test settings pointing at the mock server (plain http, so the
     /// insecure-TLS option is on).
@@ -1783,7 +1783,7 @@ mod webdav_tests {
 mod e2e_tests {
     use super::*;
     use crate::core::config::EncryptionSettings;
-    use crate::core::db;
+    use crate::core::storage::db;
 
     /// End-to-end sync between two fresh databases through a real
     /// S3-compatible store. Manual: needs one running locally, e.g.

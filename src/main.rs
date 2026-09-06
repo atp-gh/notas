@@ -1,5 +1,5 @@
 mod app;
-mod core;
+pub mod core;
 mod editor;
 mod notes;
 mod platform;
@@ -14,14 +14,6 @@ use relm4::RelmApp;
 use crate::app::{App, AppInit};
 use crate::core::config::Settings;
 
-pub use core::config;
-pub use core::crypto;
-pub use core::db;
-pub use core::models;
-pub use core::repo;
-pub use core::schema;
-pub use core::sync;
-
 fn main() -> ExitCode {
     // Connect to SQLite before the UI starts. The dedicated tokio runtime
     // must outlive the app: the DB worker and the sqlx pool keep running
@@ -35,7 +27,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let pool = match rt.block_on(crate::db::connect(crate::db::db_path())) {
+    let pool = match rt.block_on(crate::core::storage::db::connect(
+        crate::core::storage::db::db_path(),
+    )) {
         Ok(pool) => pool,
         Err(e) => {
             eprintln!("failed to open database: {e}");

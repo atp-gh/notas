@@ -1,7 +1,7 @@
 //! Settings dialog: an `adw::PreferencesDialog` opened from the app menu
 //! (`PreferencesWindow` is the deprecated name since libadwaita 1.6).
 //!
-//! Rows edit the persisted [`crate::config::Settings`] with **immediate
+//! Rows edit the persisted [`crate::core::config::Settings`] with **immediate
 //! effect** — changing a row sends an `AppMsg` to the app, which applies
 //! the change to the live UI and saves the settings file. There is no
 //! "Apply" button, matching GNOME conventions.
@@ -12,7 +12,7 @@ use std::rc::Rc;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
-use crate::config::{Settings, SyncType, ThemeMode};
+use crate::core::config::{Settings, SyncType, ThemeMode};
 use crate::tr;
 use crate::ui::AppMsg;
 
@@ -336,7 +336,7 @@ where
                 // Enforce the minimum here so a weak password can't be
                 // enabled in the first place; the sync engine enforces it
                 // again as the source of truth.
-                if password_row.text().len() < crate::crypto::MIN_PASSWORD_LEN {
+                if password_row.text().len() < crate::core::sync::crypto::MIN_PASSWORD_LEN {
                     guard.set(true);
                     row.set_active(false);
                     guard.set(false);

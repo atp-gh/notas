@@ -3,14 +3,9 @@
 #![deny(missing_docs)]
 
 pub mod config;
-pub mod crypto;
-pub mod db;
 pub mod error;
 pub mod markdown;
-pub mod models;
 pub mod notes;
-pub mod repo;
-pub mod schema;
 pub mod search;
 pub mod state;
 pub mod storage;
@@ -22,7 +17,7 @@ pub use error::{Error, Result};
 use std::path::PathBuf;
 
 use self::config::{SyncSettings, SyncType, ThemeMode};
-use self::models::{Note, Notebook, SearchHit, Tag, TagCount};
+use self::notes::models::{Note, Notebook, SearchHit, Tag, TagCount};
 use self::sync::SyncStats;
 
 pub use self::ui::{ViewId, ViewMode};

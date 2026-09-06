@@ -5,8 +5,8 @@
 //! receives [`DbEvent`]s. This keeps the UI responsive no matter how big
 //! the database gets.
 
+use crate::core::storage::repo;
 pub use crate::core::{DbEvent, DbMsg};
-use crate::repo;
 use relm4::Worker;
 use relm4::prelude::*;
 use sqlx::SqlitePool;
@@ -93,7 +93,7 @@ async fn handle(pool: SqlitePool, msg: DbMsg) -> DbEvent {
             Err(e) => Ok(DbEvent::BackupDone(Err(format!("{e:#}")))),
         },
         DbMsg::SyncNow(settings) => {
-            match crate::sync::executor::run_sync(&pool, settings.as_ref()).await {
+            match crate::core::sync::executor::run_sync(&pool, settings.as_ref()).await {
                 Ok(stats) => Ok(DbEvent::SyncDone(stats)),
                 Err(e) => Ok(DbEvent::SyncFailed(e)),
             }

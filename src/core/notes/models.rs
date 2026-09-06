@@ -1,6 +1,6 @@
 //! Data models shared across the application core.
 //!
-//! Every struct mirrors one row of the SQLite schema (see [`crate::schema`])
+//! Every struct mirrors one row of the SQLite schema (see [`crate::core::storage::schema`])
 //! and is deserialized with sqlx's `FromRow`.
 
 use sqlx::FromRow;

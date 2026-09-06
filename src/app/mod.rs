@@ -16,10 +16,10 @@ use relm4::{ComponentParts, ComponentSender, Controller, SimpleComponent};
 use sourceview5::prelude::*;
 use sqlx::SqlitePool;
 
-use crate::core::models::{Note, Notebook, SearchHit, Tag, TagCount};
+use crate::core::notes::models::{Note, Notebook, SearchHit, Tag, TagCount};
 
 use crate::app::db_worker::DbWorker;
-use crate::config::{Settings, SyncType, ThemeMode};
+use crate::core::config::{Settings, SyncType, ThemeMode};
 use crate::core::{DbEvent, DbMsg};
 use crate::editor::{Editor, build_editor};
 use crate::notes::{clear_flow, clear_list, row as note_row};
@@ -1059,7 +1059,7 @@ impl App {
                 // user hears it in the status bar instead of a sync error.
                 if self.settings.sync.encryption.enabled
                     && self.settings.sync.encryption.password.trim().len()
-                        < crate::crypto::MIN_PASSWORD_LEN
+                        < crate::core::sync::crypto::MIN_PASSWORD_LEN
                 {
                     self.widgets.status_label.set_text(tr!(
                         "Sync: the encryption password must be at least 8 characters"

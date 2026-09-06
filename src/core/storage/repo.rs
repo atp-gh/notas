@@ -9,7 +9,7 @@ use std::path::Path;
 use sqlx::{AssertSqlSafe, FromRow, SqlitePool};
 
 use crate::core::Result;
-use crate::core::models::{Note, Notebook, SearchHit, Tag, TagCount};
+use crate::core::notes::models::{Note, Notebook, SearchHit, Tag, TagCount};
 use crate::core::sync::{LocalNote, Sidecar};
 
 // ---------------------------------------------------------------------------

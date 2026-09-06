@@ -1,5 +1,4 @@
-use notas::core::db;
-use notas::core::repo;
+use notas::core::storage::{db, repo};
 use sqlx::SqlitePool;
 
 async fn test_pool() -> (SqlitePool, tempfile::TempDir) {

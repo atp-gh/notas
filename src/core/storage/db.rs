@@ -6,7 +6,7 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 use crate::core::Result;
-use crate::core::schema::SCHEMA_SQL;
+use crate::core::storage::schema::SCHEMA_SQL;
 
 /// Base data directory: `$XDG_DATA_HOME/notas`, falling back to
 /// `~/.local/share/notas` when the variable is unset or empty.
