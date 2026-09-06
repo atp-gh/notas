@@ -78,6 +78,62 @@ const ARGON2_M_COST: u32 = 19 * 1024; // KiB
 const ARGON2_T_COST: u32 = 2;
 const ARGON2_P_COST: u32 = 1;
 
+/// Errors produced by the encryption module.
+///
+/// Every message is deliberately user-facing: these errors surface in the
+/// sync status bar / dialog, so each variant's `Display` reads like a
+/// sentence rather than a debugging dump. [`CryptoError`] converts into
+/// `String` for the sync engine's string-based error seam via `From`.
+#[derive(Debug, thiserror::Error)]
+pub enum CryptoError {
+    /// Argon2id could not be configured with the requested parameters
+    /// (static, valid values — realistically unreachable). Not a `#[from]`
+    /// source: `argon2::Error` only implements `std::error::Error` with
+    /// the crate's `std` feature, which this dependency does not enable.
+    #[error("cannot configure Argon2id: {0}")]
+    Argon2Params(argon2::Error),
+    /// Argon2id key derivation ran but failed (e.g. the host refuses the
+    /// requested memory cost).
+    #[error("key derivation failed: {0}")]
+    KeyDerivation(argon2::Error),
+    /// Sealing a plaintext into a blob failed. Not a `#[from]` source for
+    /// the same reason as [`CryptoError::Argon2Params`]: `aead::Error` is
+    /// `std::error::Error` only under a feature this crate does not use.
+    #[error("encryption failed: {0}")]
+    Encrypt(chacha20poly1305::aead::Error),
+    /// Opening a blob failed its authentication check: wrong password,
+    /// tampering, or data encrypted under another key. Deliberately
+    /// generic — the exact failure must not leak to callers.
+    #[error("decryption failed: wrong encryption password or corrupted data")]
+    Decrypt,
+    /// The blob is too short to carry the fixed header.
+    #[error("not an encrypted notas blob (too short)")]
+    TooShort,
+    /// The blob does not start with the notas magic bytes (a foreign or
+    /// plaintext object).
+    #[error("not an encrypted notas blob (missing magic)")]
+    BadMagic,
+    /// The blob carries an unsupported format version.
+    #[error("unsupported encrypted blob version {0}")]
+    BadVersion(u8),
+    /// The verifier's salt is not valid hex.
+    #[error("the verifier's salt is not valid hex: {0}")]
+    InvalidSalt(#[from] hex::FromHexError),
+    /// The verifier's salt is not exactly [`SALT_LEN`] bytes.
+    #[error("the verifier's salt has the wrong length")]
+    BadSaltLength,
+}
+
+/// The sync engine's executor reports errors as plain strings (the
+/// `SyncStore` seam, the status bar, dialogs). Crypto errors are
+/// user-facing by design, so this conversion is lossless and lets `?`
+/// propagate them straight through that seam.
+impl From<CryptoError> for String {
+    fn from(err: CryptoError) -> Self {
+        err.to_string()
+    }
+}
+
 /// The per-backend encryption key plus the salt it was derived from.
 ///
 /// One instance is created per sync run (see the sync engine) and used for
@@ -111,10 +167,10 @@ impl Cipher {
     ///
     /// # Errors
     ///
-    /// Returns an error if the Argon2id parameters or the derivation
-    /// itself fail (a misconfiguration or a host that refuses the
-    /// requested memory cost).
-    pub fn derive(password: &str, salt: [u8; SALT_LEN]) -> Result<Self, String> {
+    /// Returns [`CryptoError::Argon2Params`] if the parameters cannot be
+    /// configured, or [`CryptoError::KeyDerivation`] if the derivation
+    /// itself fails (e.g. the host refuses the requested memory cost).
+    pub fn derive(password: &str, salt: [u8; SALT_LEN]) -> Result<Self, CryptoError> {
         let key = derive_key(password, &salt)?;
         Ok(Self { key, salt })
     }
@@ -127,7 +183,7 @@ impl Cipher {
     /// # Errors
     ///
     /// Same as [`Cipher::derive`].
-    pub fn generate(password: &str) -> Result<Self, String> {
+    pub fn generate(password: &str) -> Result<Self, CryptoError> {
         let mut salt = [0u8; SALT_LEN];
         OsRng.fill_bytes(&mut salt);
         Self::derive(password, salt)
@@ -143,9 +199,10 @@ impl Cipher {
     ///
     /// # Errors
     ///
-    /// Returns an error only if the AEAD refuses the input (never for
-    /// valid input — the random nonce is drawn from the OS RNG).
-    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    /// Returns [`CryptoError::Encrypt`] only if the AEAD refuses the
+    /// input (never for valid input — the random nonce is drawn from the
+    /// OS RNG).
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
         // A fresh random nonce per object: with 192-bit nonces, random
         // nonce collisions are astronomically unlikely (and, unlike GCM,
         // not catastrophic to the key even if they happened).
@@ -154,7 +211,7 @@ impl Cipher {
         let cipher = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(&self.key));
         let sealed = cipher
             .encrypt(XNonce::from_slice(&nonce), plaintext)
-            .map_err(|e| format!("encryption failed: {e}"))?;
+            .map_err(CryptoError::Encrypt)?;
 
         let mut blob = Vec::with_capacity(HEADER_LEN + sealed.len());
         blob.extend_from_slice(MAGIC);
@@ -173,30 +230,26 @@ impl Cipher {
     ///
     /// # Errors
     ///
-    /// Returns an error for a malformed blob (bad magic or version), a
-    /// blob too short to carry a header, or an authentication failure
+    /// Returns [`CryptoError::TooShort`], [`CryptoError::BadMagic`] or
+    /// [`CryptoError::BadVersion`] for a malformed blob, and
+    /// [`CryptoError::Decrypt`] when the authentication check fails
     /// (wrong password, tampering, or data encrypted under another key).
-    pub fn decrypt(&self, blob: &[u8]) -> Result<Vec<u8>, String> {
+    pub fn decrypt(&self, blob: &[u8]) -> Result<Vec<u8>, CryptoError> {
         if blob.len() < HEADER_LEN {
-            return Err("not an encrypted notas blob (too short)".to_string());
+            return Err(CryptoError::TooShort);
         }
         if &blob[..MAGIC.len()] != MAGIC {
-            return Err("not an encrypted notas blob (missing magic)".to_string());
+            return Err(CryptoError::BadMagic);
         }
         if blob[MAGIC.len()] != VERSION {
-            return Err(format!(
-                "unsupported encrypted blob version {}",
-                blob[MAGIC.len()]
-            ));
+            return Err(CryptoError::BadVersion(blob[MAGIC.len()]));
         }
         let nonce = &blob[MAGIC.len() + 1 + SALT_LEN..HEADER_LEN];
         let sealed = &blob[HEADER_LEN..];
         let cipher = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(&self.key));
         cipher
             .decrypt(XNonce::from_slice(nonce), sealed)
-            .map_err(|_| {
-                "decryption failed: wrong encryption password or corrupted data".to_string()
-            })
+            .map_err(|_| CryptoError::Decrypt)
     }
 
     /// Build the verifier object for this cipher's salt and key.
@@ -204,7 +257,7 @@ impl Cipher {
     /// # Errors
     ///
     /// Same as [`Cipher::encrypt`].
-    pub fn verifier(&self) -> Result<Verifier, String> {
+    pub fn verifier(&self) -> Result<Verifier, CryptoError> {
         let check = self.encrypt(VERIFIER_PLAINTEXT)?;
         Ok(Verifier {
             salt: hex::encode(self.salt),
@@ -235,32 +288,32 @@ impl Verifier {
     ///
     /// # Errors
     ///
-    /// Returns an error when the salt is not valid hex or not exactly
+    /// Returns [`CryptoError::InvalidSalt`] when the salt is not valid
+    /// hex, or [`CryptoError::BadSaltLength`] when it is not exactly
     /// [`SALT_LEN`] bytes (a verifier written by a different version, or
     /// a corrupt/foreign verifier object).
-    pub fn salt_bytes(&self) -> Result<[u8; SALT_LEN], String> {
-        let bytes = hex::decode(&self.salt)
-            .map_err(|e| format!("the verifier's salt is not valid hex: {e}"))?;
-        bytes
-            .try_into()
-            .map_err(|_| "the verifier's salt has the wrong length".to_string())
+    pub fn salt_bytes(&self) -> Result<[u8; SALT_LEN], CryptoError> {
+        let bytes = hex::decode(&self.salt).map_err(CryptoError::from)?;
+        bytes.try_into().map_err(|_| CryptoError::BadSaltLength)
     }
 }
 
 /// Argon2id key derivation: 32 bytes from password + salt.
-fn derive_key(password: &str, salt: &[u8; SALT_LEN]) -> Result<[u8; 32], String> {
+fn derive_key(password: &str, salt: &[u8; SALT_LEN]) -> Result<[u8; 32], CryptoError> {
     let params = Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, Some(32))
-        .map_err(|e| format!("cannot configure Argon2id: {e}"))?;
+        .map_err(CryptoError::Argon2Params)?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = [0u8; 32];
     argon
         .hash_password_into(password.as_bytes(), salt, &mut key)
-        .map_err(|e| format!("key derivation failed: {e}"))?;
+        .map_err(CryptoError::KeyDerivation)?;
     Ok(key)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     const PASSWORD: &str = "correct horse battery staple";
@@ -307,10 +360,9 @@ mod tests {
     #[test]
     fn wrong_password_fails_to_decrypt() {
         let blob = cipher(PASSWORD).encrypt(b"secret note").expect("encrypt");
-        let err = cipher("wrong password").decrypt(&blob).unwrap_err();
-        assert!(
-            err.contains("password") || err.contains("decryption"),
-            "{err}"
+        assert_matches!(
+            cipher("wrong password").decrypt(&blob),
+            Err(CryptoError::Decrypt)
         );
     }
 
@@ -323,20 +375,28 @@ mod tests {
     }
 
     #[test]
-    fn plaintext_and_foreign_bytes_are_rejected() {
+    fn short_and_foreign_bytes_are_rejected() {
         let cipher = cipher(PASSWORD);
+        // Anything shorter than the fixed header is rejected as too short,
+        // whether it is empty, plaintext or garbage.
         for not_a_blob in [b"{}".as_ref(), b"plaintext".as_ref(), &[0u8; 10]] {
-            let err = cipher.decrypt(not_a_blob).unwrap_err();
-            assert!(err.contains("magic") || err.contains("short"), "{err}");
+            assert_matches!(cipher.decrypt(not_a_blob), Err(CryptoError::TooShort));
         }
+        // Long enough to carry a header, but with the wrong magic: a
+        // foreign object that must not be mistaken for a notas blob.
+        let mut foreign = vec![0u8; HEADER_LEN + 16];
+        foreign[..MAGIC.len()].copy_from_slice(b"OTHERENC");
+        assert_matches!(cipher.decrypt(&foreign), Err(CryptoError::BadMagic));
     }
 
     #[test]
     fn unsupported_version_is_rejected() {
         let mut blob = cipher(PASSWORD).encrypt(b"x").expect("encrypt");
         blob[MAGIC.len()] = VERSION + 1;
-        let err = cipher(PASSWORD).decrypt(&blob).unwrap_err();
-        assert!(err.contains("version"), "{err}");
+        assert_matches!(
+            cipher(PASSWORD).decrypt(&blob),
+            Err(CryptoError::BadVersion(v)) if v == VERSION + 1
+        );
     }
 
     #[test]
@@ -370,9 +430,9 @@ mod tests {
         let verifier = cipher(PASSWORD).verifier().expect("verifier");
         let mut bad = verifier.clone();
         bad.salt = "not hex!".into();
-        assert!(bad.salt_bytes().is_err(), "non-hex salt must fail");
+        assert_matches!(bad.salt_bytes(), Err(CryptoError::InvalidSalt(_)));
         bad.salt = "abcd".into();
-        assert!(bad.salt_bytes().is_err(), "short salt must fail");
+        assert_matches!(bad.salt_bytes(), Err(CryptoError::BadSaltLength));
     }
 
     #[test]

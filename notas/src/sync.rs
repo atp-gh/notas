@@ -42,7 +42,7 @@ use reqwest_dav::{Auth as DavAuth, Client as DavClient, ClientBuilder as DavClie
 use s3::{AddressingStyle, Auth as S3Auth, Client as S3Client, Credentials};
 use sqlx::SqlitePool;
 
-use notas_core::crypto::{self, Cipher, Verifier};
+use notas_core::crypto::{self, Cipher, CryptoError, Verifier};
 use notas_core::repo;
 use notas_core::sync::{LocalNote, RemoteEntry, Sidecar, SyncAction, content_hash, plan_sync};
 
@@ -292,7 +292,11 @@ async fn resolve_cipher(
 }
 
 /// Seal a plaintext body for upload when encryption is active.
-fn encrypt_body(cipher: Option<&Cipher>, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+///
+/// Returns the typed [`CryptoError`]; callers convert it to a message
+/// through the `From<CryptoError> for String` impl on the seam (or log
+/// it directly, since `Display` is user-facing).
+fn encrypt_body(cipher: Option<&Cipher>, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
     match cipher {
         Some(c) => c.encrypt(plaintext),
         None => Ok(plaintext.to_vec()),
@@ -300,7 +304,7 @@ fn encrypt_body(cipher: Option<&Cipher>, plaintext: &[u8]) -> Result<Vec<u8>, St
 }
 
 /// Open a downloaded object when encryption is active.
-fn decrypt_body(cipher: Option<&Cipher>, blob: &[u8]) -> Result<Vec<u8>, String> {
+fn decrypt_body(cipher: Option<&Cipher>, blob: &[u8]) -> Result<Vec<u8>, CryptoError> {
     match cipher {
         Some(c) => c.decrypt(blob),
         None => Ok(blob.to_vec()),

@@ -17,6 +17,10 @@ pub enum Error {
     /// A note that was expected to exist does not (anymore).
     #[error("note with id {0} does not exist")]
     NoteNotFound(i64),
+
+    /// An encryption failure from [`crate::crypto`].
+    #[error(transparent)]
+    Crypto(#[from] crate::crypto::CryptoError),
 }
 
 /// Convenience alias used across the crate.
