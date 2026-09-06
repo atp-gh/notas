@@ -1542,6 +1542,96 @@ mod webdav_tests {
     }
 
     #[tokio::test]
+    async fn webdav_executor_skips_undecryptable_body_and_syncs_the_rest() {
+        // Two remote notes whose sidecars both decrypt fine (so the planner
+        // issues a Download for each), but the second note's body is
+        // tampered ciphertext: its auth tag fails, so the executor must
+        // skip just that note and keep the rest of the sync running.
+        let server = MockServer::start().await;
+        accept_mkcol(&server).await;
+        let good_uuid = "01234567-89ab-4cde-8f01-23456789abcd".to_string();
+        let bad_uuid = "01234567-89ab-4cde-8f01-23456789abce".to_string();
+        let (verifier_json, good_sidecar, good_md) =
+            sealed_remote(&test_cipher(ENC_PASSWORD), &good_uuid, "Good", "good body");
+        let (_, bad_sidecar, mut bad_md) =
+            sealed_remote(&test_cipher(ENC_PASSWORD), &bad_uuid, "Bad", "bad body");
+        // Bit rot in the ciphertext: flip one byte so the authentication
+        // tag (not the header) fails.
+        let last = bad_md.len() - 1;
+        bad_md[last] ^= 0xff;
+
+        let good_md_href = format!("/notas/notes/{good_uuid}.md");
+        let bad_md_href = format!("/notas/notes/{bad_uuid}.md");
+        let good_meta_href = format!("/notas/meta/{good_uuid}.json");
+        let bad_meta_href = format!("/notas/meta/{bad_uuid}.json");
+
+        Mock::given(method("PROPFIND"))
+            .and(path("/notas/notes"))
+            .respond_with(
+                ResponseTemplate::new(207)
+                    .set_body_string(multistatus(&[good_md_href, bad_md_href])),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PROPFIND"))
+            .and(path("/notas/meta"))
+            .respond_with(
+                ResponseTemplate::new(207)
+                    .set_body_string(multistatus(&[good_meta_href, bad_meta_href])),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/notas/meta/.encryption-verifier"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(verifier_json))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/notas/meta/{good_uuid}.json")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(good_sidecar))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/notas/meta/{bad_uuid}.json")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bad_sidecar))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/notas/notes/{good_uuid}.md")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(good_md))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // The corrupt body is fetched once (the skip happens at decrypt
+        // time, not before the download), then the note is dropped.
+        Mock::given(method("GET"))
+            .and(path(format!("/notas/notes/{bad_uuid}.md")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bad_md))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = temp_db_dir("enc-skip-body");
+        let pool = db::connect(dir.join("a.db")).await.unwrap();
+        let settings = encrypted_settings(&server.uri(), ENC_PASSWORD);
+        let stats = run_sync(&pool, &settings)
+            .await
+            .expect("sync must survive a corrupt note");
+
+        // The healthy note downloaded, the corrupt one was skipped; the
+        // sync itself did not fail and nothing else was recorded.
+        assert_eq!(stats.downloaded, 1);
+        assert_eq!(stats.conflicts, 0);
+        let notes = repo::list_all_notes(&pool).await.unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "Good");
+        assert_eq!(notes[0].content, "good body");
+        server.verify().await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn webdav_executor_aborts_on_wrong_encryption_password() {
         let server = MockServer::start().await;
         accept_mkcol(&server).await;
