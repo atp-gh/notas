@@ -30,6 +30,7 @@ where
 
     let page = adw::PreferencesPage::new();
     page.set_title(tr!("Appearance"));
+    page.set_icon_name(Some("applications-graphics-symbolic"));
 
     // --- appearance: theme ------------------------------------------------
     let theme_group = adw::PreferencesGroup::new();
@@ -86,6 +87,7 @@ where
     // --- sync: backend + target credentials -------------------------
     let sync_page = adw::PreferencesPage::new();
     sync_page.set_title(tr!("Sync"));
+    sync_page.set_icon_name(Some("folder-remote-symbolic"));
 
     let sync_group = adw::PreferencesGroup::new();
     sync_group.set_title(tr!("Sync target"));
