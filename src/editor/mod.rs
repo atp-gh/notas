@@ -10,7 +10,7 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagE
 use sourceview5::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
-use crate::core::markdown::{self, RenderedMarkdown, Span, Style};
+use crate::core::markdown::{self, ListState, RenderedMarkdown, Renderer, Span, Style, TableState};
 use crate::ui::protocol::AppMsg;
 
 /// Text tags used by the Markdown preview, created once per buffer.
@@ -479,68 +479,23 @@ where
 // ---------------------------------------------------------------------------
 
 /// Horizontal rule drawn in the preview.
-/// Per-list state: ordered counter or bullets, and whether any item rendered.
-struct ListState {
-    /// `Some(n)` for ordered lists (next number to emit), `None` for bullets.
-    next: Option<u64>,
-    emitted_any: bool,
+trait RendererOps {
+    fn block_start(&mut self);
+    fn sep(&mut self, n: usize);
+    fn separator_styles(&self) -> Vec<Style>;
+    fn emit(&mut self, text: &str, styles: Vec<Style>);
+    fn context_styles(&self) -> Vec<Style>;
+    fn flush_prefix(&mut self);
+    fn text(&mut self, text: &str);
+    fn code(&mut self, code: &str);
+    fn line_break(&mut self);
+    fn task_marker(&mut self, checked: bool);
+    fn start_tag(&mut self, tag: Tag);
+    fn end_tag(&mut self, tag: TagEnd);
+    fn render_table(&mut self);
 }
 
-/// Cells accumulated while a table is being parsed.
-struct TableState {
-    alignments: Vec<pulldown_cmark::Alignment>,
-    rows: Vec<Vec<String>>,
-    row: Vec<String>,
-    cell: String,
-}
-
-/// Turns Markdown events into styled spans. All block separation flows
-/// through `sep`/`emit`, so newlines are emitted exactly once, right before
-/// the content they separate.
-struct Renderer {
-    spans: Vec<Span>,
-    /// True until the first content is emitted; suppresses leading newlines.
-    first: bool,
-    /// Newlines owed before the next content (0–2).
-    pending_sep: usize,
-    inline: Vec<Style>,
-    /// Destination of the link currently being parsed, if any.
-    link_url: Option<String>,
-    heading: u32,
-    quote_depth: u32,
-    lists: Vec<ListState>,
-    /// Bullet/number prefix waiting to be emitted with the item's first text.
-    item_prefix: Option<String>,
-    /// Indent of the current item, reused for task-list checkboxes.
-    item_indent: String,
-    /// Blocks seen inside each open list item, innermost last.
-    item_blocks: Vec<u32>,
-    table: Option<TableState>,
-    code_buf: Option<String>,
-    /// Language from the code fence (first word of the info string).
-    code_lang: Option<String>,
-}
-
-impl Renderer {
-    fn new() -> Self {
-        Self {
-            spans: Vec::new(),
-            first: true,
-            pending_sep: 0,
-            inline: Vec::new(),
-            link_url: None,
-            heading: 0,
-            quote_depth: 0,
-            lists: Vec::new(),
-            item_prefix: None,
-            item_indent: String::new(),
-            item_blocks: Vec::new(),
-            table: None,
-            code_buf: None,
-            code_lang: None,
-        }
-    }
-
+impl RendererOps for Renderer {
     /// Declare separation before a block: a blank line at top level, a
     /// single newline between blocks of one list item. The first block of
     /// an item flows directly after the bullet.

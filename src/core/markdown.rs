@@ -42,6 +42,88 @@ pub struct RenderedMarkdown {
     spans: Vec<Span>,
 }
 
+/// State for one open Markdown list while parsing.
+#[derive(Debug, Clone, Copy)]
+pub struct ListState {
+    /// Next ordered-list number, or `None` for an unordered list.
+    pub next: Option<u64>,
+    /// Whether an item has already been rendered.
+    pub emitted_any: bool,
+}
+
+/// Cells accumulated for one Markdown table while parsing.
+#[derive(Debug, Default)]
+pub struct TableState {
+    /// Requested alignment for each column.
+    pub alignments: Vec<pulldown_cmark::Alignment>,
+    /// Completed rows.
+    pub rows: Vec<Vec<String>>,
+    /// Current row under construction.
+    pub row: Vec<String>,
+    /// Current cell under construction.
+    pub cell: String,
+}
+
+/// Stateful Markdown event renderer shared by frontend adapters.
+pub struct Renderer {
+    /// Ordered rendered spans.
+    pub spans: Vec<Span>,
+    /// Whether any content has been emitted.
+    pub first: bool,
+    /// Pending block separator length.
+    pub pending_sep: usize,
+    /// Active inline styles.
+    pub inline: Vec<Style>,
+    /// Active link destination.
+    pub link_url: Option<String>,
+    /// Active heading level.
+    pub heading: u32,
+    /// Active block quote depth.
+    pub quote_depth: u32,
+    /// Open list states.
+    pub lists: Vec<ListState>,
+    /// Pending list item prefix.
+    pub item_prefix: Option<String>,
+    /// Current list item indentation.
+    pub item_indent: String,
+    /// Number of blocks seen in each open item.
+    pub item_blocks: Vec<u32>,
+    /// Active table state.
+    pub table: Option<TableState>,
+    /// Active fenced code buffer.
+    pub code_buf: Option<String>,
+    /// Optional fenced code language.
+    pub code_lang: Option<String>,
+}
+
+impl Renderer {
+    /// Create an empty renderer state.
+    pub fn new() -> Self {
+        Self {
+            spans: Vec::new(),
+            first: true,
+            pending_sep: 0,
+            inline: Vec::new(),
+            link_url: None,
+            heading: 0,
+            quote_depth: 0,
+            lists: Vec::new(),
+            item_prefix: None,
+            item_indent: String::new(),
+            item_blocks: Vec::new(),
+            table: None,
+            code_buf: None,
+            code_lang: None,
+        }
+    }
+}
+
+impl Default for Renderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RenderedMarkdown {
     /// Build a rendered document from its ordered text spans.
     pub fn new(spans: Vec<Span>) -> Self {
