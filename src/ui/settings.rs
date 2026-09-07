@@ -323,9 +323,7 @@ where
     let guard = Rc::new(Cell::new(false));
     {
         let guard = guard.clone();
-        let emit = emit.clone();
         let password_row = enc_password.clone();
-        let stored = stored_password.clone();
         let switch = enc_switch.clone();
         enc_switch.connect_active_notify(move |row| {
             let on = row.is_active();
@@ -347,12 +345,17 @@ where
                     return;
                 }
                 emit(AppMsg::SyncEncryptionEnabledChanged(true));
-            } else if !stored.is_empty() {
+            } else if !stored_password.is_empty() {
                 // Keep the switch on until the current password is entered.
                 guard.set(true);
                 row.set_active(true);
                 guard.set(false);
-                confirm_disable_encryption(&stored, emit.clone(), switch.clone(), guard.clone());
+                confirm_disable_encryption(
+                    &stored_password,
+                    emit.clone(),
+                    switch.clone(),
+                    guard.clone(),
+                );
             } else {
                 emit(AppMsg::SyncEncryptionEnabledChanged(false));
             }
@@ -426,13 +429,12 @@ fn confirm_disable_encryption(
     dialog.set_size_request(360, -1);
     let stored = stored.to_string();
     let entry2 = entry.clone();
-    let emit2 = emit.clone();
     dialog.connect_response(move |d, resp| {
         if resp == gtk::ResponseType::Ok && entry2.text() == stored {
             guard.set(true);
             switch.set_active(false);
             guard.set(false);
-            emit2(AppMsg::SyncEncryptionEnabledChanged(false));
+            emit(AppMsg::SyncEncryptionEnabledChanged(false));
         } else if resp == gtk::ResponseType::Ok {
             error_alert(
                 tr!("Wrong password"),

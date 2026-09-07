@@ -301,7 +301,6 @@ where
 
     {
         let emit = emit.clone();
-        let suppress = suppress.clone();
         source_buffer.connect_changed(move |_| {
             if !suppress.get() {
                 emit(AppMsg::ContentChanged);
@@ -332,16 +331,15 @@ where
 
         let tags = preview_tags.clone();
         let sm = style_manager.clone();
-        let schemes = scheme_manager.clone();
         let buf = source_buffer.clone();
         sm.clone().connect_dark_notify(move |_| {
             let dark = sm.is_dark();
             tags.apply_theme(dark, &sm.accent_color_rgba());
-            apply_scheme(&schemes, &buf, dark);
+            apply_scheme(&scheme_manager, &buf, dark);
         });
 
         let tags = preview_tags.clone();
-        let sm = style_manager.clone();
+        let sm = style_manager;
         sm.clone().connect_accent_color_rgba_notify(move |_| {
             tags.apply_theme(sm.is_dark(), &sm.accent_color_rgba());
         });
@@ -453,8 +451,6 @@ where
         search_entry.connect_previous_match(move |_| prev(AppMsg::FindPrev));
     }
     {
-        let emit = emit.clone();
-        let replace_entry = replace_entry.clone();
         replace_all_btn.connect_clicked(move |_| {
             let text = replace_entry.text().to_string();
             emit(AppMsg::ReplaceAll(text));

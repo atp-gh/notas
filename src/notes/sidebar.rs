@@ -177,7 +177,7 @@ pub(crate) fn build(
     tree_menu.set_child(Some(&tree_menu_box));
     {
         let tree = notebook_tree.clone();
-        let menu = tree_menu.clone();
+        let menu = tree_menu;
         let pending = pending_notebook.clone();
         let gesture = gtk::GestureClick::new();
         gesture.set_button(3);

@@ -342,23 +342,21 @@ impl Settings {
     /// platform adapter. [`Settings::load`] remains as a portable fallback
     /// for callers that use the conventional XDG location.
     pub fn load_from(path: PathBuf) -> Self {
+        let display = path.display().to_string();
         match fs::read_to_string(&path) {
             Ok(contents) => match serde_json::from_str::<Self>(&contents) {
                 Ok(mut settings) => {
-                    settings.path = Some(path.clone());
+                    settings.path = Some(path);
                     settings
                 }
                 Err(err) => {
-                    eprintln!(
-                        "notas: settings file {} is invalid, using defaults: {err}",
-                        path.display()
-                    );
+                    eprintln!("notas: settings file {display} is invalid, using defaults: {err}");
                     Self::default()
                 }
             },
             Err(err) if err.kind() == io::ErrorKind::NotFound => Self::default(),
             Err(err) => {
-                eprintln!("notas: cannot read settings file {}: {err}", path.display());
+                eprintln!("notas: cannot read settings file {display}: {err}");
                 Self::default()
             }
         }
@@ -484,7 +482,7 @@ mod tests {
     fn missing_file_falls_back_to_defaults() {
         let path = temp_settings_path("missing");
         let _ = fs::remove_file(&path);
-        assert_eq!(Settings::load_from(path.clone()), Settings::default());
+        assert_eq!(Settings::load_from(path), Settings::default());
     }
 
     #[test]

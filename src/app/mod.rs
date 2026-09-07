@@ -519,7 +519,7 @@ impl SimpleComponent for App {
         }
 
         // ------------------------------------------------------- settings
-        let settings_window = build_settings_window(&settings, emit.clone());
+        let settings_window = build_settings_window(&settings, emit);
 
         // ------------------------------------------------------------ model
         let widgets = Widgets {

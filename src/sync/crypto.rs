@@ -427,8 +427,7 @@ mod tests {
 
     #[test]
     fn verifier_salt_rejects_bad_hex_and_wrong_length() {
-        let verifier = cipher(PASSWORD).verifier().expect("verifier");
-        let mut bad = verifier.clone();
+        let mut bad = cipher(PASSWORD).verifier().expect("verifier");
         bad.salt = "not hex!".into();
         assert_matches!(bad.salt_bytes(), Err(CryptoError::InvalidSalt(_)));
         bad.salt = "abcd".into();
