@@ -82,8 +82,9 @@ const ARGON2_P_COST: u32 = 1;
 ///
 /// Every message is deliberately user-facing: these errors surface in the
 /// sync status bar / dialog, so each variant's `Display` reads like a
-/// sentence rather than a debugging dump. [`CryptoError`] converts into
-/// `String` for the sync engine's string-based error seam via `From`.
+/// sentence rather than a debugging dump. [`CryptoError`] propagates into
+/// [`crate::sync::error::SyncError`] via `#[from]` (`?`) and is rendered
+/// to text only at the UI boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
     /// Argon2id could not be configured with the requested parameters
@@ -122,16 +123,6 @@ pub enum CryptoError {
     /// The verifier's salt is not exactly [`SALT_LEN`] bytes.
     #[error("the verifier's salt has the wrong length")]
     BadSaltLength,
-}
-
-/// The sync engine's executor reports errors as plain strings (the
-/// `SyncStore` seam, the status bar, dialogs). Crypto errors are
-/// user-facing by design, so this conversion is lossless and lets `?`
-/// propagate them straight through that seam.
-impl From<CryptoError> for String {
-    fn from(err: CryptoError) -> Self {
-        err.to_string()
-    }
 }
 
 /// The per-backend encryption key plus the salt it was derived from.

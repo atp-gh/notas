@@ -293,9 +293,9 @@ async fn resolve_cipher(
 
 /// Seal a plaintext body for upload when encryption is active.
 ///
-/// Returns the typed [`CryptoError`]; callers convert it to a message
-/// through the `From<CryptoError> for String` impl on the seam (or log
-/// it directly, since `Display` is user-facing).
+/// Returns the typed [`CryptoError`]; callers propagate it to a
+/// [`SyncError`] with `?` (`#[from]`), and it is rendered to text only at
+/// the UI boundary (or logged directly, since `Display` is user-facing).
 fn encrypt_body(cipher: Option<&Cipher>, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
     match cipher {
         Some(c) => c.encrypt(plaintext),
