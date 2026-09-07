@@ -16,7 +16,7 @@ use relm4::{ComponentParts, ComponentSender, Controller, SimpleComponent};
 use sourceview5::prelude::*;
 use sqlx::SqlitePool;
 
-use notas::domain_notes::{Note, Notebook, SearchHit, Tag, TagCount};
+use notas::core::model::{Note, NoteId, Notebook, SearchHit, Tag, TagCount, TagId};
 
 use crate::app::db_worker::DbWorker;
 use crate::core::config::{Settings, SyncType};
@@ -97,14 +97,14 @@ pub struct App {
     trashed: Vec<Note>,
     tags: Vec<TagCount>,
     note_tags: Vec<Tag>,
-    current_note: Option<i64>,
+    current_note: Option<NoteId>,
     saved_title: String,
     saved_content: String,
     dirty: bool,
     preview: bool,
-    active_tag: Option<i64>,
-    selected_trashed: Option<i64>,
-    pending_open: Option<i64>,
+    active_tag: Option<TagId>,
+    selected_trashed: Option<NoteId>,
+    pending_open: Option<NoteId>,
     pending_new_note: bool,
     pending_close: bool,
     row_ids: Rc<RefCell<Vec<i64>>>,
@@ -190,8 +190,8 @@ impl SimpleComponent for App {
         let allow_close = Rc::new(Cell::new(false));
         let suppress_selection = Rc::new(Cell::new(false));
         let suppress_tag_toggle = Rc::new(Cell::new(false));
-        let row_ids = Rc::new(RefCell::new(Vec::new()));
-        let tag_ids = Rc::new(RefCell::new(Vec::new()));
+        let row_ids: Rc<RefCell<Vec<i64>>> = Rc::new(RefCell::new(Vec::new()));
+        let tag_ids: Rc<RefCell<Vec<i64>>> = Rc::new(RefCell::new(Vec::new()));
         let pending_nb = Rc::new(Cell::new(0));
         let pending_tag = Rc::new(Cell::new(0));
 
@@ -261,7 +261,7 @@ impl SimpleComponent for App {
                 if let Some(row) = row {
                     let idx = row.index() as usize;
                     if let Some(&id) = row_ids.borrow().get(idx) {
-                        emit(AppMsg::SelectNote(id));
+                        emit(AppMsg::SelectNote(NoteId(id)));
                     }
                 }
             });
@@ -1227,7 +1227,7 @@ impl App {
         let mut ids = self.tag_ids.borrow_mut();
         ids.clear();
         for tag in &self.tags {
-            ids.push(tag.id);
+            ids.push(tag.id.0);
             let btn = gtk::ToggleButton::with_label(&format!("{} ({})", tag.name, tag.note_count));
             {
                 let suppress = self.suppress_tag_toggle.clone();
@@ -1258,7 +1258,7 @@ impl App {
                 let gesture = gtk::GestureClick::new();
                 gesture.set_button(3);
                 gesture.connect_pressed(move |_g, _n, _x, _y| {
-                    pending.set(tag_id);
+                    pending.set(tag_id.0);
                     menu.set_parent(&chip_widget);
                     menu.present();
                 });
@@ -1298,9 +1298,9 @@ impl App {
         );
     }
 
-    fn select_note_row(&self, id: i64) {
+    fn select_note_row(&self, id: NoteId) {
         self.suppress_selection.set(true);
-        if let Some(idx) = self.row_ids.borrow().iter().position(|&x| x == id)
+        if let Some(idx) = self.row_ids.borrow().iter().position(|&x| x == id.0)
             && let Some(row) = self.widgets.notes_list.row_at_index(idx as i32)
         {
             self.widgets.notes_list.select_row(Some(&row));
@@ -1312,7 +1312,7 @@ impl App {
         crate::notes::tag_editor::render(
             &self.widgets.tag_editor_flow,
             &self.note_tags,
-            self.current_note,
+            self.current_note.map(|id| id.0),
             &self.ui_sender,
         );
     }

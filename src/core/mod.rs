@@ -8,12 +8,14 @@
 
 pub mod commands;
 pub mod config;
+pub mod database;
 pub mod error;
 pub mod events;
 pub mod markdown;
 pub mod model;
 pub mod navigation;
 pub mod repository;
+pub mod search;
 pub mod state;
 pub mod sync;
 

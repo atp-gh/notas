@@ -1,10 +1,12 @@
 //! Pure application state transitions shared by all frontends.
 
+use crate::core::model::NoteId;
+
 use super::{ViewId, ViewMode};
 
 /// Returns whether the editor differs from its last persisted snapshot.
 pub fn editor_is_dirty(
-    current_note: Option<i64>,
+    current_note: Option<NoteId>,
     current_title: &str,
     current_content: &str,
     saved_title: &str,
@@ -26,10 +28,12 @@ pub fn mode_for_view(view: ViewId) -> ViewMode {
 mod tests {
     use super::*;
 
+    use crate::core::model::NoteId;
+
     #[test]
     fn editor_is_dirty_requires_a_selected_note() {
         assert!(!editor_is_dirty(None, "changed", "body", "", ""));
-        assert!(editor_is_dirty(Some(1), "changed", "body", "", ""));
+        assert!(editor_is_dirty(Some(NoteId(1)), "changed", "body", "", ""));
     }
 
     #[test]

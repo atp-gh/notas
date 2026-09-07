@@ -17,7 +17,7 @@ pub(crate) fn rebuild_tree(store: &gtk::TreeStore, notebooks: &[Notebook]) {
         let iter = store.insert_with_values(
             parent.as_ref(),
             None,
-            &[(0, &notebook.id), (1, &notebook.name)],
+            &[(0, &notebook.id.0), (1, &notebook.name)],
         );
         iters.insert(notebook.id, iter);
     }

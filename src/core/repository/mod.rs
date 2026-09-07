@@ -11,13 +11,18 @@
 //! tombstone) run inside a single SQLite transaction so a mid-way failure
 //! cannot leave partially applied state behind.
 
+use std::path::Path;
+
 use sqlx::SqlitePool;
 
 use crate::core::Result;
-use crate::core::model::{Note, NoteId, Notebook, NotebookId, Tag, TagCount, TagId};
+use crate::core::model::{Note, NoteId, Notebook, NotebookId, SearchHit, Tag, TagCount, TagId};
 
+pub(crate) mod backup;
+pub(crate) mod export;
 pub(crate) mod notebooks;
 pub(crate) mod notes;
+pub(crate) mod search;
 pub(crate) mod sync_state;
 pub(crate) mod tags;
 
@@ -330,5 +335,41 @@ impl Repository {
     /// Returns [`crate::core::Error::Database`] on SQL failures.
     pub async fn trash_note_by_uuid_no_bump(&self, uuid: &str) -> Result<()> {
         sync_state::trash_note_by_uuid_no_bump(&self.pool, uuid).await
+    }
+
+    // ------------------------------------------------------------- search
+
+    /// Full-text search over title + content, newest first, capped at 200
+    /// hits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::Error::Database`] when the query fails.
+    pub async fn search(&self, query: &str) -> Result<Vec<SearchHit>> {
+        search::run(&self.pool, query).await
+    }
+
+    // ------------------------------------------------------- export/backup
+
+    /// Export every non-trashed note as `.md` files, grouped into notebook
+    /// subdirectories. Returns the number of notes written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::Error::Io`] on filesystem failures and
+    /// [`crate::core::Error::Database`] on SQL failures.
+    pub async fn export_markdown(&self, out_dir: &Path) -> Result<usize> {
+        export::run(&self.pool, out_dir).await
+    }
+
+    /// Create a consistent snapshot of the database at `dest` using
+    /// `VACUUM INTO` (SQLite >= 3.27).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::Error::Io`] on filesystem failures and
+    /// [`crate::core::Error::Database`] on SQL failures.
+    pub async fn backup(&self, dest: &Path) -> Result<()> {
+        backup::run(&self.pool, dest).await
     }
 }

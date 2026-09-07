@@ -1,7 +1,7 @@
 //! Events emitted by core services.
 
-use crate::domain_notes::{Note, Notebook, SearchHit, Tag, TagCount};
-use crate::sync::SyncStats;
+use crate::core::model::{Note, NoteId, Notebook, SearchHit, Tag, TagCount};
+use crate::core::sync::SyncStats;
 
 /// Results emitted by persistence and synchronization services.
 #[derive(Debug, Clone)]
@@ -13,10 +13,10 @@ pub enum DbEvent {
     Trashed(Vec<Note>),
     NoteLoaded(Note),
     NoteCreated(Note),
-    NoteSaved { id: i64 },
-    NoteTrashed { id: i64 },
-    NoteRestored { id: i64 },
-    NoteDeletedForever { id: i64 },
+    NoteSaved { id: NoteId },
+    NoteTrashed { id: NoteId },
+    NoteRestored { id: NoteId },
+    NoteDeletedForever { id: NoteId },
     DataChanged,
     NoteTags(Vec<Tag>),
     SearchResults(Vec<SearchHit>),

@@ -12,30 +12,30 @@ async fn notebook_note_roundtrip_and_search() {
     let (pool, _dir) = test_pool().await;
 
     let nb = repo::create_notebook(&pool, None, "Work").await.unwrap();
-    let note = repo::create_note(&pool, Some(nb.id), "Meeting notes")
+    let note = repo::create_note(&pool, Some(nb.id.0), "Meeting notes")
         .await
         .unwrap();
     repo::update_note(
         &pool,
-        note.id,
+        note.id.0,
         "Meeting notes",
         "# Agenda\n- Discuss the **budget**",
     )
     .await
     .unwrap();
 
-    let got = repo::get_note(&pool, note.id).await.unwrap().unwrap();
+    let got = repo::get_note(&pool, note.id.0).await.unwrap().unwrap();
     assert_eq!(got.title, "Meeting notes");
     assert!(got.content.contains("budget"));
 
     // FTS search should find it via content
     let hits = repo::search(&pool, "budget").await.unwrap();
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].id, note.id);
+    assert_eq!(hits[0].id.0, note.id.0);
     assert!(!hits[0].snippet.is_empty(), "snippet should be populated");
 
     // listing by notebook
-    let listed = repo::list_notes(&pool, nb.id).await.unwrap();
+    let listed = repo::list_notes(&pool, nb.id.0).await.unwrap();
     assert_eq!(listed.len(), 1);
 
     // search is empty for a miss
@@ -53,16 +53,16 @@ async fn trash_restore_and_forever_delete() {
 
     let note = repo::create_note(&pool, None, "To trash").await.unwrap();
 
-    repo::trash_note(&pool, note.id).await.unwrap();
+    repo::trash_note(&pool, note.id.0).await.unwrap();
     assert!(repo::list_unfiled_notes(&pool).await.unwrap().is_empty());
     assert_eq!(repo::list_trashed(&pool).await.unwrap().len(), 1);
 
-    repo::restore_note(&pool, note.id).await.unwrap();
+    repo::restore_note(&pool, note.id.0).await.unwrap();
     assert_eq!(repo::list_unfiled_notes(&pool).await.unwrap().len(), 1);
     assert!(repo::list_trashed(&pool).await.unwrap().is_empty());
 
-    repo::delete_note_forever(&pool, note.id).await.unwrap();
-    assert!(repo::get_note(&pool, note.id).await.unwrap().is_none());
+    repo::delete_note_forever(&pool, note.id.0).await.unwrap();
+    assert!(repo::get_note(&pool, note.id.0).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -71,24 +71,30 @@ async fn tags_crud() {
 
     let note = repo::create_note(&pool, None, "Tagged").await.unwrap();
     let names = vec!["rust".to_string(), "notes".to_string()];
-    repo::set_note_tags(&pool, note.id, &names).await.unwrap();
+    repo::set_note_tags(&pool, note.id.0, &names).await.unwrap();
 
-    let tags = repo::get_note_tags(&pool, note.id).await.unwrap();
+    let tags = repo::get_note_tags(&pool, note.id.0).await.unwrap();
     assert_eq!(tags.len(), 2);
 
     // idempotent re-set
-    repo::set_note_tags(&pool, note.id, &names).await.unwrap();
-    assert_eq!(repo::get_note_tags(&pool, note.id).await.unwrap().len(), 2);
+    repo::set_note_tags(&pool, note.id.0, &names).await.unwrap();
+    assert_eq!(
+        repo::get_note_tags(&pool, note.id.0).await.unwrap().len(),
+        2
+    );
 
     let counts = repo::list_tags(&pool).await.unwrap();
     assert_eq!(counts.len(), 2);
     assert!(counts.iter().all(|t| t.note_count == 1));
 
     // removing a tag
-    repo::set_note_tags(&pool, note.id, &["rust".to_string()])
+    repo::set_note_tags(&pool, note.id.0, &["rust".to_string()])
         .await
         .unwrap();
-    assert_eq!(repo::get_note_tags(&pool, note.id).await.unwrap().len(), 1);
+    assert_eq!(
+        repo::get_note_tags(&pool, note.id.0).await.unwrap().len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -98,10 +104,10 @@ async fn export_markdown_writes_files() {
     let nb = repo::create_notebook(&pool, None, "My Notebook")
         .await
         .unwrap();
-    let note = repo::create_note(&pool, Some(nb.id), "Hello world")
+    let note = repo::create_note(&pool, Some(nb.id.0), "Hello world")
         .await
         .unwrap();
-    repo::update_note(&pool, note.id, "Hello world", "Body text")
+    repo::update_note(&pool, note.id.0, "Hello world", "Body text")
         .await
         .unwrap();
 

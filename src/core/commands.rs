@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use crate::core::config::SyncSettings;
+use crate::core::model::{NoteId, NotebookId, TagId};
 
 /// Commands submitted to the persistence and synchronization service.
 #[derive(Debug)]
@@ -10,40 +11,40 @@ use crate::core::config::SyncSettings;
 pub enum DbCommand {
     LoadNotebooks,
     LoadTags,
-    LoadNotes(i64),
+    LoadNotes(NotebookId),
     LoadUnfiled,
     LoadAll,
     LoadTrashed,
-    LoadByTag(i64),
-    LoadNote(i64),
-    CreateNote(Option<i64>),
+    LoadByTag(TagId),
+    LoadNote(NoteId),
+    CreateNote(Option<NotebookId>),
     UpdateNote {
-        id: i64,
+        id: NoteId,
         title: String,
         content: String,
     },
-    TrashNote(i64),
-    RestoreNote(i64),
-    DeleteForever(i64),
+    TrashNote(NoteId),
+    RestoreNote(NoteId),
+    DeleteForever(NoteId),
     CreateNotebook {
-        parent: Option<i64>,
+        parent: Option<NotebookId>,
         name: String,
     },
     RenameNotebook {
-        id: i64,
+        id: NotebookId,
         name: String,
     },
-    DeleteNotebook(i64),
+    DeleteNotebook(NotebookId),
     RenameTag {
-        id: i64,
+        id: TagId,
         name: String,
     },
-    DeleteTag(i64),
+    DeleteTag(TagId),
     SetTags {
-        note_id: i64,
+        note_id: NoteId,
         names: Vec<String>,
     },
-    LoadNoteTags(i64),
+    LoadNoteTags(NoteId),
     Search(String),
     ExportMarkdown(PathBuf),
     Backup(PathBuf),
@@ -56,16 +57,16 @@ pub enum DbCommand {
 pub enum AppCommand {
     Db(crate::core::events::DbEvent),
     SelectView(super::navigation::ViewId),
-    SelectNotebook(i64),
-    SelectTag(Option<i64>),
-    SelectNote(i64),
+    SelectNotebook(NotebookId),
+    SelectTag(Option<TagId>),
+    SelectNote(NoteId),
     SearchChanged(String),
     NewNote,
     NewNotebook(String),
-    RenameNotebook { id: i64, name: String },
-    DeleteNotebook(i64),
-    RenameTag { id: i64, name: String },
-    DeleteTag(i64),
+    RenameNotebook { id: NotebookId, name: String },
+    DeleteNotebook(NotebookId),
+    RenameTag { id: TagId, name: String },
+    DeleteTag(TagId),
     TrashNote,
     RestoreNote,
     DeleteForever,

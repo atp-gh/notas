@@ -19,7 +19,7 @@ pub(crate) fn render_notes(
     ids.clear();
     empty_label.set_visible(notes.is_empty());
     for note in notes {
-        ids.push(note.id);
+        ids.push(note.id.0);
         list.append(&row(&note.title, &note.updated_at));
     }
 }
@@ -37,7 +37,7 @@ pub(crate) fn render_search(
     ids.clear();
     empty_label.set_visible(hits.is_empty());
     for hit in hits {
-        ids.push(hit.id);
+        ids.push(hit.id.0);
         list.append(&row(&hit.title, &hit.snippet));
     }
 }

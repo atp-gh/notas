@@ -1,5 +1,7 @@
 //! Navigation state shared by all frontends.
 
+use crate::core::model::{NotebookId, TagId};
+
 /// Built-in top-level note views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewId {
@@ -21,9 +23,9 @@ pub enum ViewMode {
     /// Notes in the trash.
     Trash,
     /// Notes belonging to a notebook.
-    Notebook(i64),
+    Notebook(NotebookId),
     /// Notes carrying a tag.
-    Tag(i64),
+    Tag(TagId),
     /// Full-text search results.
     Search(String),
 }

@@ -42,10 +42,10 @@ use reqwest_dav::{Auth as DavAuth, Client as DavClient, ClientBuilder as DavClie
 use s3::{AddressingStyle, Auth as S3Auth, Client as S3Client, Credentials};
 use sqlx::SqlitePool;
 
+use crate::core::repository::Repository;
 use crate::core::sync::{
     LocalNote, RemoteEntry, Sidecar, SyncAction, SyncStats, content_hash, plan_sync,
 };
-use crate::storage::repo;
 use crate::sync::crypto::{self, Cipher, CryptoError, Verifier};
 use crate::sync::error::SyncError;
 
@@ -96,11 +96,11 @@ pub async fn run_sync(pool: &SqlitePool, settings: &SyncSettings) -> Result<Sync
     match settings.kind {
         SyncType::S3 => {
             let store = S3Store::new(&settings.s3)?;
-            run_sync_with(pool, &store, settings).await
+            run_sync_with(&Repository::new(pool.clone()), &store, settings).await
         }
         SyncType::WebDAV => {
             let store = WebDavStore::new(&settings.webdav)?;
-            run_sync_with(pool, &store, settings).await
+            run_sync_with(&Repository::new(pool.clone()), &store, settings).await
         }
     }
 }
@@ -109,7 +109,7 @@ pub async fn run_sync(pool: &SqlitePool, settings: &SyncSettings) -> Result<Sync
 /// indexes, run the pure planner, execute every action, and record the
 /// run's timestamp.
 async fn run_sync_with(
-    pool: &SqlitePool,
+    repo: &Repository,
     store: &impl SyncStore,
     settings: &SyncSettings,
 ) -> Result<SyncStats, SyncError> {
@@ -122,12 +122,12 @@ async fn run_sync_with(
 
     // 1. Assign uuids to notes created since the last sync so every note
     //    has a stable cross-device identity.
-    repo::ensure_note_uuids(pool).await?;
+    repo.ensure_note_uuids().await?;
 
     // 2. Remote index + local index + tombstones.
     let remote = store.list(cipher.as_ref()).await?;
-    let local = repo::sync_local_index(pool).await?;
-    let tombstones = repo::list_tombstones(pool).await?;
+    let local = repo.sync_local_index().await?;
+    let tombstones = repo.list_tombstones().await?;
 
     // 3. Plan, then execute.
     let actions = plan_sync(&local, &tombstones, &remote);
@@ -158,11 +158,11 @@ async fn run_sync_with(
                         continue;
                     }
                 };
-                repo::apply_remote_note(pool, &sidecar, &content).await?;
+                repo.apply_remote_note(&sidecar, &content).await?;
                 stats.downloaded += 1;
             }
             SyncAction::TrashLocal { uuid } => {
-                repo::trash_note_by_uuid_no_bump(pool, &uuid).await?;
+                repo.trash_note_by_uuid_no_bump(&uuid).await?;
                 stats.trashed += 1;
             }
             SyncAction::ConflictCopy { sidecar } => {
@@ -176,7 +176,7 @@ async fn run_sync_with(
                         continue;
                     }
                 };
-                repo::create_conflict_copy(pool, &sidecar, &content).await?;
+                repo.create_conflict_copy(&sidecar, &content).await?;
                 stats.conflicts += 1;
             }
             SyncAction::UploadTombstone { uuid, deleted_at } => {
@@ -199,7 +199,7 @@ async fn run_sync_with(
     // 4. Timestamp of this run, in the device's local time (display only;
     //    note timestamps themselves stay UTC in the database).
     stats.last_synced_at = sqlx::query_scalar::<_, String>("SELECT datetime('now', 'localtime')")
-        .fetch_one(pool)
+        .fetch_one(repo.pool())
         .await?;
 
     Ok(stats)
@@ -1099,7 +1099,7 @@ mod webdav_tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::core::config::EncryptionSettings;
-    use crate::storage::db;
+    use crate::storage::{db, repo};
 
     /// Test settings pointing at the mock server (plain http, so the
     /// insecure-TLS option is on).
@@ -1179,7 +1179,7 @@ mod webdav_tests {
         let dir = temp_db_dir("upload");
         let pool = db::connect(dir.join("a.db")).await.unwrap();
         let note = repo::create_note(&pool, None, "Hello").await.unwrap();
-        repo::update_note(&pool, note.id, "Hello", "body one")
+        repo::update_note(&pool, note.id.0, "Hello", "body one")
             .await
             .unwrap();
         repo::ensure_note_uuids(&pool).await.unwrap();
@@ -1336,13 +1336,13 @@ mod webdav_tests {
         // A local note with the tombstone's uuid that predates it (old
         // timestamp): the planner must trash it locally, not re-upload.
         let note = repo::create_note(&pool, None, "Old").await.unwrap();
-        repo::update_note(&pool, note.id, "Old", "old body")
+        repo::update_note(&pool, note.id.0, "Old", "old body")
             .await
             .unwrap();
         repo::ensure_note_uuids(&pool).await.unwrap();
         sqlx::query("UPDATE notes SET uuid = ?1, updated_at = '2000-01-01 00:00:00' WHERE id = ?2")
             .bind(&uuid)
-            .bind(note.id)
+            .bind(note.id.0)
             .execute(&pool)
             .await
             .unwrap();
@@ -1460,7 +1460,7 @@ mod webdav_tests {
         let dir = temp_db_dir("enc-upload");
         let pool = db::connect(dir.join("a.db")).await.unwrap();
         let note = repo::create_note(&pool, None, "Hello").await.unwrap();
-        repo::update_note(&pool, note.id, "Hello", "body one")
+        repo::update_note(&pool, note.id.0, "Hello", "body one")
             .await
             .unwrap();
         repo::ensure_note_uuids(&pool).await.unwrap();
@@ -1799,13 +1799,13 @@ mod webdav_tests {
         let dir = temp_db_dir("enc-migrate");
         let pool = db::connect(dir.join("a.db")).await.unwrap();
         let note = repo::create_note(&pool, None, "Old").await.unwrap();
-        repo::update_note(&pool, note.id, "Old", "old body")
+        repo::update_note(&pool, note.id.0, "Old", "old body")
             .await
             .unwrap();
         repo::ensure_note_uuids(&pool).await.unwrap();
         sqlx::query("UPDATE notes SET uuid = ?1 WHERE id = ?2")
             .bind(&uuid)
-            .bind(note.id)
+            .bind(note.id.0)
             .execute(&pool)
             .await
             .unwrap();
@@ -1825,7 +1825,7 @@ mod webdav_tests {
 mod e2e_tests {
     use super::*;
     use crate::core::config::EncryptionSettings;
-    use crate::storage::db;
+    use crate::storage::{db, repo};
 
     /// End-to-end sync between two fresh databases through a real
     /// S3-compatible store. Manual: needs one running locally, e.g.
@@ -1890,14 +1890,14 @@ mod e2e_tests {
 
         // --- device A: two notes, one in a notebook, one tagged --------
         let nb = repo::create_notebook(&pool_a, None, "Work").await.unwrap();
-        let n1 = repo::create_note(&pool_a, Some(nb.id), "Hello")
+        let n1 = repo::create_note(&pool_a, Some(nb.id.0), "Hello")
             .await
             .unwrap();
-        repo::update_note(&pool_a, n1.id, "Hello", "body one")
+        repo::update_note(&pool_a, n1.id.0, "Hello", "body one")
             .await
             .unwrap();
         let n2 = repo::create_note(&pool_a, None, "Second").await.unwrap();
-        repo::set_note_tags(&pool_a, n2.id, &["meta".to_string()])
+        repo::set_note_tags(&pool_a, n2.id.0, &["meta".to_string()])
             .await
             .unwrap();
 
@@ -1916,13 +1916,13 @@ mod e2e_tests {
             .expect("Hello on B");
         assert_eq!(hello_b.content, "body one");
         assert!(hello_b.notebook_id.is_some(), "note keeps its notebook");
-        let tags_b = repo::get_note_tags(&pool_b, hello_b.id).await.unwrap();
+        let tags_b = repo::get_note_tags(&pool_b, hello_b.id.0).await.unwrap();
         assert!(tags_b.is_empty());
         let second_b = notes_b
             .iter()
             .find(|n| n.title == "Second")
             .expect("Second on B");
-        let tags_b = repo::get_note_tags(&pool_b, second_b.id).await.unwrap();
+        let tags_b = repo::get_note_tags(&pool_b, second_b.id.0).await.unwrap();
         assert_eq!(
             tags_b.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
             vec!["meta"]
@@ -1930,7 +1930,7 @@ mod e2e_tests {
 
         // --- device B edits and creates; A picks it up --------------------
         tokio::time::sleep(Duration::from_secs(1)).await;
-        repo::update_note(&pool_b, hello_b.id, "Hello", "edited on B")
+        repo::update_note(&pool_b, hello_b.id.0, "Hello", "edited on B")
             .await
             .unwrap();
         repo::create_note(&pool_b, None, "From B").await.unwrap();
@@ -1950,7 +1950,7 @@ mod e2e_tests {
 
         // --- device A deletes forever; B's copy goes to the trash ---------
         tokio::time::sleep(Duration::from_secs(1)).await;
-        repo::delete_note_forever(&pool_a, n2.id).await.unwrap();
+        repo::delete_note_forever(&pool_a, n2.id.0).await.unwrap();
         let stats = run_sync(&pool_a, &settings).await.expect("A sync #3");
         assert!(stats.uploaded >= 1, "A uploads the tombstone");
 
@@ -2034,7 +2034,7 @@ mod e2e_tests {
 
         // --- device A: create + encrypt + upload -------------------------
         let n1 = repo::create_note(&pool_a, None, "Secret").await.unwrap();
-        repo::update_note(&pool_a, n1.id, "Secret", "classified body")
+        repo::update_note(&pool_a, n1.id.0, "Secret", "classified body")
             .await
             .unwrap();
         let stats = run_sync(&pool_a, &settings).await.expect("A sync");
