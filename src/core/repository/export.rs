@@ -92,22 +92,48 @@ pub fn frontmatter(note: &Note) -> String {
 /// different notebooks both keep their name, while a third "Todo" in the
 /// same notebook becomes `Todo-1.md`.
 pub fn plan(notebooks: &[Notebook], notes: &[Note]) -> Vec<PlannedFile> {
-    let mut dir_by_id: HashMap<i64, Vec<String>> = HashMap::new();
+    // 1. Parent lookup by id; the plan must not depend on the input order,
+    //    so a child can be processed before its parent.
+    let mut parent_by_id: HashMap<i64, Option<i64>> = HashMap::new();
     for nb in notebooks {
-        let mut dir = nb
-            .parent_id
-            .and_then(|parent| dir_by_id.get(&parent.0).cloned())
-            .unwrap_or_default();
-        dir.push(sanitize_component(&nb.name));
-        dir_by_id.insert(nb.id.0, dir);
+        parent_by_id.insert(nb.id.0, nb.parent_id.map(|p| p.0));
     }
+
+    // 2. Directory for one notebook = sanitized parent chain + own name.
+    //    Cycles are broken defensively with a depth guard (the schema
+    //    allows referencing any row, and the guard matches the sync-index
+    //    path walker).
+    let directory = |id: i64| -> Vec<String> {
+        let mut chain = Vec::new();
+        let mut current = Some(id);
+        let mut guard = 0;
+        while let Some(nb_id) = current {
+            let Some(parent) = parent_by_id.get(&nb_id) else {
+                break;
+            };
+            let name = notebooks
+                .iter()
+                .find(|nb| nb.id.0 == nb_id)
+                .map(|nb| sanitize_component(&nb.name));
+            if let Some(name) = name {
+                chain.push(name);
+            }
+            current = *parent;
+            guard += 1;
+            if guard > 64 {
+                break;
+            }
+        }
+        chain.reverse();
+        chain
+    };
 
     let mut used_per_dir: HashMap<Vec<String>, HashMap<String, usize>> = HashMap::new();
     let mut planned = Vec::with_capacity(notes.len());
     for note in notes {
         let dir = note
             .notebook_id
-            .and_then(|id| dir_by_id.get(&id.0).cloned())
+            .map(|id| directory(id.0))
             .unwrap_or_default();
 
         let base = sanitize_component(&note.title);

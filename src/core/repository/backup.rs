@@ -14,9 +14,18 @@ use crate::core::Result;
 
 /// Create a consistent snapshot of the database at `dest` using
 /// `VACUUM INTO` (SQLite >= 3.27).
+///
+/// SQLite refuses to overwrite an existing output file, so a previous
+/// backup at the same path is removed first — re-running a backup to the
+/// same destination must succeed, not error.
 pub(crate) async fn run(pool: &SqlitePool, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
+    }
+    match tokio::fs::remove_file(dest).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
     }
     let escaped = dest.to_string_lossy().replace('\'', "''");
     let sql = format!("VACUUM INTO '{}'", escaped);
