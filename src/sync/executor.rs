@@ -1,8 +1,9 @@
 //! Sync engine: S3-compatible object storage and WebDAV backends.
 //!
-//! The pure planning logic lives in `crate::sync` (see its module doc
-//! for the object layout, conflict rules and tombstone semantics). This
-//! module is the executor: each backend implements the `SyncStore` seam
+//! The pure planning logic lives in [`crate::core::sync`] (see its module
+//! doc for the object layout, conflict rules and tombstone semantics).
+//! This module is the executor: each backend implements the `SyncStore`
+//! seam
 //! — list the remote index, fetch/upload markdown bodies and sidecars —
 //! and a shared `run_sync_with` turns a [`SyncAction`] plan into actual
 //! store operations, then updates the local database. It runs on the DB
