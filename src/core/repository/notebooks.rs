@@ -2,7 +2,7 @@
 
 use sqlx::SqlitePool;
 
-use crate::core::Result;
+use crate::core::error::Result;
 use crate::core::model::{Notebook, NotebookId};
 use crate::core::repository::notes::ensure_affected;
 
@@ -32,7 +32,7 @@ pub(crate) async fn rename(pool: &SqlitePool, id: NotebookId, name: &str) -> Res
             .execute(pool)
             .await?;
     ensure_affected(result.rows_affected(), || {
-        crate::core::Error::NotebookNotFound(id)
+        crate::core::error::Error::NotebookNotFound(id)
     })
 }
 
@@ -44,7 +44,7 @@ pub(crate) async fn delete(pool: &SqlitePool, id: NotebookId) -> Result<()> {
         .execute(pool)
         .await?;
     ensure_affected(result.rows_affected(), || {
-        crate::core::Error::NotebookNotFound(id)
+        crate::core::error::Error::NotebookNotFound(id)
     })
 }
 

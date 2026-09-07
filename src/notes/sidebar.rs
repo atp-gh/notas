@@ -7,7 +7,7 @@ use gtk::prelude::*;
 use libadwaita as adw;
 use relm4::RelmWidgetExt;
 
-use crate::core::ViewId;
+use crate::application::ViewId;
 use crate::tr;
 use crate::ui::dialogs;
 use crate::ui::protocol::AppMsg;
@@ -131,7 +131,7 @@ pub(crate) fn build(
                 && let Some(iter) = model.iter(path)
             {
                 let id: i64 = model.get_value(&iter, 0).get().unwrap_or(0);
-                let _ = sender.send(AppMsg::SelectNotebook(crate::core::NotebookId(id)));
+                let _ = sender.send(AppMsg::SelectNotebook(crate::core::model::NotebookId(id)));
             }
         });
     }
@@ -155,7 +155,7 @@ pub(crate) fn build(
                 tr!("Notebook name…"),
                 "",
                 move |name| AppMsg::RenameNotebook {
-                    id: crate::core::NotebookId(id),
+                    id: crate::core::model::NotebookId(id),
                     name,
                 },
             );
@@ -165,7 +165,7 @@ pub(crate) fn build(
         let sender = sender.clone();
         let pending = pending_notebook.clone();
         delete_notebook_button.connect_clicked(move |_| {
-            let _ = sender.send(AppMsg::DeleteNotebook(crate::core::NotebookId(
+            let _ = sender.send(AppMsg::DeleteNotebook(crate::core::model::NotebookId(
                 pending.get(),
             )));
         });
@@ -230,7 +230,7 @@ pub(crate) fn build(
                 tr!("Tag name…"),
                 "",
                 move |name| AppMsg::RenameTag {
-                    id: crate::core::TagId(id),
+                    id: crate::core::model::TagId(id),
                     name,
                 },
             );
@@ -240,7 +240,7 @@ pub(crate) fn build(
         let sender = sender.clone();
         let pending = pending_tag.clone();
         delete_tag_button.connect_clicked(move |_| {
-            let _ = sender.send(AppMsg::DeleteTag(crate::core::TagId(pending.get())));
+            let _ = sender.send(AppMsg::DeleteTag(crate::core::model::TagId(pending.get())));
         });
     }
     let tag_menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);

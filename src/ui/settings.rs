@@ -1,7 +1,7 @@
 //! Settings dialog: an `adw::PreferencesDialog` opened from the app menu
 //! (`PreferencesWindow` is the deprecated name since libadwaita 1.6).
 //!
-//! Rows edit the persisted [`crate::core::config::Settings`] with **immediate
+//! Rows edit the persisted [`crate::application::config::Settings`] with **immediate
 //! effect** — changing a row sends an `AppMsg` to the app, which applies
 //! the change to the live UI and saves the settings file. There is no
 //! "Apply" button, matching GNOME conventions.
@@ -12,7 +12,7 @@ use std::rc::Rc;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
-use crate::core::config::{Settings, SyncType, ThemeMode};
+use crate::application::config::{Settings, SyncType, ThemeMode};
 use crate::tr;
 use crate::ui::AppMsg;
 

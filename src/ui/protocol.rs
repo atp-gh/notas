@@ -5,5 +5,5 @@
 //! consumes the same protocol regardless of whether the frontend is GTK,
 //! Windows-native, or macOS-native.
 
-pub use crate::core::AppMsg;
-pub use crate::core::ViewMode;
+pub use crate::application::AppMsg;
+pub use crate::application::ViewMode;

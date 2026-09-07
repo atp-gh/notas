@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use sqlx::SqlitePool;
 
-use crate::core::Result;
+use crate::core::error::Result;
 use crate::core::model::NoteId;
 use crate::core::sync::{LocalNote, Sidecar};
 
@@ -189,7 +189,7 @@ pub(crate) async fn apply_remote_note(
                 if updated == 0 {
                     // The uuid vanished between the SELECT and the UPDATE
                     // inside the same transaction: treat as a hard failure.
-                    return Err(crate::core::Error::InvalidInput(format!(
+                    return Err(crate::core::error::Error::InvalidInput(format!(
                         "remote note {} vanished mid-apply",
                         sidecar.uuid
                     )));

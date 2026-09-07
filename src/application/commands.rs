@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use crate::core::config::SyncSettings;
+use crate::application::config::SyncSettings;
+use crate::application::events::DbEvent;
+use crate::application::navigation::ViewId;
 use crate::core::model::{NoteId, NotebookId, TagId};
 
 /// Commands submitted to the persistence and synchronization service.
@@ -55,8 +57,8 @@ pub enum DbCommand {
 #[derive(Debug, Clone)]
 #[allow(missing_docs)]
 pub enum AppCommand {
-    Db(crate::core::events::DbEvent),
-    SelectView(super::navigation::ViewId),
+    Db(DbEvent),
+    SelectView(ViewId),
     SelectNotebook(NotebookId),
     SelectTag(Option<TagId>),
     SelectNote(NoteId),
@@ -91,11 +93,11 @@ pub enum AppCommand {
     DialogCancel,
     CloseRequested,
     OpenSettings,
-    ThemeChanged(crate::core::config::ThemeMode),
+    ThemeChanged(crate::application::config::ThemeMode),
     ToggleLineNumbers(bool),
     ToggleStatusBar(bool),
     SyncNow,
-    SyncTypeChanged(crate::core::config::SyncType),
+    SyncTypeChanged(crate::application::config::SyncType),
     SyncEndpointChanged(String),
     SyncRegionChanged(String),
     SyncBucketChanged(String),

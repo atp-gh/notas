@@ -10,7 +10,7 @@ use std::path::Path;
 
 use sqlx::{AssertSqlSafe, SqlitePool};
 
-use crate::core::Result;
+use crate::core::error::Result;
 
 /// Create a consistent snapshot of the database at `dest` using
 /// `VACUUM INTO` (SQLite >= 3.27).

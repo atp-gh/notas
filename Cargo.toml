@@ -4,6 +4,19 @@ version = "0.1.0"
 edition = "2024"
 description = "Notas — a fast local-first note-taking app"
 
+[features]
+default = ["gui"]
+# GTK4/libadwaita frontend. The data core, application layer and sync
+# infrastructure compile and test without it (`--no-default-features`).
+gui = [
+    "dep:relm4",
+    "dep:gtk",
+    "dep:libadwaita",
+    "dep:sourceview5",
+    "dep:glib",
+    "dep:pango",
+]
+
 [dependencies]
 thiserror = "2"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
@@ -18,18 +31,24 @@ subtle = "2"
 s3 = "0.1"
 reqwest_dav = { version = "0.3", default-features = false, features = ["rustls-tls"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-relm4 = { version = "0.11", features = ["libadwaita"] }
-gtk = { package = "gtk4", version = "0.11", features = ["v4_22"] }
-libadwaita = { version = "0.9", features = ["v1_9"] }
-sourceview5 = "0.11"
+relm4 = { version = "0.11", features = ["libadwaita"], optional = true }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_22"], optional = true }
+libadwaita = { version = "0.9", features = ["v1_9"], optional = true }
+sourceview5 = { version = "0.11", optional = true }
 pulldown-cmark = "0.13"
-glib = "0.22"
-pango = "0.22"
+glib = { version = "0.22", optional = true }
+pango = { version = "0.22", optional = true }
 unicode-width = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
 wiremock = "0.6"
+
+# The GUI binary is only buildable with its GTK dependencies present.
+[[bin]]
+name = "notas"
+path = "src/main.rs"
+required-features = ["gui"]
 
 [lints.clippy]
 all = "warn"

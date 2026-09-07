@@ -10,7 +10,7 @@ use std::path::Path;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
-use crate::core::Result;
+use crate::core::error::Result;
 
 /// Open (creating if needed) the database, bring the schema to the current
 /// version, and rebuild the FTS index if it is out of sync with the notes

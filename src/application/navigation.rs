@@ -1,7 +1,6 @@
 //! Navigation state shared by all frontends.
 
 use crate::core::model::{NotebookId, TagId};
-
 /// Built-in top-level note views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewId {

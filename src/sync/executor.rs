@@ -49,7 +49,7 @@ use crate::core::sync::{
 use crate::sync::crypto::{self, Cipher, CryptoError, Verifier};
 use crate::sync::error::SyncError;
 
-use crate::core::config::{S3SyncSettings, SyncSettings, SyncType, WebDavSyncSettings};
+use crate::application::config::{S3SyncSettings, SyncSettings, SyncType, WebDavSyncSettings};
 
 /// The storage primitives the planner's actions map onto. Implemented by
 /// every sync backend; the rest of [`run_sync_with`] is shared.
@@ -1103,7 +1103,7 @@ mod webdav_tests {
     use wiremock::matchers::{basic_auth, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use crate::core::config::EncryptionSettings;
+    use crate::application::config::EncryptionSettings;
     use crate::storage::{db, repo};
 
     /// Test settings pointing at the mock server (plain http, so the
@@ -1829,7 +1829,7 @@ mod webdav_tests {
 #[cfg(test)]
 mod e2e_tests {
     use super::*;
-    use crate::core::config::EncryptionSettings;
+    use crate::application::config::EncryptionSettings;
     use crate::storage::{db, repo};
 
     /// End-to-end sync between two fresh databases through a real

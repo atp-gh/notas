@@ -2,7 +2,7 @@
 
 use sqlx::SqlitePool;
 
-use crate::core::Result;
+use crate::core::error::Result;
 use crate::core::model::SearchHit;
 use crate::core::search::fts_query;
 

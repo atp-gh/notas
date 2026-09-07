@@ -11,7 +11,7 @@ use std::path::Path;
 
 use sqlx::SqlitePool;
 
-use crate::core::Result;
+use crate::core::error::Result;
 use crate::core::model::{Note, Notebook};
 
 /// One planned export file: a notebook-relative directory, a collision-

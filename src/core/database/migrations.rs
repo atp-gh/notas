@@ -8,7 +8,7 @@
 
 use sqlx::{Connection, SqliteConnection};
 
-use crate::core::Result;
+use crate::core::error::Result;
 
 /// One ordered schema upgrade step.
 struct Migration {

@@ -11,14 +11,14 @@ mod tr;
 // types (which can otherwise make integration between targets surprising).
 #[allow(dead_code)]
 pub use notas::domain_notes;
-pub use notas::{core, search, storage, sync};
+pub use notas::{application, core, markdown, search, storage, sync};
 
 use std::process::ExitCode;
 
 use relm4::RelmApp;
 
 use crate::app::{App, AppInit};
-use crate::core::config::Settings;
+use crate::application::config::Settings;
 
 fn main() -> ExitCode {
     let platform_paths = platform::paths();

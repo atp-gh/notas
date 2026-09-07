@@ -2,7 +2,7 @@
 
 use sqlx::SqlitePool;
 
-use crate::core::Result;
+use crate::core::error::Result;
 use crate::core::model::{NoteId, Tag, TagCount, TagId};
 use crate::core::repository::notes::ensure_affected;
 
@@ -45,7 +45,7 @@ pub(crate) async fn set_for_note(
         .bind(note_id)
         .fetch_optional(&mut *tx)
         .await?;
-    exists.ok_or(crate::core::Error::NoteNotFound(note_id))?;
+    exists.ok_or(crate::core::error::Error::NoteNotFound(note_id))?;
 
     sqlx::query("DELETE FROM note_tags WHERE note_id = ?")
         .bind(note_id)
@@ -84,7 +84,7 @@ pub(crate) async fn rename(pool: &SqlitePool, id: TagId, name: &str) -> Result<(
         .execute(pool)
         .await?;
     ensure_affected(result.rows_affected(), || {
-        crate::core::Error::TagNotFound(id)
+        crate::core::error::Error::TagNotFound(id)
     })
 }
 
@@ -95,6 +95,6 @@ pub(crate) async fn delete(pool: &SqlitePool, id: TagId) -> Result<()> {
         .execute(pool)
         .await?;
     ensure_affected(result.rows_affected(), || {
-        crate::core::Error::TagNotFound(id)
+        crate::core::error::Error::TagNotFound(id)
     })
 }

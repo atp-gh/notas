@@ -1,8 +1,7 @@
 //! Pure application state transitions shared by all frontends.
 
+use crate::application::navigation::{ViewId, ViewMode};
 use crate::core::model::NoteId;
-
-use super::{ViewId, ViewMode};
 
 /// Returns whether the editor differs from its last persisted snapshot.
 pub fn editor_is_dirty(
@@ -26,9 +25,9 @@ pub fn mode_for_view(view: ViewId) -> ViewMode {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use crate::core::model::NoteId;
+
+    use super::*;
 
     #[test]
     fn editor_is_dirty_requires_a_selected_note() {

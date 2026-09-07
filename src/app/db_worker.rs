@@ -8,8 +8,8 @@
 //! This worker is the application boundary: typed data-core errors are
 //! converted to user-facing text here, and never leak further.
 
+pub use crate::application::{DbEvent, DbMsg};
 use crate::core::repository::Repository;
-pub use crate::core::{DbEvent, DbMsg};
 use relm4::Worker;
 use relm4::prelude::*;
 use sqlx::SqlitePool;
@@ -39,7 +39,7 @@ impl Worker for DbWorker {
 }
 
 async fn handle(repo: Repository, msg: DbMsg) -> DbEvent {
-    let result: crate::core::Result<DbEvent> = match msg {
+    let result: crate::core::error::Result<DbEvent> = match msg {
         DbMsg::LoadNotebooks => repo.list_notebooks().await.map(DbEvent::Notebooks),
         DbMsg::LoadTags => repo.list_tags().await.map(DbEvent::Tags),
         DbMsg::LoadNotes(id) => repo.list_notes(id).await.map(DbEvent::Notes),
@@ -49,7 +49,7 @@ async fn handle(repo: Repository, msg: DbMsg) -> DbEvent {
         DbMsg::LoadByTag(id) => repo.list_notes_by_tag(id).await.map(DbEvent::Notes),
         DbMsg::LoadNote(id) => match repo.get_note(id).await {
             Ok(Some(note)) => Ok(DbEvent::NoteLoaded(note)),
-            Ok(None) => Err(crate::core::Error::NoteNotFound(id)),
+            Ok(None) => Err(crate::core::error::Error::NoteNotFound(id)),
             Err(e) => Err(e),
         },
         DbMsg::CreateNote(notebook_id) => repo

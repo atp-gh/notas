@@ -9,8 +9,8 @@ use libadwaita as adw;
 use sourceview5::prelude::*;
 
 #[cfg(test)]
-use crate::core::markdown::Span;
-use crate::core::markdown::{self, Style};
+use crate::markdown::Span;
+use crate::markdown::{self, Style};
 use crate::ui::protocol::AppMsg;
 
 /// Text tags used by the Markdown preview, created once per buffer.

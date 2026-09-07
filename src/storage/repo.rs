@@ -9,7 +9,7 @@ use std::path::Path;
 
 use sqlx::SqlitePool;
 
-use crate::core::Result;
+use crate::core::error::Result;
 use crate::core::repository::Repository;
 use crate::domain_notes::{Note, Notebook, SearchHit, Tag, TagCount};
 use crate::sync::{LocalNote, Sidecar};
@@ -29,14 +29,14 @@ pub async fn create_notebook(
     name: &str,
 ) -> Result<Notebook> {
     repo(pool)
-        .create_notebook(parent_id.map(crate::core::NotebookId), name)
+        .create_notebook(parent_id.map(crate::core::model::NotebookId), name)
         .await
 }
 
 /// Rename a notebook and bump its `updated_at`.
 pub async fn rename_notebook(pool: &SqlitePool, id: i64, name: &str) -> Result<()> {
     repo(pool)
-        .rename_notebook(crate::core::NotebookId(id), name)
+        .rename_notebook(crate::core::model::NotebookId(id), name)
         .await
 }
 
@@ -44,7 +44,7 @@ pub async fn rename_notebook(pool: &SqlitePool, id: i64, name: &str) -> Result<(
 /// (`notebook_id` is set to NULL by the schema).
 pub async fn delete_notebook(pool: &SqlitePool, id: i64) -> Result<()> {
     repo(pool)
-        .delete_notebook(crate::core::NotebookId(id))
+        .delete_notebook(crate::core::model::NotebookId(id))
         .await
 }
 
@@ -60,30 +60,32 @@ pub async fn list_notebooks(pool: &SqlitePool) -> Result<Vec<Notebook>> {
 /// Insert a note (with the given title) and return the created row.
 pub async fn create_note(pool: &SqlitePool, notebook_id: Option<i64>, title: &str) -> Result<Note> {
     repo(pool)
-        .create_note(notebook_id.map(crate::core::NotebookId), title)
+        .create_note(notebook_id.map(crate::core::model::NotebookId), title)
         .await
 }
 
 /// Fetch a single note by id, if it exists.
 pub async fn get_note(pool: &SqlitePool, id: i64) -> Result<Option<Note>> {
-    repo(pool).get_note(crate::core::NoteId(id)).await
+    repo(pool).get_note(crate::core::model::NoteId(id)).await
 }
 
 /// Update title + content; the FTS index is kept in sync by trigger `notes_au`.
 pub async fn update_note(pool: &SqlitePool, id: i64, title: &str, content: &str) -> Result<()> {
     repo(pool)
-        .update_note(crate::core::NoteId(id), title, content)
+        .update_note(crate::core::model::NoteId(id), title, content)
         .await
 }
 
 /// Move a note to the trash.
 pub async fn trash_note(pool: &SqlitePool, id: i64) -> Result<()> {
-    repo(pool).trash_note(crate::core::NoteId(id)).await
+    repo(pool).trash_note(crate::core::model::NoteId(id)).await
 }
 
 /// Restore a trashed note.
 pub async fn restore_note(pool: &SqlitePool, id: i64) -> Result<()> {
-    repo(pool).restore_note(crate::core::NoteId(id)).await
+    repo(pool)
+        .restore_note(crate::core::model::NoteId(id))
+        .await
 }
 
 /// Physically delete a note (FTS row removed by trigger `notes_ad`).
@@ -93,14 +95,14 @@ pub async fn restore_note(pool: &SqlitePool, id: i64) -> Result<()> {
 /// note resurrecting from the remote store on the next sync.
 pub async fn delete_note_forever(pool: &SqlitePool, id: i64) -> Result<()> {
     repo(pool)
-        .delete_note_forever(crate::core::NoteId(id))
+        .delete_note_forever(crate::core::model::NoteId(id))
         .await
 }
 
 /// Non-trashed notes of one notebook, newest first.
 pub async fn list_notes(pool: &SqlitePool, notebook_id: i64) -> Result<Vec<Note>> {
     repo(pool)
-        .list_notes(crate::core::NotebookId(notebook_id))
+        .list_notes(crate::core::model::NotebookId(notebook_id))
         .await
 }
 
@@ -112,7 +114,7 @@ pub async fn list_all_notes(pool: &SqlitePool) -> Result<Vec<Note>> {
 /// All non-trashed notes carrying a given tag, newest first.
 pub async fn list_notes_by_tag(pool: &SqlitePool, tag_id: i64) -> Result<Vec<Note>> {
     repo(pool)
-        .list_notes_by_tag(crate::core::TagId(tag_id))
+        .list_notes_by_tag(crate::core::model::TagId(tag_id))
         .await
 }
 
@@ -146,24 +148,28 @@ pub async fn list_tags(pool: &SqlitePool) -> Result<Vec<TagCount>> {
 
 /// The tags attached to one note, sorted by name.
 pub async fn get_note_tags(pool: &SqlitePool, note_id: i64) -> Result<Vec<Tag>> {
-    repo(pool).get_note_tags(crate::core::NoteId(note_id)).await
+    repo(pool)
+        .get_note_tags(crate::core::model::NoteId(note_id))
+        .await
 }
 
 /// Replace the tag set of a note. Tags are created on demand.
 pub async fn set_note_tags(pool: &SqlitePool, note_id: i64, names: &[String]) -> Result<()> {
     repo(pool)
-        .set_note_tags(crate::core::NoteId(note_id), names)
+        .set_note_tags(crate::core::model::NoteId(note_id), names)
         .await
 }
 
 /// Rename a tag. The `tags.name` UNIQUE constraint rejects colliding names.
 pub async fn rename_tag(pool: &SqlitePool, id: i64, name: &str) -> Result<()> {
-    repo(pool).rename_tag(crate::core::TagId(id), name).await
+    repo(pool)
+        .rename_tag(crate::core::model::TagId(id), name)
+        .await
 }
 
 /// Delete a tag; its `note_tags` links are removed by CASCADE.
 pub async fn delete_tag(pool: &SqlitePool, id: i64) -> Result<()> {
-    repo(pool).delete_tag(crate::core::TagId(id)).await
+    repo(pool).delete_tag(crate::core::model::TagId(id)).await
 }
 
 // ---------------------------------------------------------------------------

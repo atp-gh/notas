@@ -5,7 +5,7 @@
 //! `Display` reads like a sentence) while giving callers a matchable type.
 //! It is converted to UI text only at the `DbWorker` boundary.
 
-use crate::core::Error as CoreError;
+use crate::core::error::Error as CoreError;
 use crate::sync::crypto::CryptoError;
 
 /// Errors produced by the sync engine (transport, protocol, crypto and the

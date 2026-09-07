@@ -2,7 +2,7 @@
 
 use libadwaita as adw;
 
-use crate::core::config::ThemeMode;
+use crate::application::config::ThemeMode;
 
 /// Apply the persisted color scheme to libadwaita.
 pub(crate) fn apply(mode: ThemeMode) {

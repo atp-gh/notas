@@ -19,8 +19,8 @@ use sqlx::SqlitePool;
 use notas::core::model::{Note, NoteId, Notebook, SearchHit, Tag, TagCount, TagId};
 
 use crate::app::db_worker::DbWorker;
-use crate::core::config::{Settings, SyncType};
-use crate::core::{DbEvent, DbMsg};
+use crate::application::config::{Settings, SyncType};
+use crate::application::{DbEvent, DbMsg};
 use crate::editor::{Editor, build_editor};
 use crate::notes::{clear_flow, row as note_row};
 use crate::tr;
@@ -598,7 +598,7 @@ impl App {
         match msg {
             AppMsg::Db(event) => self.handle_db_event(event),
             AppMsg::SelectView(view) => {
-                self.mode = crate::core::state::mode_for_view(view);
+                self.mode = crate::application::state::mode_for_view(view);
                 self.refresh_current_list();
                 self.update_view_title();
                 self.update_trash_buttons();
@@ -719,7 +719,7 @@ impl App {
                 // loading a note sets the entry/buffer programmatically,
                 // which also fires "changed", and reverting an edit back to
                 // the saved text must clear the flag.
-                let dirty = crate::core::state::editor_is_dirty(
+                let dirty = crate::application::state::editor_is_dirty(
                     self.current_note,
                     &self.current_title(),
                     &self.current_content(),

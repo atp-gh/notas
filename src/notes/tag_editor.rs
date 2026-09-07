@@ -2,7 +2,7 @@
 
 use gtk::prelude::*;
 
-use crate::core::AppMsg;
+use crate::application::AppMsg;
 use notas::domain_notes::Tag;
 
 /// Rebuild removable tag chips for the selected note.

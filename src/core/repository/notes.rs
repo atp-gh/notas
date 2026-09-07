@@ -2,7 +2,7 @@
 
 use sqlx::SqlitePool;
 
-use crate::core::Result;
+use crate::core::error::Result;
 use crate::core::model::{Note, NoteId, NotebookId, TagId};
 
 /// Insert a note (with the given title) and return the created row.
@@ -50,7 +50,7 @@ pub(crate) async fn update(
     .execute(pool)
     .await?;
     ensure_affected(result.rows_affected(), || {
-        crate::core::Error::NoteNotFound(id)
+        crate::core::error::Error::NoteNotFound(id)
     })
 }
 
@@ -62,7 +62,7 @@ pub(crate) async fn trash(pool: &SqlitePool, id: NoteId) -> Result<()> {
             .execute(pool)
             .await?;
     ensure_affected(result.rows_affected(), || {
-        crate::core::Error::NoteNotFound(id)
+        crate::core::error::Error::NoteNotFound(id)
     })
 }
 
@@ -74,7 +74,7 @@ pub(crate) async fn restore(pool: &SqlitePool, id: NoteId) -> Result<()> {
             .execute(pool)
             .await?;
     ensure_affected(result.rows_affected(), || {
-        crate::core::Error::NoteNotFound(id)
+        crate::core::error::Error::NoteNotFound(id)
     })
 }
 
@@ -89,7 +89,7 @@ pub(crate) async fn delete_forever(pool: &SqlitePool, id: NoteId) -> Result<()> 
         .bind(id)
         .fetch_optional(&mut *tx)
         .await?
-        .ok_or(crate::core::Error::NoteNotFound(id))?;
+        .ok_or(crate::core::error::Error::NoteNotFound(id))?;
     let deleted = sqlx::query("DELETE FROM notes WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
@@ -104,7 +104,7 @@ pub(crate) async fn delete_forever(pool: &SqlitePool, id: NoteId) -> Result<()> 
             .await?;
     }
     tx.commit().await?;
-    ensure_affected(deleted, || crate::core::Error::NoteNotFound(id))
+    ensure_affected(deleted, || crate::core::error::Error::NoteNotFound(id))
 }
 
 /// Non-trashed notes of one notebook, newest first.
@@ -174,7 +174,7 @@ pub(crate) async fn list_trashed(pool: &SqlitePool) -> Result<Vec<Note>> {
 /// Turn a zero `rows_affected` into the caller-supplied typed NotFound.
 pub(crate) fn ensure_affected(
     rows_affected: u64,
-    not_found: impl FnOnce() -> crate::core::Error,
+    not_found: impl FnOnce() -> crate::core::error::Error,
 ) -> Result<()> {
     if rows_affected == 0 {
         Err(not_found())

@@ -15,7 +15,7 @@ use std::path::Path;
 
 use sqlx::SqlitePool;
 
-use crate::core::Result;
+use crate::core::error::Result;
 use crate::core::model::{Note, NoteId, Notebook, NotebookId, SearchHit, Tag, TagCount, TagId};
 
 pub(crate) mod backup;
@@ -52,7 +52,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] when the insert fails.
+    /// Returns [`crate::core::error::Error::Database`] when the insert fails.
     pub async fn create_notebook(
         &self,
         parent_id: Option<NotebookId>,
@@ -65,8 +65,8 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::NotebookNotFound`] when the notebook
-    /// does not exist, or [`crate::core::Error::Database`] on failure.
+    /// Returns [`crate::core::error::Error::NotebookNotFound`] when the notebook
+    /// does not exist, or [`crate::core::error::Error::Database`] on failure.
     pub async fn rename_notebook(&self, id: NotebookId, name: &str) -> Result<()> {
         notebooks::rename(&self.pool, id, name).await
     }
@@ -76,8 +76,8 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::NotebookNotFound`] when the notebook
-    /// does not exist, or [`crate::core::Error::Database`] on failure.
+    /// Returns [`crate::core::error::Error::NotebookNotFound`] when the notebook
+    /// does not exist, or [`crate::core::error::Error::Database`] on failure.
     pub async fn delete_notebook(&self, id: NotebookId) -> Result<()> {
         notebooks::delete(&self.pool, id).await
     }
@@ -86,7 +86,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] when the query fails.
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
     pub async fn list_notebooks(&self) -> Result<Vec<Notebook>> {
         notebooks::list(&self.pool).await
     }
@@ -97,8 +97,8 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::NotebookNotFound`] when the target
-    /// notebook does not exist, or [`crate::core::Error::Database`] on
+    /// Returns [`crate::core::error::Error::NotebookNotFound`] when the target
+    /// notebook does not exist, or [`crate::core::error::Error::Database`] on
     /// failure.
     pub async fn create_note(&self, notebook_id: Option<NotebookId>, title: &str) -> Result<Note> {
         notes::create(&self.pool, notebook_id, title).await
@@ -108,7 +108,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] when the query fails.
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
     pub async fn get_note(&self, id: NoteId) -> Result<Option<Note>> {
         notes::get(&self.pool, id).await
     }
@@ -118,8 +118,8 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::NoteNotFound`] when the note does not
-    /// exist, or [`crate::core::Error::Database`] on failure.
+    /// Returns [`crate::core::error::Error::NoteNotFound`] when the note does not
+    /// exist, or [`crate::core::error::Error::Database`] on failure.
     pub async fn update_note(&self, id: NoteId, title: &str, content: &str) -> Result<()> {
         notes::update(&self.pool, id, title, content).await
     }
@@ -128,8 +128,8 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::NoteNotFound`] when the note does not
-    /// exist, or [`crate::core::Error::Database`] on failure.
+    /// Returns [`crate::core::error::Error::NoteNotFound`] when the note does not
+    /// exist, or [`crate::core::error::Error::Database`] on failure.
     pub async fn trash_note(&self, id: NoteId) -> Result<()> {
         notes::trash(&self.pool, id).await
     }
@@ -138,8 +138,8 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::NoteNotFound`] when the note does not
-    /// exist, or [`crate::core::Error::Database`] on failure.
+    /// Returns [`crate::core::error::Error::NoteNotFound`] when the note does not
+    /// exist, or [`crate::core::error::Error::Database`] on failure.
     pub async fn restore_note(&self, id: NoteId) -> Result<()> {
         notes::restore(&self.pool, id).await
     }
@@ -152,8 +152,8 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::NoteNotFound`] when the note does not
-    /// exist, or [`crate::core::Error::Database`] on failure.
+    /// Returns [`crate::core::error::Error::NoteNotFound`] when the note does not
+    /// exist, or [`crate::core::error::Error::Database`] on failure.
     pub async fn delete_note_forever(&self, id: NoteId) -> Result<()> {
         notes::delete_forever(&self.pool, id).await
     }
@@ -162,7 +162,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] when the query fails.
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
     pub async fn list_notes(&self, notebook_id: NotebookId) -> Result<Vec<Note>> {
         notes::list_by_notebook(&self.pool, notebook_id).await
     }
@@ -171,7 +171,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] when the query fails.
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
     pub async fn list_all_notes(&self) -> Result<Vec<Note>> {
         notes::list_all(&self.pool).await
     }
@@ -180,7 +180,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] when the query fails.
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
     pub async fn list_notes_by_tag(&self, tag_id: TagId) -> Result<Vec<Note>> {
         notes::list_by_tag(&self.pool, tag_id).await
     }
@@ -190,7 +190,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] when the query fails.
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
     pub async fn list_unfiled_notes(&self) -> Result<Vec<Note>> {
         notes::list_unfiled(&self.pool).await
     }
@@ -199,7 +199,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] when the query fails.
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
     pub async fn list_trashed(&self) -> Result<Vec<Note>> {
         notes::list_trashed(&self.pool).await
     }
@@ -210,7 +210,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] when the query fails.
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
     pub async fn list_tags(&self) -> Result<Vec<TagCount>> {
         tags::list(&self.pool).await
     }
@@ -219,7 +219,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] when the query fails.
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
     pub async fn get_note_tags(&self, note_id: NoteId) -> Result<Vec<Tag>> {
         tags::get_for_note(&self.pool, note_id).await
     }
@@ -228,8 +228,8 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::NoteNotFound`] when the note does not
-    /// exist, or [`crate::core::Error::Database`] on failure.
+    /// Returns [`crate::core::error::Error::NoteNotFound`] when the note does not
+    /// exist, or [`crate::core::error::Error::Database`] on failure.
     pub async fn set_note_tags(&self, note_id: NoteId, names: &[String]) -> Result<()> {
         tags::set_for_note(&self.pool, note_id, names).await
     }
@@ -239,8 +239,8 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::TagNotFound`] when the tag does not
-    /// exist, or [`crate::core::Error::Database`] on failure.
+    /// Returns [`crate::core::error::Error::TagNotFound`] when the tag does not
+    /// exist, or [`crate::core::error::Error::Database`] on failure.
     pub async fn rename_tag(&self, id: TagId, name: &str) -> Result<()> {
         tags::rename(&self.pool, id, name).await
     }
@@ -249,8 +249,8 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::TagNotFound`] when the tag does not
-    /// exist, or [`crate::core::Error::Database`] on failure.
+    /// Returns [`crate::core::error::Error::TagNotFound`] when the tag does not
+    /// exist, or [`crate::core::error::Error::Database`] on failure.
     pub async fn delete_tag(&self, id: TagId) -> Result<()> {
         tags::delete(&self.pool, id).await
     }
@@ -263,7 +263,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] when the update fails.
+    /// Returns [`crate::core::error::Error::Database`] when the update fails.
     pub async fn ensure_note_uuids(&self) -> Result<usize> {
         sync_state::ensure_note_uuids(&self.pool).await
     }
@@ -273,7 +273,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] when a query fails.
+    /// Returns [`crate::core::error::Error::Database`] when a query fails.
     pub async fn sync_local_index(&self) -> Result<Vec<crate::core::sync::LocalNote>> {
         sync_state::local_index(&self.pool).await
     }
@@ -283,7 +283,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] when the query fails.
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
     pub async fn list_tombstones(&self) -> Result<Vec<(String, String)>> {
         sync_state::list_tombstones(&self.pool).await
     }
@@ -298,8 +298,8 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] on SQL failures or
-    /// [`crate::core::Error::InvalidInput`] when the remote note vanished
+    /// Returns [`crate::core::error::Error::Database`] on SQL failures or
+    /// [`crate::core::error::Error::InvalidInput`] when the remote note vanished
     /// mid-apply.
     pub async fn apply_remote_note(
         &self,
@@ -317,7 +317,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] on SQL failures.
+    /// Returns [`crate::core::error::Error::Database`] on SQL failures.
     pub async fn create_conflict_copy(
         &self,
         sidecar: &crate::core::sync::Sidecar,
@@ -332,7 +332,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] on SQL failures.
+    /// Returns [`crate::core::error::Error::Database`] on SQL failures.
     pub async fn trash_note_by_uuid_no_bump(&self, uuid: &str) -> Result<()> {
         sync_state::trash_note_by_uuid_no_bump(&self.pool, uuid).await
     }
@@ -344,7 +344,7 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Database`] when the query fails.
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
     pub async fn search(&self, query: &str) -> Result<Vec<SearchHit>> {
         search::run(&self.pool, query).await
     }
@@ -356,8 +356,8 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Io`] on filesystem failures and
-    /// [`crate::core::Error::Database`] on SQL failures.
+    /// Returns [`crate::core::error::Error::Io`] on filesystem failures and
+    /// [`crate::core::error::Error::Database`] on SQL failures.
     pub async fn export_markdown(&self, out_dir: &Path) -> Result<usize> {
         export::run(&self.pool, out_dir).await
     }
@@ -367,8 +367,8 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::Error::Io`] on filesystem failures and
-    /// [`crate::core::Error::Database`] on SQL failures.
+    /// Returns [`crate::core::error::Error::Io`] on filesystem failures and
+    /// [`crate::core::error::Error::Database`] on SQL failures.
     pub async fn backup(&self, dest: &Path) -> Result<()> {
         backup::run(&self.pool, dest).await
     }
