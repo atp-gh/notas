@@ -261,7 +261,7 @@ impl WebDavSyncSettings {
 /// Both backends keep their own section so switching `kind` in the
 /// settings dialog never discards the other backend's configuration. The
 /// fields live in the same plaintext settings file as everything else
-/// (see `Settings::load`).
+/// (see [`Settings::load_from`]).
 ///
 /// Note: the settings file layout changed once (v0.1): the old flat S3
 /// fields (`endpoint`, `bucket`, …) at the top of the sync section are no
@@ -305,42 +305,13 @@ impl SyncSettings {
     }
 }
 
-/// Settings file location: `$XDG_CONFIG_HOME/notas/settings.json`, or
-/// `~/.config/notas/settings.json` when the variable is unset or empty.
-pub fn settings_path() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        let base = std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        return base.join("Notas").join("settings.json");
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        return home.join("Library/Application Support/Notas/config/settings.json");
-    }
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("notas").join("settings.json")
-}
-
 impl Settings {
-    /// Read the settings file, falling back to defaults when it is missing,
+    /// Read settings from a path supplied by the platform adapter (or the
+    /// frontend), falling back to defaults when the file is missing,
     /// corrupt, or unreadable (never crashes, never overwrites the file).
-    pub fn load() -> Self {
-        Self::load_from(settings_path())
-    }
-
-    /// Read settings from a specific path.
     ///
-    /// Frontends should use this method with a path supplied by their
-    /// platform adapter. [`Settings::load`] remains as a portable fallback
-    /// for callers that use the conventional XDG location.
+    /// The path is remembered so a later [`Settings::save`] writes back to
+    /// the same file.
     pub fn load_from(path: PathBuf) -> Self {
         let display = path.display().to_string();
         match fs::read_to_string(&path) {
@@ -362,14 +333,16 @@ impl Settings {
         }
     }
 
-    /// Write the settings atomically (temp file + rename), logging failures.
+    /// Write the settings atomically (temp file + rename) to the path this
+    /// instance was loaded from, logging failures.
+    ///
+    /// Settings whose location is unknown (never loaded from a file) are
+    /// not persisted: resolving the file is the platform adapter's job,
+    /// and this module deliberately has no opinion on where that is.
     pub fn save(&self) {
-        let default_path;
-        let path = if let Some(path) = self.path.as_deref() {
-            path
-        } else {
-            default_path = settings_path();
-            &default_path
+        let Some(path) = self.path.as_deref() else {
+            eprintln!("notas: cannot save settings: no file path was set at load time");
+            return;
         };
         if let Err(err) = self.save_to(path) {
             eprintln!(
