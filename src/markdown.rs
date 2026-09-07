@@ -101,6 +101,7 @@ pub struct Renderer {
 
 impl Renderer {
     /// Create an empty renderer state.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             spans: Vec::new(),
@@ -144,6 +145,7 @@ impl Renderer {
     }
 
     /// Styles for separator spans in the current quote context.
+    #[must_use]
     pub fn separator_styles(&self) -> Vec<Style> {
         if self.quote_depth > 0 {
             vec![Style::Quote(self.quote_depth)]
@@ -174,6 +176,7 @@ impl Renderer {
     }
 
     /// Styles active at the current parser position.
+    #[must_use]
     pub fn context_styles(&self) -> Vec<Style> {
         let mut styles = self.inline.clone();
         if self.heading > 0 {
@@ -330,7 +333,6 @@ impl Renderer {
                     table.cell.clear();
                 }
             }
-            Tag::Image { .. } => {}
             _ => {}
         }
     }
@@ -338,7 +340,6 @@ impl Renderer {
     /// Consume a pulldown-cmark end tag.
     pub fn end_tag(&mut self, tag: TagEnd) {
         match tag {
-            TagEnd::Paragraph => {}
             TagEnd::Heading(_) => self.heading = 0,
             TagEnd::BlockQuote(_) => self.quote_depth = self.quote_depth.saturating_sub(1),
             TagEnd::CodeBlock => {
@@ -416,7 +417,7 @@ impl Renderer {
             let cells: Vec<String> = (0..columns)
                 .map(|index| {
                     pad_cell(
-                        row.get(index).map(String::as_str).unwrap_or(""),
+                        row.get(index).map_or("", String::as_str),
                         widths[index],
                         *table
                             .alignments
@@ -454,11 +455,13 @@ impl Default for Renderer {
 
 impl RenderedMarkdown {
     /// Build a rendered document from its ordered text spans.
+    #[must_use]
     pub fn new(spans: Vec<Span>) -> Self {
         Self { spans }
     }
 
     /// Borrow the ordered spans for a frontend renderer.
+    #[must_use]
     pub fn spans(&self) -> &[Span] {
         &self.spans
     }
@@ -468,6 +471,7 @@ impl RenderedMarkdown {
 pub const RULE_LINE: &str = "────────────────────────────────────────";
 
 /// Return the bullet marker for a nested list depth.
+#[must_use]
 pub fn bullet_marker(depth: usize) -> String {
     match depth {
         1 => "• ".to_owned(),
@@ -477,6 +481,7 @@ pub fn bullet_marker(depth: usize) -> String {
 }
 
 /// Pad a table cell to a display width with the requested alignment.
+#[must_use]
 pub fn pad_cell(cell: &str, width: usize, align: pulldown_cmark::Alignment) -> String {
     use unicode_width::UnicodeWidthStr;
 
@@ -492,6 +497,7 @@ pub fn pad_cell(cell: &str, width: usize, align: pulldown_cmark::Alignment) -> S
 }
 
 /// Parse Markdown into frontend-neutral styled spans.
+#[must_use]
 pub fn render(source: &str) -> RenderedMarkdown {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
