@@ -43,6 +43,11 @@ CREATE TABLE IF NOT EXISTS note_tags (
 
 CREATE INDEX IF NOT EXISTS idx_notes_notebook ON notes(notebook_id);
 CREATE INDEX IF NOT EXISTS idx_notes_trashed  ON notes(is_trashed);
+-- Reverse membership lookup: listing the notes of a tag and the sync
+-- index's tag join filter by tag_id, but the note_tags primary key is
+-- ordered by note_id first, so without this index those queries scan
+-- every membership row.
+CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag_id);
 -- NOTE: the `notes.uuid` unique index is NOT created here: legacy databases
 -- reach this DDL without the uuid column (the column is added by migration
 -- v1), and `CREATE INDEX ... ON notes(uuid)` would fail. The index is

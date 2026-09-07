@@ -137,6 +137,24 @@ async fn repeated_startup_does_not_modify_schema_or_reapply_migrations() {
 }
 
 #[tokio::test]
+async fn tag_lookup_index_exists_after_connect() {
+    let dir = tempfile::tempdir().unwrap();
+    let pool = database::connect(dir.path().join("a.db")).await.unwrap();
+
+    // The tag-side membership index is part of the canonical schema, so
+    // tag lookups never degrade to a full scan of note_tags.
+    let index: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master \
+         WHERE type = 'index' AND name = 'idx_note_tags_tag'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(index, 1);
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn duplicate_notebook_names_under_one_parent_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let pool = database::connect(dir.path().join("a.db")).await.unwrap();
