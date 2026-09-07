@@ -40,12 +40,6 @@ impl Repository {
         Self { pool }
     }
 
-    /// Borrow the underlying pool (for callers not yet migrated).
-    #[must_use]
-    pub fn pool(&self) -> &SqlitePool {
-        &self.pool
-    }
-
     // ---------------------------------------------------------- notebooks
 
     /// Insert a notebook and return the created row.
@@ -338,6 +332,17 @@ impl Repository {
         uuid: &crate::core::sync::SyncUuid,
     ) -> Result<()> {
         sync_state::trash_note_by_uuid_no_bump(&self.pool, uuid.as_str()).await
+    }
+
+    /// Timestamp of a just-finished sync run, formatted `YYYY-MM-DD HH:MM:SS`
+    /// in the device's local time (display only; note timestamps themselves
+    /// stay UTC in the database).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
+    pub async fn record_sync_at(&self) -> Result<String> {
+        sync_state::record_sync_at(&self.pool).await
     }
 
     // ------------------------------------------------------------- search

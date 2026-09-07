@@ -101,7 +101,7 @@ async fn handle(repo: Repository, msg: DbMsg) -> DbEvent {
             Err(e) => Ok(DbEvent::BackupDone(Err(format!("{e:#}")))),
         },
         DbMsg::SyncNow(settings) => {
-            match crate::sync::executor::run_sync(repo.pool(), settings.as_ref()).await {
+            match crate::sync::executor::run_sync(&repo, settings.as_ref()).await {
                 Ok(stats) => Ok(DbEvent::SyncDone(stats)),
                 Err(e) => Ok(DbEvent::SyncFailed(e.to_string())),
             }

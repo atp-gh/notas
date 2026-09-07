@@ -40,7 +40,6 @@ use std::time::Duration;
 
 use reqwest_dav::{Auth as DavAuth, Client as DavClient, ClientBuilder as DavClientBuilder, Depth};
 use s3::{AddressingStyle, Auth as S3Auth, Client as S3Client, Credentials};
-use sqlx::SqlitePool;
 
 use crate::core::repository::Repository;
 use crate::core::sync::{
@@ -92,15 +91,18 @@ trait SyncStore {
 }
 
 /// Run one full sync against the configured backend, then return stats.
-pub async fn run_sync(pool: &SqlitePool, settings: &SyncSettings) -> Result<SyncStats, SyncError> {
+///
+/// All local database steps go through the [`Repository`] facade — the
+/// executor never runs SQL against the underlying pool directly.
+pub async fn run_sync(repo: &Repository, settings: &SyncSettings) -> Result<SyncStats, SyncError> {
     match settings.kind {
         SyncType::S3 => {
             let store = S3Store::new(&settings.s3)?;
-            run_sync_with(&Repository::new(pool.clone()), &store, settings).await
+            run_sync_with(repo, &store, settings).await
         }
         SyncType::WebDAV => {
             let store = WebDavStore::new(&settings.webdav)?;
-            run_sync_with(&Repository::new(pool.clone()), &store, settings).await
+            run_sync_with(repo, &store, settings).await
         }
     }
 }
@@ -198,9 +200,7 @@ async fn run_sync_with(
 
     // 4. Timestamp of this run, in the device's local time (display only;
     //    note timestamps themselves stay UTC in the database).
-    stats.last_synced_at = sqlx::query_scalar::<_, String>("SELECT datetime('now', 'localtime')")
-        .fetch_one(repo.pool())
-        .await?;
+    stats.last_synced_at = repo.record_sync_at().await?;
 
     Ok(stats)
 }
@@ -1227,7 +1227,7 @@ mod webdav_tests {
             encryption: EncryptionSettings::default(),
             last_synced_at: String::new(),
         };
-        let stats = run_sync(&pool, &settings).await.expect("webdav sync");
+        let stats = run_sync(&repo, &settings).await.expect("webdav sync");
         assert_eq!(stats.uploaded, 1);
         // The two PUTs happened exactly once, with Basic auth headers.
         server.verify().await;
@@ -1295,7 +1295,7 @@ mod webdav_tests {
             encryption: EncryptionSettings::default(),
             last_synced_at: String::new(),
         };
-        let stats = run_sync(&pool, &settings).await.expect("webdav sync");
+        let stats = run_sync(&repo, &settings).await.expect("webdav sync");
         assert_eq!(stats.downloaded, 1);
 
         let notes = repo.list_all_notes().await.unwrap();
@@ -1370,7 +1370,7 @@ mod webdav_tests {
             encryption: EncryptionSettings::default(),
             last_synced_at: String::new(),
         };
-        let stats = run_sync(&pool, &settings).await.expect("webdav sync");
+        let stats = run_sync(&repo, &settings).await.expect("webdav sync");
         assert_eq!(stats.trashed, 1);
         assert_eq!(repo.list_all_notes().await.unwrap().len(), 0);
         assert_eq!(repo.list_trashed().await.unwrap().len(), 1);
@@ -1389,7 +1389,7 @@ mod webdav_tests {
 
         let dir = temp_db_dir("auth");
         let pool = database::connect(dir.join("a.db")).await.unwrap();
-        let _repo = Repository::new(pool.clone());
+        let repo = Repository::new(pool.clone());
         let settings = SyncSettings {
             kind: SyncType::WebDAV,
             s3: S3SyncSettings::default(),
@@ -1397,7 +1397,7 @@ mod webdav_tests {
             encryption: EncryptionSettings::default(),
             last_synced_at: String::new(),
         };
-        let err = run_sync(&pool, &settings).await.unwrap_err();
+        let err = run_sync(&repo, &settings).await.unwrap_err();
         assert!(err.to_string().contains("401"), "{err}");
         assert!(err.to_string().contains("app password"), "{err}");
         pool.close().await;
@@ -1524,7 +1524,7 @@ mod webdav_tests {
             .await;
 
         let settings = encrypted_settings(&server.uri(), ENC_PASSWORD);
-        let stats = run_sync(&pool, &settings).await.expect("encrypted sync");
+        let stats = run_sync(&repo, &settings).await.expect("encrypted sync");
         assert_eq!(stats.uploaded, 1);
         server.verify().await;
         pool.close().await;
@@ -1577,7 +1577,7 @@ mod webdav_tests {
         let pool = database::connect(dir.join("a.db")).await.unwrap();
         let repo = Repository::new(pool.clone());
         let settings = encrypted_settings(&server.uri(), ENC_PASSWORD);
-        let stats = run_sync(&pool, &settings).await.expect("encrypted sync");
+        let stats = run_sync(&repo, &settings).await.expect("encrypted sync");
         assert_eq!(stats.downloaded, 1);
 
         let notes = repo.list_all_notes().await.unwrap();
@@ -1662,7 +1662,7 @@ mod webdav_tests {
         let pool = database::connect(dir.join("a.db")).await.unwrap();
         let repo = Repository::new(pool.clone());
         let settings = encrypted_settings(&server.uri(), ENC_PASSWORD);
-        let stats = run_sync(&pool, &settings)
+        let stats = run_sync(&repo, &settings)
             .await
             .expect("sync must survive a corrupt note");
 
@@ -1703,9 +1703,9 @@ mod webdav_tests {
 
         let dir = temp_db_dir("enc-wrong-pw");
         let pool = database::connect(dir.join("a.db")).await.unwrap();
-        let _repo = Repository::new(pool.clone());
+        let repo = Repository::new(pool.clone());
         let settings = encrypted_settings(&server.uri(), "not the right password");
-        let err = run_sync(&pool, &settings).await.unwrap_err();
+        let err = run_sync(&repo, &settings).await.unwrap_err();
         assert!(err.to_string().contains("password"), "{err}");
         server.verify().await;
         pool.close().await;
@@ -1733,7 +1733,7 @@ mod webdav_tests {
 
         let dir = temp_db_dir("enc-refuse");
         let pool = database::connect(dir.join("a.db")).await.unwrap();
-        let _repo = Repository::new(pool.clone());
+        let repo = Repository::new(pool.clone());
         // Encryption disabled: syncing would upload plaintext over the
         // encrypted remote data, so the sync must refuse instead.
         let settings = SyncSettings {
@@ -1743,7 +1743,7 @@ mod webdav_tests {
             encryption: EncryptionSettings::default(),
             last_synced_at: String::new(),
         };
-        let err = run_sync(&pool, &settings).await.unwrap_err();
+        let err = run_sync(&repo, &settings).await.unwrap_err();
         assert!(err.to_string().contains("encrypted"), "{err}");
         server.verify().await;
         pool.close().await;
@@ -1832,7 +1832,7 @@ mod webdav_tests {
             .unwrap();
 
         let settings = encrypted_settings(&server.uri(), ENC_PASSWORD);
-        let stats = run_sync(&pool, &settings).await.expect("migrating sync");
+        let stats = run_sync(&repo, &settings).await.expect("migrating sync");
         assert_eq!(stats.uploaded, 1);
         server.verify().await;
         pool.close().await;
@@ -1925,12 +1925,12 @@ mod e2e_tests {
             .await
             .unwrap();
 
-        let stats = run_sync(&pool_a, &settings).await.expect("A sync #1");
+        let stats = run_sync(&repo_a, &settings).await.expect("A sync #1");
         assert_eq!(stats.uploaded, 2, "A uploads both notes");
         assert_eq!(stats.downloaded, 0);
 
         // --- device B: pulls everything ----------------------------------
-        let stats = run_sync(&pool_b, &settings).await.expect("B sync #1");
+        let stats = run_sync(&repo_b, &settings).await.expect("B sync #1");
         assert_eq!(stats.downloaded, 2, "B downloads both notes");
         let notes_b = repo_b.list_all_notes().await.unwrap();
         assert_eq!(notes_b.len(), 2);
@@ -1959,11 +1959,11 @@ mod e2e_tests {
             .await
             .unwrap();
         repo_b.create_note(None, "From B").await.unwrap();
-        let stats = run_sync(&pool_b, &settings).await.expect("B sync #2");
+        let stats = run_sync(&repo_b, &settings).await.expect("B sync #2");
         assert_eq!(stats.uploaded, 2, "B uploads edit + new note");
 
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let stats = run_sync(&pool_a, &settings).await.expect("A sync #2");
+        let stats = run_sync(&repo_a, &settings).await.expect("A sync #2");
         assert_eq!(stats.downloaded, 2, "A downloads B's edit + new note");
         let notes_a = repo_a.list_all_notes().await.unwrap();
         assert_eq!(notes_a.len(), 3);
@@ -1976,17 +1976,17 @@ mod e2e_tests {
         // --- device A deletes forever; B's copy goes to the trash ---------
         tokio::time::sleep(Duration::from_secs(1)).await;
         repo_a.delete_note_forever(n2.id).await.unwrap();
-        let stats = run_sync(&pool_a, &settings).await.expect("A sync #3");
+        let stats = run_sync(&repo_a, &settings).await.expect("A sync #3");
         assert!(stats.uploaded >= 1, "A uploads the tombstone");
 
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let stats = run_sync(&pool_b, &settings).await.expect("B sync #3");
+        let stats = run_sync(&repo_b, &settings).await.expect("B sync #3");
         assert_eq!(stats.trashed, 1, "B trashes the deleted note");
         assert_eq!(repo_b.list_all_notes().await.unwrap().len(), 2);
         assert_eq!(repo_b.list_trashed().await.unwrap().len(), 1);
 
         // --- a second sync is a no-op --------------------------------------
-        let stats = run_sync(&pool_a, &settings).await.expect("A sync #4");
+        let stats = run_sync(&repo_a, &settings).await.expect("A sync #4");
         assert_eq!(
             stats,
             SyncStats {
@@ -2065,7 +2065,7 @@ mod e2e_tests {
             .update_note(n1.id, "Secret", "classified body")
             .await
             .unwrap();
-        let stats = run_sync(&pool_a, &settings).await.expect("A sync");
+        let stats = run_sync(&repo_a, &settings).await.expect("A sync");
         assert_eq!(stats.uploaded, 1, "A uploads the encrypted note");
 
         // The object on the backend must not contain the plaintext.
@@ -2085,7 +2085,7 @@ mod e2e_tests {
         );
 
         // --- device B: download + decrypt with the same password ---------
-        let stats = run_sync(&pool_b, &settings).await.expect("B sync");
+        let stats = run_sync(&repo_b, &settings).await.expect("B sync");
         assert_eq!(stats.downloaded, 1, "B downloads and decrypts the note");
         let notes_b = repo_b.list_all_notes().await.unwrap();
         assert_eq!(notes_b.len(), 1);
@@ -2093,7 +2093,7 @@ mod e2e_tests {
         assert_eq!(notes_b[0].content, "classified body");
 
         // --- a second sync is a no-op -------------------------------------
-        let stats = run_sync(&pool_a, &settings).await.expect("A sync #2");
+        let stats = run_sync(&repo_a, &settings).await.expect("A sync #2");
         assert_eq!(stats.uploaded, 0);
         assert_eq!(stats.downloaded, 0);
 

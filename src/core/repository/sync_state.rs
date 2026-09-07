@@ -109,6 +109,15 @@ pub(crate) async fn local_index(pool: &SqlitePool) -> Result<Vec<LocalNote>> {
         .collect())
 }
 
+/// The device-local time of a just-finished sync run, formatted
+/// `YYYY-MM-DD HH:MM:SS` (display only; note timestamps stay UTC).
+pub(crate) async fn record_sync_at(pool: &SqlitePool) -> Result<String> {
+    let at = sqlx::query_scalar::<_, String>("SELECT datetime('now', 'localtime')")
+        .fetch_one(pool)
+        .await?;
+    Ok(at)
+}
+
 /// Every locally recorded tombstone: `(uuid, deleted_at)` pairs for notes
 /// permanently deleted on this device.
 pub(crate) async fn list_tombstones(pool: &SqlitePool) -> Result<Vec<(SyncUuid, String)>> {
