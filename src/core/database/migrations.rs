@@ -14,7 +14,15 @@ use crate::core::error::Result;
 struct Migration {
     /// Version this step migrates *to* (one more than the previous step).
     version: i64,
-    /// Human-readable purpose, surfaced in errors and logs.
+    /// Human-readable purpose; not printed (the data core stays silent),
+    /// but asserted in test messages and read when maintaining migrations.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "documentation for maintainers, not runtime output"
+        )
+    )]
     description: &'static str,
     /// The SQL to run; may contain multiple statements.
     sql: &'static str,
@@ -58,6 +66,9 @@ pub(crate) async fn current_version(conn: &mut SqliteConnection) -> Result<i64> 
 /// record untouched. Re-running against an up-to-date database is a no-op.
 /// Afterwards, indexes that depend on migrated columns (e.g.
 /// `idx_notes_uuid`) are ensured.
+///
+/// Applied steps are recorded in the `schema_version` table (version +
+/// applied_at) for later inspection; the data core itself stays silent.
 pub(crate) async fn run(conn: &mut SqliteConnection) -> Result<()> {
     let version = current_version(conn).await?;
     for migration in MIGRATIONS.iter().filter(|m| m.version > version) {
@@ -80,10 +91,6 @@ pub(crate) async fn run(conn: &mut SqliteConnection) -> Result<()> {
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
-        eprintln!(
-            "notas: applied schema migration v{version} -> v{}: {}",
-            migration.version, migration.description
-        );
     }
     ensure_indexes(conn).await
 }

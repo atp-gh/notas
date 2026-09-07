@@ -257,6 +257,12 @@ pub(crate) async fn create_conflict_copy(
 /// Move a note to the trash without bumping its `updated_at`, so a
 /// tombstone reaction doesn't make the local copy look newer than the
 /// tombstone on the next sync.
+///
+/// Deliberately does not check `rows_affected`: the tombstone may name a
+/// note this device has already deleted (a second tombstone from another
+/// device, or a race with a local delete), and doing nothing then is the
+/// correct outcome — unlike the CRUD writes, which report typed
+/// `NotFound` errors.
 pub(crate) async fn trash_note_by_uuid_no_bump(pool: &SqlitePool, uuid: &str) -> Result<()> {
     sqlx::query("UPDATE notes SET is_trashed = 1 WHERE uuid = ?")
         .bind(uuid)

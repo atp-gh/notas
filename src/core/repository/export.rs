@@ -13,6 +13,7 @@ use sqlx::SqlitePool;
 
 use crate::core::error::Result;
 use crate::core::model::{Note, Notebook};
+use crate::core::repository::notebooks;
 
 /// One planned export file: a notebook-relative directory, a collision-
 /// free file name, and the complete file contents.
@@ -179,8 +180,6 @@ pub(crate) async fn run(pool: &SqlitePool, out_dir: &Path) -> Result<usize> {
     }
     Ok(planned.len())
 }
-
-use crate::core::repository::notebooks;
 
 #[cfg(test)]
 mod tests {

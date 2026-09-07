@@ -96,8 +96,17 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(version, 1, "fresh database starts at the current version");
+        pool.close().await;
+    }
 
-        // Every canonical object exists exactly once.
+    #[tokio::test]
+    async fn repeated_connect_does_not_duplicate_schema_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.db");
+        let pool = connect(&path).await.unwrap();
+        pool.close().await;
+
+        let pool = connect(&path).await.unwrap();
         let notebooks: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'notebooks'",
         )
