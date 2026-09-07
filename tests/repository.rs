@@ -210,6 +210,59 @@ async fn notes_by_tag_lists_only_tagged_notes() {
     assert_eq!(listed[0].title, "Tagged note");
 }
 
+// ------------------------------------------------------------ notebooks
+
+#[tokio::test]
+async fn duplicate_sibling_notebook_name_is_a_typed_error() {
+    let (repo, _dir) = test_repo().await;
+
+    repo.create_notebook(None, "Work").await.unwrap();
+    let err = repo.create_notebook(None, "Work").await.unwrap_err();
+    assert!(matches!(
+        err,
+        notas::core::error::Error::NotebookNameExists(name) if name == "Work"
+    ));
+
+    // Renaming onto an existing sibling name is the same typed error.
+    let other = repo.create_notebook(None, "Other").await.unwrap();
+    let err = repo.rename_notebook(other.id, "Work").await.unwrap_err();
+    assert!(matches!(
+        err,
+        notas::core::error::Error::NotebookNameExists(name) if name == "Work"
+    ));
+}
+
+#[tokio::test]
+async fn same_notebook_name_under_different_parents_is_allowed() {
+    let (repo, _dir) = test_repo().await;
+
+    let outer = repo.create_notebook(None, "Outer").await.unwrap();
+    let nested = repo
+        .create_notebook(Some(NotebookId(outer.id.0)), "Work")
+        .await
+        .unwrap();
+    assert_eq!(nested.name, "Work");
+}
+
+#[tokio::test]
+async fn notebook_names_are_trimmed_and_validated() {
+    let (repo, _dir) = test_repo().await;
+
+    // Stored trimmed; empty and separator names are rejected up front.
+    let nb = repo.create_notebook(None, "  Work  ").await.unwrap();
+    assert_eq!(nb.name, "Work");
+
+    for bad in ["", "   ", "a/b", "a\\b"] {
+        let err = repo.create_notebook(None, bad).await.unwrap_err();
+        assert!(
+            matches!(err, notas::core::error::Error::InvalidInput(_)),
+            "{bad:?} must be rejected as invalid input"
+        );
+    }
+    let err = repo.rename_notebook(nb.id, "x/y").await.unwrap_err();
+    assert!(matches!(err, notas::core::error::Error::InvalidInput(_)));
+}
+
 // --------------------------------------------------------------- export
 
 #[tokio::test]

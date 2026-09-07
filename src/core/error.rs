@@ -36,6 +36,10 @@ pub enum Error {
     #[error("notebook with id {0} does not exist")]
     NotebookNotFound(NotebookId),
 
+    /// A notebook with this name already exists under the same parent.
+    #[error("a notebook named \"{0}\" already exists at this level")]
+    NotebookNameExists(String),
+
     /// A tag that was expected to exist does not (anymore).
     #[error("tag with id {0} does not exist")]
     TagNotFound(TagId),

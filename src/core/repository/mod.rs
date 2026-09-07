@@ -46,7 +46,10 @@ impl Repository {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::core::error::Error::Database`] when the insert fails.
+    /// Returns [`crate::core::error::Error::InvalidInput`] when the name is
+    /// empty or contains a path separator, [`crate::core::error::Error::NotebookNameExists`]
+    /// when a sibling notebook already carries the name, or
+    /// [`crate::core::error::Error::Database`] on other failures.
     pub async fn create_notebook(
         &self,
         parent_id: Option<NotebookId>,
@@ -60,7 +63,11 @@ impl Repository {
     /// # Errors
     ///
     /// Returns [`crate::core::error::Error::NotebookNotFound`] when the notebook
-    /// does not exist, or [`crate::core::error::Error::Database`] on failure.
+    /// does not exist, [`crate::core::error::Error::InvalidInput`] when the name
+    /// is empty or contains a path separator,
+    /// [`crate::core::error::Error::NotebookNameExists`] when a sibling notebook
+    /// already carries the name, or [`crate::core::error::Error::Database`] on
+    /// other failures.
     pub async fn rename_notebook(&self, id: NotebookId, name: &str) -> Result<()> {
         notebooks::rename(&self.pool, id, name).await
     }
