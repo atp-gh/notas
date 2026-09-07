@@ -57,6 +57,14 @@ CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag_id);
 -- this device. They prevent a deleted note from "resurrecting" from the
 -- remote store on the next sync, and let other devices move their copy to
 -- the trash instead of deleting it.
+--
+-- Rows (and their remote sidecar twins) accumulate for every permanently
+-- deleted note and are deliberately never pruned: a tombstone is the only
+-- durable record that the deletion happened, so dropping it as soon as the
+-- remote agrees would let the note resurrect if the remote store ever
+-- regressed. The storage cost is a few dozen bytes per deleted note; the
+-- note's markdown body (the heavy part) is removed on the remote by the
+-- sync executor when it uploads the tombstone.
 CREATE TABLE IF NOT EXISTS sync_tombstones (
     uuid       TEXT PRIMARY KEY,
     deleted_at TEXT NOT NULL DEFAULT (datetime('now'))

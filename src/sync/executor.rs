@@ -83,6 +83,11 @@ trait SyncStore {
         cipher: Option<&Cipher>,
         sidecar: &Sidecar,
     ) -> Result<(), SyncError>;
+    /// Remove the markdown body of a permanently deleted note. The
+    /// tombstone sidecar (not this object) is the source of truth, so a
+    /// store that never held the body reports success — this call only
+    /// reclaims the space of an orphaned content blob.
+    async fn delete_md(&self, uuid: &SyncUuid) -> Result<(), SyncError>;
     /// Read the encryption verifier object, or `None` when the backend has
     /// never been encrypted (or the object was deleted).
     async fn get_verifier(&self) -> Result<Option<Vec<u8>>, SyncError>;
@@ -192,7 +197,20 @@ async fn run_sync_with(
                     updated_at: deleted_at,
                     content_hash: String::new(),
                 };
+                // The sidecar (the authoritative tombstone) goes first, so
+                // a crash in between leaves today's tolerated state: a
+                // tombstone sidecar plus an inert orphan body. Only then is
+                // the stale body removed, so a permanently deleted note
+                // never leaves its content blob behind indefinitely. The
+                // removal is best-effort: the tombstone already stands, and
+                // cleanup failures must not fail the whole sync.
                 store.put_sidecar(cipher.as_ref(), &sidecar).await?;
+                if let Err(e) = store.delete_md(&sidecar.uuid).await {
+                    eprintln!(
+                        "notas: cannot remove stale body of deleted note {}: {e}",
+                        sidecar.uuid
+                    );
+                }
                 stats.uploaded += 1;
             }
         }
@@ -349,6 +367,10 @@ impl SyncStore for S3Store {
         sidecar: &Sidecar,
     ) -> Result<(), SyncError> {
         put_sidecar(&self.client, &self.bucket, &self.prefix, cipher, sidecar).await
+    }
+
+    async fn delete_md(&self, uuid: &SyncUuid) -> Result<(), SyncError> {
+        delete_md(&self.client, &self.bucket, &self.prefix, uuid.as_str()).await
     }
 
     async fn get_verifier(&self) -> Result<Option<Vec<u8>>, SyncError> {
@@ -557,6 +579,23 @@ async fn put_sidecar(
         .content_type("application/json")
         .map_err(|e| SyncError::transport(format!("{e:#}")))?
         .body_bytes(body)
+        .send()
+        .await
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?;
+    Ok(())
+}
+
+/// Remove the markdown body of a deleted note from the store. S3 object
+/// deletion is idempotent: a body that is already gone still succeeds.
+async fn delete_md(
+    client: &S3Client,
+    bucket: &str,
+    prefix: &str,
+    uuid: &str,
+) -> Result<(), SyncError> {
+    client
+        .objects()
+        .delete(bucket, md_key(prefix, uuid))
         .send()
         .await
         .map_err(|e| SyncError::transport(format!("{e:#}")))?;
@@ -822,6 +861,23 @@ impl WebDavStore {
         self.put(&self.verifier_path(), "application/json", bytes.to_vec())
             .await
     }
+
+    /// Remove the markdown body of a deleted note. A 404 (the body was
+    /// already removed, or this backend never held it) counts as success:
+    /// only the tombstone sidecar matters for correctness.
+    async fn delete_note_md(&self, uuid: &SyncUuid) -> Result<(), SyncError> {
+        let path = format!("{}/{}.md", self.notes_collection(), uuid);
+        let response = self.client.delete_raw(&path).await.map_err(webdav_error)?;
+        let code = response.status().as_u16();
+        if response.status().is_success() || code == 404 {
+            Ok(())
+        } else {
+            Err(webdav_status_error(
+                &format!("delete note body {uuid}"),
+                code,
+            ))
+        }
+    }
 }
 
 impl SyncStore for WebDavStore {
@@ -912,6 +968,10 @@ impl SyncStore for WebDavStore {
             .map_err(|e| SyncError::transport(format!("cannot encode the sidecar: {e}")))?;
         let body = encrypt_body(cipher, json.as_bytes())?;
         self.put(&path, "application/json", body).await
+    }
+
+    async fn delete_md(&self, uuid: &SyncUuid) -> Result<(), SyncError> {
+        self.delete_note_md(uuid).await
     }
 
     async fn get_verifier(&self) -> Result<Option<Vec<u8>>, SyncError> {
@@ -1374,6 +1434,92 @@ mod webdav_tests {
         assert_eq!(stats.trashed, 1);
         assert_eq!(repo.list_all_notes().await.unwrap().len(), 0);
         assert_eq!(repo.list_trashed().await.unwrap().len(), 1);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn webdav_executor_uploads_a_tombstone_and_removes_the_stale_body() {
+        // A note permanently deleted locally while the remote still holds a
+        // stale (non-deleted) copy: the sync must write the tombstone
+        // sidecar and then delete the orphaned markdown body.
+        let server = MockServer::start().await;
+        accept_mkcol(&server).await;
+        let uuid = SyncUuid::new("01234567-89ab-4cde-8f01-23456789abcd");
+        let md_href = format!("/notas/notes/{uuid}.md");
+        let meta_href = format!("/notas/meta/{uuid}.json");
+        let stale = Sidecar {
+            uuid: uuid.clone(),
+            title: "Stale".into(),
+            notebook: None,
+            tags: Vec::new(),
+            trashed: false,
+            deleted: false,
+            updated_at: "2000-01-01 00:00:00".into(),
+            content_hash: content_hash("stale body"),
+        };
+
+        Mock::given(method("PROPFIND"))
+            .and(path("/notas/notes"))
+            .respond_with(
+                ResponseTemplate::new(207)
+                    .set_body_string(multistatus(std::slice::from_ref(&md_href))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("PROPFIND"))
+            .and(path("/notas/meta"))
+            .respond_with(
+                ResponseTemplate::new(207)
+                    .set_body_string(multistatus(std::slice::from_ref(&meta_href))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/notas/meta/{uuid}.json")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(serde_json::to_string(&stale).unwrap()),
+            )
+            .mount(&server)
+            .await;
+        // The tombstone sidecar replaces the stale meta, and the stale md
+        // body is deleted — each exactly once.
+        Mock::given(method("PUT"))
+            .and(path(format!("/notas/meta/{uuid}.json")))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(format!("/notas/notes/{uuid}.md")))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = temp_db_dir("tomb-upload");
+        let pool = database::connect(dir.join("a.db")).await.unwrap();
+        let repo = Repository::new(pool.clone());
+        let note = repo.create_note(None, "Gone").await.unwrap();
+        repo.ensure_note_uuids().await.unwrap();
+        sqlx::query("UPDATE notes SET uuid = ?1 WHERE id = ?2")
+            .bind(uuid.as_str())
+            .bind(note.id.0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        repo.delete_note_forever(note.id).await.unwrap();
+
+        let settings = SyncSettings {
+            kind: SyncType::WebDAV,
+            s3: S3SyncSettings::default(),
+            webdav: webdav_settings(&server.uri()),
+            encryption: EncryptionSettings::default(),
+            last_synced_at: String::new(),
+        };
+        let stats = run_sync(&repo, &settings).await.expect("webdav sync");
+        assert_eq!(stats.uploaded, 1);
+        server.verify().await;
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }

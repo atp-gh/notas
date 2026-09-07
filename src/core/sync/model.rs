@@ -256,6 +256,10 @@ pub enum SyncAction {
         sidecar: Sidecar,
     },
     /// Upload a tombstone sidecar for a note permanently deleted locally.
+    ///
+    /// The executor writes the `deleted` sidecar (the authoritative state)
+    /// and then removes the note's markdown body from the store, so a
+    /// permanent deletion does not leave an orphaned content blob behind.
     UploadTombstone {
         /// The uuid of the deleted note.
         uuid: SyncUuid,
