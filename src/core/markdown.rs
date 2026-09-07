@@ -1,6 +1,6 @@
 //! Platform-neutral Markdown rendering data.
 
-use pulldown_cmark::{CodeBlockKind, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthStr;
 
 /// A visual style applied to a rendered Markdown span.
@@ -489,6 +489,31 @@ pub fn pad_cell(cell: &str, width: usize, align: pulldown_cmark::Alignment) -> S
         }
         _ => format!("{}{}", cell, " ".repeat(pad)),
     }
+}
+
+/// Parse Markdown into frontend-neutral styled spans.
+pub fn render(source: &str) -> RenderedMarkdown {
+    let options = Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_HEADING_ATTRIBUTES;
+    let mut renderer = Renderer::new();
+    for event in Parser::new_ext(source, options) {
+        match event {
+            Event::Start(tag) => renderer.start_tag(tag),
+            Event::End(tag) => renderer.end_tag(tag),
+            Event::Text(text) => renderer.text(&text),
+            Event::Code(text) => renderer.code(&text),
+            Event::SoftBreak | Event::HardBreak => renderer.line_break(),
+            Event::Rule => {
+                renderer.block_start();
+                renderer.emit(RULE_LINE, vec![Style::Dim]);
+            }
+            Event::TaskListMarker(checked) => renderer.task_marker(checked),
+            _ => {}
+        }
+    }
+    RenderedMarkdown::new(renderer.spans)
 }
 
 #[cfg(test)]

@@ -6,10 +6,11 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 use libadwaita as adw;
-use pulldown_cmark::{Event, Options, Parser};
 use sourceview5::prelude::*;
 
-use crate::core::markdown::{self, RenderedMarkdown, Renderer, Span, Style};
+#[cfg(test)]
+use crate::core::markdown::Span;
+use crate::core::markdown::{self, Style};
 use crate::ui::protocol::AppMsg;
 
 /// Text tags used by the Markdown preview, created once per buffer.
@@ -477,248 +478,11 @@ where
 // Markdown -> styled spans
 // ---------------------------------------------------------------------------
 
-/// Horizontal rule drawn in the preview.
-// The parser implementation is retained temporarily as a source-level
-// migration reference; `build_spans` now calls the core renderer directly.
-#[cfg(any())]
-#[allow(dead_code)]
-trait RendererOps {
-    fn start_tag(&mut self, tag: Tag);
-    fn end_tag(&mut self, tag: TagEnd);
-    fn render_table(&mut self);
-}
-
-#[cfg(any())]
-impl RendererOps for Renderer {
-    fn start_tag(&mut self, tag: Tag) {
-        match tag {
-            Tag::Paragraph => self.block_start(),
-            Tag::Heading { level, .. } => {
-                self.block_start();
-                self.heading = level as u32;
-            }
-            Tag::BlockQuote(_) => {
-                self.quote_depth += 1;
-                if self.quote_depth == 1 {
-                    self.block_start();
-                } else {
-                    self.sep(1);
-                }
-            }
-            Tag::CodeBlock(kind) => {
-                self.block_start();
-                self.code_buf = Some(String::new());
-                self.code_lang = match kind {
-                    CodeBlockKind::Fenced(info) => {
-                        let lang = info.split_whitespace().next().unwrap_or("").to_string();
-                        if lang.is_empty() { None } else { Some(lang) }
-                    }
-                    CodeBlockKind::Indented => None,
-                };
-            }
-            Tag::List(start) => {
-                if let Some(blocks) = self.item_blocks.last_mut() {
-                    *blocks += 1;
-                }
-                self.lists.push(ListState {
-                    next: start,
-                    emitted_any: false,
-                });
-            }
-            Tag::Item => {
-                let depth = self.lists.len();
-                let first_item = self.lists.last().is_none_or(|l| !l.emitted_any);
-                if first_item && depth <= 1 {
-                    self.block_start();
-                } else {
-                    self.sep(1);
-                }
-                // `Tag::List` always precedes `Tag::Item` in
-                // pulldown-cmark's event stream, so the stack is non-empty
-                // here; fall back to a plain bullet instead of panicking if
-                // that invariant ever breaks.
-                let marker = match self.lists.last_mut() {
-                    Some(list) => {
-                        list.emitted_any = true;
-                        match list.next {
-                            Some(n) => {
-                                list.next = Some(n + 1);
-                                format!("{n}. ")
-                            }
-                            None => markdown::bullet_marker(depth),
-                        }
-                    }
-                    None => markdown::bullet_marker(depth),
-                };
-                self.item_indent = " ".repeat(2 * depth.saturating_sub(1));
-                self.item_prefix = Some(format!("{}{}", self.item_indent, marker));
-                self.item_blocks.push(0);
-            }
-            Tag::Strong => self.inline.push(Style::Bold),
-            Tag::Emphasis => self.inline.push(Style::Italic),
-            Tag::Strikethrough => self.inline.push(Style::Strike),
-            Tag::Link { dest_url, .. } => {
-                self.link_url = Some(dest_url.into_string());
-                self.inline.push(Style::Link);
-            }
-            Tag::Image { .. } => {}
-            Tag::Table(alignments) => {
-                self.block_start();
-                self.table = Some(TableState {
-                    alignments,
-                    rows: Vec::new(),
-                    row: Vec::new(),
-                    cell: String::new(),
-                });
-            }
-            Tag::TableHead | Tag::TableRow => {
-                if let Some(table) = self.table.as_mut() {
-                    table.row.clear();
-                }
-            }
-            Tag::TableCell => {
-                if let Some(table) = self.table.as_mut() {
-                    table.cell.clear();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn end_tag(&mut self, tag: TagEnd) {
-        match tag {
-            TagEnd::Paragraph => {}
-            TagEnd::Heading(_) => self.heading = 0,
-            TagEnd::BlockQuote(_) => self.quote_depth = self.quote_depth.saturating_sub(1),
-            TagEnd::CodeBlock => {
-                if let Some(buf) = self.code_buf.take() {
-                    let code = buf.trim_end_matches('\n');
-                    let lang = self.code_lang.take();
-                    if !code.is_empty() || lang.is_some() {
-                        let mut styles = self.separator_styles();
-                        styles.push(Style::CodeBlock);
-                        if let Some(lang) = lang {
-                            let mut lang_styles = styles.clone();
-                            lang_styles.push(Style::Dim);
-                            self.emit(&format!("{lang}\n"), lang_styles);
-                        }
-                        if !code.is_empty() {
-                            self.emit(code, styles);
-                        }
-                    }
-                }
-            }
-            TagEnd::List(_) => {
-                self.lists.pop();
-            }
-            TagEnd::Item => {
-                if self.item_blocks.last() == Some(&0) {
-                    // Empty item: keep the lone bullet.
-                    self.flush_prefix();
-                }
-                self.item_prefix = None;
-                self.item_blocks.pop();
-            }
-            TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough => {
-                self.inline.pop();
-            }
-            TagEnd::Link => {
-                self.inline.pop();
-                self.link_url = None;
-            }
-            TagEnd::Table => self.render_table(),
-            TagEnd::TableHead | TagEnd::TableRow => {
-                if let Some(table) = self.table.as_mut() {
-                    let row = std::mem::take(&mut table.row);
-                    table.rows.push(row);
-                }
-            }
-            TagEnd::TableCell => {
-                if let Some(table) = self.table.as_mut() {
-                    let cell = std::mem::take(&mut table.cell);
-                    table.row.push(cell);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// Lay the buffered table out as aligned, padded rows.
-    fn render_table(&mut self) {
-        let Some(table) = self.table.take() else {
-            return;
-        };
-        if table.rows.is_empty() {
-            return;
-        }
-
-        let cols = table
-            .alignments
-            .len()
-            .max(table.rows.iter().map(Vec::len).max().unwrap_or(0));
-        let mut widths = vec![0usize; cols];
-        for row in &table.rows {
-            for (i, cell) in row.iter().enumerate() {
-                widths[i] = widths[i].max(cell.width());
-            }
-        }
-
-        let mut lines: Vec<(String, Vec<Style>)> = Vec::with_capacity(table.rows.len() + 1);
-        for (row_index, row) in table.rows.iter().enumerate() {
-            let cells: Vec<String> = (0..cols)
-                .map(|i| {
-                    markdown::pad_cell(
-                        row.get(i).map(String::as_str).unwrap_or(""),
-                        widths[i],
-                        *table.alignments.get(i).unwrap_or(&Alignment::None),
-                    )
-                })
-                .collect();
-            if row_index == 0 {
-                lines.push((cells.join(" │ "), vec![Style::Table, Style::Bold]));
-                let rule = widths
-                    .iter()
-                    .map(|w| "─".repeat(*w))
-                    .collect::<Vec<_>>()
-                    .join("─┼─");
-                lines.push((rule, vec![Style::Table, Style::Dim]));
-            } else {
-                lines.push((cells.join(" │ "), vec![Style::Table]));
-            }
-        }
-        for (i, (text, styles)) in lines.into_iter().enumerate() {
-            if i > 0 {
-                self.sep(1);
-            }
-            self.emit(&text, styles);
-        }
-    }
-}
-
 /// The bullet marker for a list item at the given nesting depth.
 /// Parse `md` into styled spans (pure; no GTK involved).
+#[cfg(test)]
 fn build_spans(md: &str) -> Vec<Span> {
-    let options = Options::ENABLE_TABLES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_HEADING_ATTRIBUTES;
-    let mut renderer = Renderer::new();
-    for event in Parser::new_ext(md, options) {
-        match event {
-            Event::Start(tag) => renderer.start_tag(tag),
-            Event::End(tag) => renderer.end_tag(tag),
-            Event::Text(text) => renderer.text(&text),
-            Event::Code(text) => renderer.code(&text),
-            Event::SoftBreak | Event::HardBreak => renderer.line_break(),
-            Event::Rule => {
-                renderer.block_start();
-                renderer.emit(markdown::RULE_LINE, vec![Style::Dim]);
-            }
-            Event::TaskListMarker(checked) => renderer.task_marker(checked),
-            _ => {}
-        }
-    }
-    renderer.spans
+    markdown::render(md).spans().to_vec()
 }
 
 // ---------------------------------------------------------------------------
@@ -772,7 +536,7 @@ pub fn render_markdown(buffer: &gtk::TextBuffer, tags: &PreviewTags, md: &str) {
     buffer.set_text("");
     let mut link_ranges = Vec::new();
     let mut end = buffer.end_iter();
-    let rendered = RenderedMarkdown::new(build_spans(md));
+    let rendered = markdown::render(md);
     for span in rendered.spans() {
         // `insert` invalidates `start`, so remember the offset and rebuild
         // the iterator afterwards instead of copying it (copying produced
