@@ -7,6 +7,7 @@ use sqlx::SqlitePool;
 
 use crate::core::error::Result;
 use crate::core::model::NoteId;
+use crate::core::repository::tags::replace_note_tags;
 use crate::core::sync::{LocalNote, Sidecar, SyncUuid};
 
 /// Assign a uuid to every note that does not have one yet (notes created
@@ -261,38 +262,5 @@ pub(crate) async fn trash_note_by_uuid_no_bump(pool: &SqlitePool, uuid: &str) ->
         .bind(uuid)
         .execute(pool)
         .await?;
-    Ok(())
-}
-
-/// Replace a note's tags inside an open transaction. Tags are created on
-/// demand; empty names are skipped.
-async fn replace_note_tags(
-    tx: &mut sqlx::SqliteConnection,
-    note_id: NoteId,
-    names: &[String],
-) -> Result<()> {
-    sqlx::query("DELETE FROM note_tags WHERE note_id = ?")
-        .bind(note_id)
-        .execute(&mut *tx)
-        .await?;
-    for name in names {
-        let name = name.trim();
-        if name.is_empty() {
-            continue;
-        }
-        sqlx::query("INSERT OR IGNORE INTO tags (name) VALUES (?)")
-            .bind(name)
-            .execute(&mut *tx)
-            .await?;
-        let tag_id: i64 = sqlx::query_scalar("SELECT id FROM tags WHERE name = ?")
-            .bind(name)
-            .fetch_one(&mut *tx)
-            .await?;
-        sqlx::query("INSERT OR IGNORE INTO note_tags (note_id, tag_id) VALUES (?, ?)")
-            .bind(note_id)
-            .bind(tag_id)
-            .execute(&mut *tx)
-            .await?;
-    }
     Ok(())
 }

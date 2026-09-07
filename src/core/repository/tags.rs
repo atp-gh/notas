@@ -47,11 +47,27 @@ pub(crate) async fn set_for_note(
         .await?;
     exists.ok_or(crate::core::error::Error::NoteNotFound(note_id))?;
 
+    replace_note_tags(&mut tx, note_id, names).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Replace a note's tags inside a caller-owned transaction: clear its
+/// `note_tags` links, then attach the given names — creating tags on
+/// demand and skipping empty names.
+///
+/// The note row must already exist; [`set_for_note`] checks that up front,
+/// and the sync appliers have just selected or inserted the note row in
+/// the same transaction.
+pub(crate) async fn replace_note_tags(
+    tx: &mut sqlx::SqliteConnection,
+    note_id: NoteId,
+    names: &[String],
+) -> Result<()> {
     sqlx::query("DELETE FROM note_tags WHERE note_id = ?")
         .bind(note_id)
         .execute(&mut *tx)
         .await?;
-
     for name in names {
         let name = name.trim();
         if name.is_empty() {
@@ -71,8 +87,6 @@ pub(crate) async fn set_for_note(
             .execute(&mut *tx)
             .await?;
     }
-
-    tx.commit().await?;
     Ok(())
 }
 
