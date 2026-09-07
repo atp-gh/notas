@@ -1309,24 +1309,12 @@ impl App {
     }
 
     fn rebuild_tag_editor(&self) {
-        clear_flow(&self.widgets.tag_editor_flow);
-        let names: Vec<String> = self.note_tags.iter().map(|t| t.name.clone()).collect();
-        for tag in &self.note_tags {
-            let chip = gtk::Button::with_label(&format!("× {}", tag.name));
-            chip.add_css_class("pill");
-            let sender = self.ui_sender.clone();
-            let names = names.clone();
-            let current = self.current_note;
-            let tag_name = tag.name.clone();
-            chip.connect_clicked(move |_| {
-                if current.is_some() {
-                    let remaining: Vec<String> =
-                        names.iter().filter(|n| **n != tag_name).cloned().collect();
-                    let _ = sender.send(AppMsg::TagsEdited(remaining));
-                }
-            });
-            self.widgets.tag_editor_flow.append(&chip);
-        }
+        crate::notes::tag_editor::render(
+            &self.widgets.tag_editor_flow,
+            &self.note_tags,
+            self.current_note,
+            &self.ui_sender,
+        );
     }
 }
 

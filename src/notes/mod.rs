@@ -7,6 +7,7 @@
 pub(crate) mod list;
 pub(crate) mod notebook;
 pub(crate) mod sidebar;
+pub(crate) mod tag_editor;
 
 use gtk::prelude::*;
 use relm4::RelmWidgetExt;
