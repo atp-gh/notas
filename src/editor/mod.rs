@@ -6,11 +6,10 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 use libadwaita as adw;
-use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Parser};
 use sourceview5::prelude::*;
-use unicode_width::UnicodeWidthStr;
 
-use crate::core::markdown::{self, ListState, RenderedMarkdown, Renderer, Span, Style, TableState};
+use crate::core::markdown::{self, RenderedMarkdown, Renderer, Span, Style};
 use crate::ui::protocol::AppMsg;
 
 /// Text tags used by the Markdown preview, created once per buffer.
@@ -479,6 +478,9 @@ where
 // ---------------------------------------------------------------------------
 
 /// Horizontal rule drawn in the preview.
+// The parser implementation is retained temporarily as a source-level
+// migration reference; `build_spans` now calls the core renderer directly.
+#[cfg(any())]
 #[allow(dead_code)]
 trait RendererOps {
     fn start_tag(&mut self, tag: Tag);
@@ -486,6 +488,7 @@ trait RendererOps {
     fn render_table(&mut self);
 }
 
+#[cfg(any())]
 impl RendererOps for Renderer {
     fn start_tag(&mut self, tag: Tag) {
         match tag {
