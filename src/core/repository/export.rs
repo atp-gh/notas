@@ -93,12 +93,16 @@ pub fn frontmatter(note: &Note) -> String {
 /// different notebooks both keep their name, while a third "Todo" in the
 /// same notebook becomes `Todo-1.md`.
 pub fn plan(notebooks: &[Notebook], notes: &[Note]) -> Vec<PlannedFile> {
-    // 1. Parent lookup by id; the plan must not depend on the input order,
-    //    so a child can be processed before its parent.
-    let mut parent_by_id: HashMap<i64, Option<i64>> = HashMap::new();
-    for nb in notebooks {
-        parent_by_id.insert(nb.id.0, nb.parent_id.map(|p| p.0));
-    }
+    // 1. Lookups by id; the plan must not depend on the input order, so a
+    //    child can be processed before its parent.
+    let parent_by_id: HashMap<i64, Option<i64>> = notebooks
+        .iter()
+        .map(|nb| (nb.id.0, nb.parent_id.map(|p| p.0)))
+        .collect();
+    let name_by_id: HashMap<i64, &str> = notebooks
+        .iter()
+        .map(|nb| (nb.id.0, nb.name.as_str()))
+        .collect();
 
     // 2. Directory for one notebook = sanitized parent chain + own name.
     //    Cycles are broken defensively with a depth guard (the schema
@@ -112,12 +116,8 @@ pub fn plan(notebooks: &[Notebook], notes: &[Note]) -> Vec<PlannedFile> {
             let Some(parent) = parent_by_id.get(&nb_id) else {
                 break;
             };
-            let name = notebooks
-                .iter()
-                .find(|nb| nb.id.0 == nb_id)
-                .map(|nb| sanitize_component(&nb.name));
-            if let Some(name) = name {
-                chain.push(name);
+            if let Some(name) = name_by_id.get(&nb_id) {
+                chain.push(sanitize_component(name));
             }
             current = *parent;
             guard += 1;
