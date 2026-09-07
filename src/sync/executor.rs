@@ -1104,7 +1104,8 @@ mod webdav_tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::application::config::EncryptionSettings;
-    use crate::storage::{db, repo};
+    use crate::core::database;
+    use crate::core::repository::Repository;
 
     /// Test settings pointing at the mock server (plain http, so the
     /// insecure-TLS option is on).
@@ -1182,13 +1183,14 @@ mod webdav_tests {
             .await;
 
         let dir = temp_db_dir("upload");
-        let pool = db::connect(dir.join("a.db")).await.unwrap();
-        let note = repo::create_note(&pool, None, "Hello").await.unwrap();
-        repo::update_note(&pool, note.id.0, "Hello", "body one")
+        let pool = database::connect(dir.join("a.db")).await.unwrap();
+        let repo = Repository::new(pool.clone());
+        let note = repo.create_note(None, "Hello").await.unwrap();
+        repo.update_note(note.id, "Hello", "body one")
             .await
             .unwrap();
-        repo::ensure_note_uuids(&pool).await.unwrap();
-        let uuid = repo::sync_local_index(&pool).await.unwrap()[0].uuid.clone();
+        repo.ensure_note_uuids().await.unwrap();
+        let uuid = repo.sync_local_index().await.unwrap()[0].uuid.clone();
 
         // The two PUTs the upload performs, with the right content types.
         let md_path = format!("/notas/notes/{uuid}.md");
@@ -1275,7 +1277,8 @@ mod webdav_tests {
             .await;
 
         let dir = temp_db_dir("download");
-        let pool = db::connect(dir.join("a.db")).await.unwrap();
+        let pool = database::connect(dir.join("a.db")).await.unwrap();
+        let repo = Repository::new(pool.clone());
         let settings = SyncSettings {
             kind: SyncType::WebDAV,
             s3: S3SyncSettings::default(),
@@ -1286,7 +1289,7 @@ mod webdav_tests {
         let stats = run_sync(&pool, &settings).await.expect("webdav sync");
         assert_eq!(stats.downloaded, 1);
 
-        let notes = repo::list_all_notes(&pool).await.unwrap();
+        let notes = repo.list_all_notes().await.unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].title, "Remote");
         assert_eq!(notes[0].content, "remote body");
@@ -1337,14 +1340,13 @@ mod webdav_tests {
             .await;
 
         let dir = temp_db_dir("trash");
-        let pool = db::connect(dir.join("a.db")).await.unwrap();
+        let pool = database::connect(dir.join("a.db")).await.unwrap();
+        let repo = Repository::new(pool.clone());
         // A local note with the tombstone's uuid that predates it (old
         // timestamp): the planner must trash it locally, not re-upload.
-        let note = repo::create_note(&pool, None, "Old").await.unwrap();
-        repo::update_note(&pool, note.id.0, "Old", "old body")
-            .await
-            .unwrap();
-        repo::ensure_note_uuids(&pool).await.unwrap();
+        let note = repo.create_note(None, "Old").await.unwrap();
+        repo.update_note(note.id, "Old", "old body").await.unwrap();
+        repo.ensure_note_uuids().await.unwrap();
         sqlx::query("UPDATE notes SET uuid = ?1, updated_at = '2000-01-01 00:00:00' WHERE id = ?2")
             .bind(&uuid)
             .bind(note.id.0)
@@ -1361,8 +1363,8 @@ mod webdav_tests {
         };
         let stats = run_sync(&pool, &settings).await.expect("webdav sync");
         assert_eq!(stats.trashed, 1);
-        assert_eq!(repo::list_all_notes(&pool).await.unwrap().len(), 0);
-        assert_eq!(repo::list_trashed(&pool).await.unwrap().len(), 1);
+        assert_eq!(repo.list_all_notes().await.unwrap().len(), 0);
+        assert_eq!(repo.list_trashed().await.unwrap().len(), 1);
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1377,7 +1379,8 @@ mod webdav_tests {
             .await;
 
         let dir = temp_db_dir("auth");
-        let pool = db::connect(dir.join("a.db")).await.unwrap();
+        let pool = database::connect(dir.join("a.db")).await.unwrap();
+        let _repo = Repository::new(pool.clone());
         let settings = SyncSettings {
             kind: SyncType::WebDAV,
             s3: S3SyncSettings::default(),
@@ -1463,13 +1466,14 @@ mod webdav_tests {
             .await;
 
         let dir = temp_db_dir("enc-upload");
-        let pool = db::connect(dir.join("a.db")).await.unwrap();
-        let note = repo::create_note(&pool, None, "Hello").await.unwrap();
-        repo::update_note(&pool, note.id.0, "Hello", "body one")
+        let pool = database::connect(dir.join("a.db")).await.unwrap();
+        let repo = Repository::new(pool.clone());
+        let note = repo.create_note(None, "Hello").await.unwrap();
+        repo.update_note(note.id, "Hello", "body one")
             .await
             .unwrap();
-        repo::ensure_note_uuids(&pool).await.unwrap();
-        let uuid = repo::sync_local_index(&pool).await.unwrap()[0].uuid.clone();
+        repo.ensure_note_uuids().await.unwrap();
+        let uuid = repo.sync_local_index().await.unwrap()[0].uuid.clone();
 
         let verifier_path = "/notas/meta/.encryption-verifier";
         // A fresh backend: no verifier yet, so the sync establishes one.
@@ -1561,12 +1565,13 @@ mod webdav_tests {
             .await;
 
         let dir = temp_db_dir("enc-download");
-        let pool = db::connect(dir.join("a.db")).await.unwrap();
+        let pool = database::connect(dir.join("a.db")).await.unwrap();
+        let repo = Repository::new(pool.clone());
         let settings = encrypted_settings(&server.uri(), ENC_PASSWORD);
         let stats = run_sync(&pool, &settings).await.expect("encrypted sync");
         assert_eq!(stats.downloaded, 1);
 
-        let notes = repo::list_all_notes(&pool).await.unwrap();
+        let notes = repo.list_all_notes().await.unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].title, "Remote");
         assert_eq!(notes[0].content, "remote body");
@@ -1645,7 +1650,8 @@ mod webdav_tests {
             .await;
 
         let dir = temp_db_dir("enc-skip-body");
-        let pool = db::connect(dir.join("a.db")).await.unwrap();
+        let pool = database::connect(dir.join("a.db")).await.unwrap();
+        let repo = Repository::new(pool.clone());
         let settings = encrypted_settings(&server.uri(), ENC_PASSWORD);
         let stats = run_sync(&pool, &settings)
             .await
@@ -1655,7 +1661,7 @@ mod webdav_tests {
         // sync itself did not fail and nothing else was recorded.
         assert_eq!(stats.downloaded, 1);
         assert_eq!(stats.conflicts, 0);
-        let notes = repo::list_all_notes(&pool).await.unwrap();
+        let notes = repo.list_all_notes().await.unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].title, "Good");
         assert_eq!(notes[0].content, "good body");
@@ -1687,7 +1693,8 @@ mod webdav_tests {
             .await;
 
         let dir = temp_db_dir("enc-wrong-pw");
-        let pool = db::connect(dir.join("a.db")).await.unwrap();
+        let pool = database::connect(dir.join("a.db")).await.unwrap();
+        let _repo = Repository::new(pool.clone());
         let settings = encrypted_settings(&server.uri(), "not the right password");
         let err = run_sync(&pool, &settings).await.unwrap_err();
         assert!(err.to_string().contains("password"), "{err}");
@@ -1716,7 +1723,8 @@ mod webdav_tests {
             .await;
 
         let dir = temp_db_dir("enc-refuse");
-        let pool = db::connect(dir.join("a.db")).await.unwrap();
+        let pool = database::connect(dir.join("a.db")).await.unwrap();
+        let _repo = Repository::new(pool.clone());
         // Encryption disabled: syncing would upload plaintext over the
         // encrypted remote data, so the sync must refuse instead.
         let settings = SyncSettings {
@@ -1802,12 +1810,11 @@ mod webdav_tests {
             .await;
 
         let dir = temp_db_dir("enc-migrate");
-        let pool = db::connect(dir.join("a.db")).await.unwrap();
-        let note = repo::create_note(&pool, None, "Old").await.unwrap();
-        repo::update_note(&pool, note.id.0, "Old", "old body")
-            .await
-            .unwrap();
-        repo::ensure_note_uuids(&pool).await.unwrap();
+        let pool = database::connect(dir.join("a.db")).await.unwrap();
+        let repo = Repository::new(pool.clone());
+        let note = repo.create_note(None, "Old").await.unwrap();
+        repo.update_note(note.id, "Old", "old body").await.unwrap();
+        repo.ensure_note_uuids().await.unwrap();
         sqlx::query("UPDATE notes SET uuid = ?1 WHERE id = ?2")
             .bind(&uuid)
             .bind(note.id.0)
@@ -1830,7 +1837,8 @@ mod webdav_tests {
 mod e2e_tests {
     use super::*;
     use crate::application::config::EncryptionSettings;
-    use crate::storage::{db, repo};
+    use crate::core::database;
+    use crate::core::repository::Repository;
 
     /// End-to-end sync between two fresh databases through a real
     /// S3-compatible store. Manual: needs one running locally, e.g.
@@ -1890,19 +1898,21 @@ mod e2e_tests {
         // Two devices, each with its own fresh database.
         let dir = std::env::temp_dir().join(format!("notas-sync-e2e-{unique}"));
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let pool_a = db::connect(dir.join("a.db")).await.expect("db a");
-        let pool_b = db::connect(dir.join("b.db")).await.expect("db b");
+        let pool_a = database::connect(dir.join("a.db")).await.expect("db a");
+        let pool_b = database::connect(dir.join("b.db")).await.expect("db b");
+        let repo_a = Repository::new(pool_a.clone());
+        let repo_b = Repository::new(pool_b.clone());
 
         // --- device A: two notes, one in a notebook, one tagged --------
-        let nb = repo::create_notebook(&pool_a, None, "Work").await.unwrap();
-        let n1 = repo::create_note(&pool_a, Some(nb.id.0), "Hello")
+        let nb = repo_a.create_notebook(None, "Work").await.unwrap();
+        let n1 = repo_a.create_note(Some(nb.id), "Hello").await.unwrap();
+        repo_a
+            .update_note(n1.id, "Hello", "body one")
             .await
             .unwrap();
-        repo::update_note(&pool_a, n1.id.0, "Hello", "body one")
-            .await
-            .unwrap();
-        let n2 = repo::create_note(&pool_a, None, "Second").await.unwrap();
-        repo::set_note_tags(&pool_a, n2.id.0, &["meta".to_string()])
+        let n2 = repo_a.create_note(None, "Second").await.unwrap();
+        repo_a
+            .set_note_tags(n2.id, &["meta".to_string()])
             .await
             .unwrap();
 
@@ -1913,7 +1923,7 @@ mod e2e_tests {
         // --- device B: pulls everything ----------------------------------
         let stats = run_sync(&pool_b, &settings).await.expect("B sync #1");
         assert_eq!(stats.downloaded, 2, "B downloads both notes");
-        let notes_b = repo::list_all_notes(&pool_b).await.unwrap();
+        let notes_b = repo_b.list_all_notes().await.unwrap();
         assert_eq!(notes_b.len(), 2);
         let hello_b = notes_b
             .iter()
@@ -1921,13 +1931,13 @@ mod e2e_tests {
             .expect("Hello on B");
         assert_eq!(hello_b.content, "body one");
         assert!(hello_b.notebook_id.is_some(), "note keeps its notebook");
-        let tags_b = repo::get_note_tags(&pool_b, hello_b.id.0).await.unwrap();
+        let tags_b = repo_b.get_note_tags(hello_b.id).await.unwrap();
         assert!(tags_b.is_empty());
         let second_b = notes_b
             .iter()
             .find(|n| n.title == "Second")
             .expect("Second on B");
-        let tags_b = repo::get_note_tags(&pool_b, second_b.id.0).await.unwrap();
+        let tags_b = repo_b.get_note_tags(second_b.id).await.unwrap();
         assert_eq!(
             tags_b.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
             vec!["meta"]
@@ -1935,17 +1945,18 @@ mod e2e_tests {
 
         // --- device B edits and creates; A picks it up --------------------
         tokio::time::sleep(Duration::from_secs(1)).await;
-        repo::update_note(&pool_b, hello_b.id.0, "Hello", "edited on B")
+        repo_b
+            .update_note(hello_b.id, "Hello", "edited on B")
             .await
             .unwrap();
-        repo::create_note(&pool_b, None, "From B").await.unwrap();
+        repo_b.create_note(None, "From B").await.unwrap();
         let stats = run_sync(&pool_b, &settings).await.expect("B sync #2");
         assert_eq!(stats.uploaded, 2, "B uploads edit + new note");
 
         tokio::time::sleep(Duration::from_secs(1)).await;
         let stats = run_sync(&pool_a, &settings).await.expect("A sync #2");
         assert_eq!(stats.downloaded, 2, "A downloads B's edit + new note");
-        let notes_a = repo::list_all_notes(&pool_a).await.unwrap();
+        let notes_a = repo_a.list_all_notes().await.unwrap();
         assert_eq!(notes_a.len(), 3);
         let hello_a = notes_a
             .iter()
@@ -1955,15 +1966,15 @@ mod e2e_tests {
 
         // --- device A deletes forever; B's copy goes to the trash ---------
         tokio::time::sleep(Duration::from_secs(1)).await;
-        repo::delete_note_forever(&pool_a, n2.id.0).await.unwrap();
+        repo_a.delete_note_forever(n2.id).await.unwrap();
         let stats = run_sync(&pool_a, &settings).await.expect("A sync #3");
         assert!(stats.uploaded >= 1, "A uploads the tombstone");
 
         tokio::time::sleep(Duration::from_secs(1)).await;
         let stats = run_sync(&pool_b, &settings).await.expect("B sync #3");
         assert_eq!(stats.trashed, 1, "B trashes the deleted note");
-        assert_eq!(repo::list_all_notes(&pool_b).await.unwrap().len(), 2);
-        assert_eq!(repo::list_trashed(&pool_b).await.unwrap().len(), 1);
+        assert_eq!(repo_b.list_all_notes().await.unwrap().len(), 2);
+        assert_eq!(repo_b.list_trashed().await.unwrap().len(), 1);
 
         // --- a second sync is a no-op --------------------------------------
         let stats = run_sync(&pool_a, &settings).await.expect("A sync #4");
@@ -2034,21 +2045,22 @@ mod e2e_tests {
 
         let dir = std::env::temp_dir().join(format!("notas-sync-e2e-enc-{unique}"));
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let pool_a = db::connect(dir.join("a.db")).await.expect("db a");
-        let pool_b = db::connect(dir.join("b.db")).await.expect("db b");
+        let pool_a = database::connect(dir.join("a.db")).await.expect("db a");
+        let pool_b = database::connect(dir.join("b.db")).await.expect("db b");
+        let repo_a = Repository::new(pool_a.clone());
+        let repo_b = Repository::new(pool_b.clone());
 
         // --- device A: create + encrypt + upload -------------------------
-        let n1 = repo::create_note(&pool_a, None, "Secret").await.unwrap();
-        repo::update_note(&pool_a, n1.id.0, "Secret", "classified body")
+        let n1 = repo_a.create_note(None, "Secret").await.unwrap();
+        repo_a
+            .update_note(n1.id, "Secret", "classified body")
             .await
             .unwrap();
         let stats = run_sync(&pool_a, &settings).await.expect("A sync");
         assert_eq!(stats.uploaded, 1, "A uploads the encrypted note");
 
         // The object on the backend must not contain the plaintext.
-        let uuid = repo::sync_local_index(&pool_a).await.unwrap()[0]
-            .uuid
-            .clone();
+        let uuid = repo_a.sync_local_index().await.unwrap()[0].uuid.clone();
         let obj = client
             .objects()
             .get(&bucket, format!("notas/notes/{uuid}.md"))
@@ -2066,7 +2078,7 @@ mod e2e_tests {
         // --- device B: download + decrypt with the same password ---------
         let stats = run_sync(&pool_b, &settings).await.expect("B sync");
         assert_eq!(stats.downloaded, 1, "B downloads and decrypts the note");
-        let notes_b = repo::list_all_notes(&pool_b).await.unwrap();
+        let notes_b = repo_b.list_all_notes().await.unwrap();
         assert_eq!(notes_b.len(), 1);
         assert_eq!(notes_b[0].title, "Secret");
         assert_eq!(notes_b[0].content, "classified body");

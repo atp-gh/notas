@@ -4,7 +4,7 @@ use std::cell::RefCell;
 
 use gtk::prelude::*;
 
-use crate::domain_notes::{Note, SearchHit};
+use notas::core::model::{Note, SearchHit};
 
 /// Render regular or trashed notes into the note list.
 pub(crate) fn render_notes(

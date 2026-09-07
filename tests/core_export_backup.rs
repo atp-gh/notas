@@ -2,8 +2,8 @@
 //! `Repository` facade.
 
 use notas::core::database;
+use notas::core::model::NotebookId;
 use notas::core::repository::Repository;
-use notas::domain_notes::NotebookId;
 
 async fn repo() -> (Repository, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();

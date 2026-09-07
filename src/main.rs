@@ -10,8 +10,7 @@ mod tr;
 // binary as a thin frontend avoids compiling two distinct copies of core
 // types (which can otherwise make integration between targets surprising).
 #[allow(dead_code)]
-pub use notas::domain_notes;
-pub use notas::{application, core, markdown, search, storage, sync};
+pub use notas::{application, core, markdown, sync};
 
 use std::process::ExitCode;
 
@@ -35,7 +34,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let pool = match rt.block_on(crate::storage::db::connect(
+    let pool = match rt.block_on(notas::core::database::connect(
         platform_paths.data_dir.join("notas.db"),
     )) {
         Ok(pool) => pool,

@@ -5,8 +5,8 @@
 //! trash exclusion, and the update/delete FTS triggers.
 
 use notas::core::database;
+use notas::core::model::Note;
 use notas::core::repository::Repository;
-use notas::domain_notes::Note;
 
 async fn repo() -> (Repository, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -65,7 +65,9 @@ async fn unicode_content_is_searchable() {
     // Mixed-script content still tokenizes on script boundaries and
     // whitespace.
     let note = repo.create_note(None, "grüße").await.unwrap();
-    repo.update_note(note.id, "grüße", "naïve café").await.unwrap();
+    repo.update_note(note.id, "grüße", "naïve café")
+        .await
+        .unwrap();
     assert_eq!(repo.search("café").await.unwrap().len(), 1);
 }
 

@@ -1,6 +1,6 @@
 //! GTK notebook tree rendering.
 
-use notas::domain_notes::Notebook;
+use notas::core::model::Notebook;
 
 /// Rebuild a notebook tree from the core model list.
 #[expect(

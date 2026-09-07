@@ -34,9 +34,27 @@ cargo build --release
 
 ## Architecture
 
-The application is a single Cargo package with one `src/` tree. `src/core/` is the platform-neutral application layer: command/event contracts and shared state. Its sibling core services are `notes/`, `storage/`, `search/`, and `sync/` (planner, S3/WebDAV executor, and `crypto`). None of these modules import GTK. The remaining directories contain the GTK frontend and platform adapters: `app/`, `editor/`, `ui/`, and `platform/{linux,windows,macos}.rs`.
+The application is a single Cargo package with one `src/` tree, layered so that the data core is GUI/platform-free and can be built and tested without GTK:
 
-The dependency direction is `platform/UI -> app coordinator -> core`. Core commands and events do not contain widget handles, and sync/storage code never calls GTK. The core modules are tested as part of the single package with `cargo test`.
+```text
+src/
+├── core/            # data core: SQLite database, schema & migrations, repository,
+│                    # FTS5 search, pure sync planner. No GTK, no network, no config I/O.
+├── application/     # GUI-neutral protocol: commands, events, settings, navigation,
+│                    # editor state. Depends on core, embeds no SQL or protocol details.
+├── markdown.rs      # frontend-neutral Markdown projection (pulldown-cmark -> styled spans)
+├── sync/            # infrastructure adapters: S3/WebDAV executor + crypto. Depends on core.
+├── app/             # GTK coordinator: translates commands -> repository/executor calls
+├── editor/ notes/ ui/  # GTK widgets (consume application/core results only)
+└── platform/        # OS path discovery
+```
+
+The dependency direction is `platform/UI -> app coordinator -> application -> core`, with `sync` as an infrastructure adapter into `core`. GTK4, libadwaita, sourceview5, glib, pango and relm4 are optional dependencies behind the `gui` feature (enabled by default), so the data core compiles and tests without a GTK toolchain:
+
+```bash
+cargo test --lib --no-default-features   # core + application only, no GTK
+cargo test --all-targets --all-features  # everything, including the GUI binary's tests
+```
 
 ## Sync
 
@@ -99,7 +117,7 @@ The access key / password are stored **in plaintext** in `settings.json` (like J
 
 ```bash
 # Run the full test suite (core + Markdown renderer; GUI probes are #[ignore]d)
-cargo test
+cargo test --all-targets --all-features --locked
 
 # Lint the package with warnings as errors
 cargo clippy --all-targets --all-features --locked -- -D warnings

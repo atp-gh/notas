@@ -3,7 +3,7 @@
 use gtk::prelude::*;
 
 use crate::application::AppMsg;
-use notas::domain_notes::Tag;
+use notas::core::model::Tag;
 
 /// Rebuild removable tag chips for the selected note.
 pub(crate) fn render(
