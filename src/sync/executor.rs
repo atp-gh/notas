@@ -478,9 +478,14 @@ async fn list_remote(
             }
         };
         match serde_json::from_slice::<Sidecar>(&plain) {
-            Ok(sidecar) => {
-                remote.entry(uuid).or_default().sidecar = Some(sidecar);
-            }
+            Ok(sidecar) => match sidecar.validated() {
+                Ok(valid) => {
+                    remote.entry(uuid).or_default().sidecar = Some(valid.clone());
+                }
+                Err(e) => {
+                    eprintln!("notas: ignoring invalid sidecar for {uuid}: {e}");
+                }
+            },
             Err(e) => {
                 eprintln!("notas: ignoring unparseable sidecar for {uuid}: {e}");
             }
@@ -747,7 +752,7 @@ impl WebDavStore {
             }
         };
         match serde_json::from_slice::<Sidecar>(&plain) {
-            Ok(sidecar) => Ok(Some(sidecar)),
+            Ok(sidecar) => Ok(sidecar.validated().cloned().ok()),
             Err(e) => {
                 eprintln!("notas: ignoring unparseable sidecar for {uuid}: {e}");
                 Ok(None)

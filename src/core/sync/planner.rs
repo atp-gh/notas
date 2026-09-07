@@ -39,21 +39,23 @@ pub fn content_hash(content: &str) -> String {
 
 /// Deterministic tiebreak key for the "same timestamp, same content,
 /// different metadata" case: both devices must compute the same winner or
-/// the state oscillates forever.
-fn local_meta_key(note: &LocalNote) -> (&str, Option<&str>, &[String], bool) {
+/// the state oscillates forever. Tags compare in canonical form (sorted,
+/// de-duplicated) so mere ordering differences never register as metadata
+/// changes.
+fn local_meta_key(note: &LocalNote) -> (&str, Option<&str>, Vec<String>, bool) {
     (
         note.title.as_str(),
         note.notebook.as_deref(),
-        &note.tags,
+        note.normalized_tags(),
         note.is_trashed,
     )
 }
 
-fn sidecar_meta_key(sidecar: &Sidecar) -> (&str, Option<&str>, &[String], bool) {
+fn sidecar_meta_key(sidecar: &Sidecar) -> (&str, Option<&str>, Vec<String>, bool) {
     (
         sidecar.title.as_str(),
         sidecar.notebook.as_deref(),
-        &sidecar.tags,
+        sidecar.normalized_tags(),
         sidecar.trashed,
     )
 }
@@ -157,8 +159,14 @@ pub fn plan_sync(
     }
 
     // --- remote notes with no local counterpart ---------------------------
-    for (uuid, entry) in remote {
-        if local_by_uuid.contains_key(uuid.as_str()) || tombstone_uuids.contains(uuid.as_str()) {
+    // The remote index is a HashMap: sort by uuid so the action order —
+    // and therefore the order the executor creates notes in — does not
+    // depend on hash iteration order.
+    let mut remote_uuids: Vec<&str> = remote.keys().map(String::as_str).collect();
+    remote_uuids.sort_unstable();
+    for uuid in remote_uuids {
+        let entry = &remote[uuid];
+        if local_by_uuid.contains_key(uuid) || tombstone_uuids.contains(uuid) {
             continue;
         }
         if let Some(sidecar) = &entry.sidecar
@@ -430,5 +438,55 @@ mod tests {
     fn content_hash_changes_with_content() {
         assert_ne!(content_hash("a"), content_hash("b"));
         assert_eq!(content_hash("a"), content_hash("a"));
+    }
+
+    #[test]
+    fn remote_only_actions_are_stable_across_hash_order() {
+        // Many remote-only notes: regardless of HashMap iteration order,
+        // downloads must be emitted in ascending uuid order.
+        let uuids = ["c0", "a1", "b2", "e3", "d4"];
+        let mut remote = HashMap::new();
+        for uuid in uuids {
+            let n = note(uuid, uuid, "body", "2026-01-01 10:00:00");
+            remote.insert(
+                uuid.to_owned(),
+                RemoteEntry {
+                    sidecar: Some(sidecar_of(&n)),
+                    has_md: true,
+                },
+            );
+        }
+        let actions = plan_sync(&[], &[], &remote);
+        let got: Vec<&str> = actions
+            .iter()
+            .map(|a| match a {
+                SyncAction::Download { sidecar } => sidecar.uuid.as_str(),
+                _ => panic!("expected Download, got {a:?}"),
+            })
+            .collect();
+        let mut sorted = got.clone();
+        sorted.sort_unstable();
+        assert_eq!(got, sorted, "download order must be uuid-sorted");
+    }
+
+    #[test]
+    fn planner_normalizes_unsorted_duplicate_local_tags() {
+        // Local tags arrive unsorted/duplicated from the database; the
+        // metadata comparison must not register that as a change.
+        let mut local = note("u1", "Zebra", "same", "2026-01-01 10:00:00");
+        local.tags = vec!["work".into(), "work ".into(), "alpha".into()];
+        let mut remote_note = note("u1", "Apple", "same", "2026-01-01 10:00:00");
+        remote_note.tags = vec!["alpha".into(), "work".into()];
+        let remote = remote_one(sidecar_of(&remote_note));
+        let actions = plan_sync(&[local], &[], &remote);
+        // Local title "Zebra" > remote "Apple" -> deterministic download,
+        // proving tag ordering/duplication did not masquerade as content
+        // change (which would have produced a ConflictCopy).
+        assert_eq!(
+            actions,
+            vec![SyncAction::Download {
+                sidecar: remote["u1"].sidecar.clone().unwrap()
+            }]
+        );
     }
 }
