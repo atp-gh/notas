@@ -116,6 +116,129 @@ impl Renderer {
             code_lang: None,
         }
     }
+
+    /// Declare separation before the next block.
+    pub fn block_start(&mut self) {
+        match self.item_blocks.last().copied() {
+            Some(count) => {
+                if count > 0 {
+                    self.sep(1);
+                }
+                if let Some(blocks) = self.item_blocks.last_mut() {
+                    *blocks += 1;
+                }
+            }
+            None if self.pending_sep == 0 => self.sep(2),
+            None => {}
+        }
+    }
+
+    /// Request at least `count` newlines before the next content.
+    pub fn sep(&mut self, count: usize) {
+        if !self.first {
+            self.pending_sep = self.pending_sep.max(count);
+        }
+    }
+
+    /// Styles for separator spans in the current quote context.
+    pub fn separator_styles(&self) -> Vec<Style> {
+        if self.quote_depth > 0 {
+            vec![Style::Quote(self.quote_depth)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Emit text with styles, flushing pending block separation first.
+    pub fn emit(&mut self, text: &str, styles: Vec<Style>) {
+        if text.is_empty() {
+            return;
+        }
+        if self.pending_sep > 0 {
+            self.spans.push(Span {
+                text: "\n".repeat(self.pending_sep),
+                styles: self.separator_styles(),
+                url: None,
+            });
+            self.pending_sep = 0;
+        }
+        self.first = false;
+        self.spans.push(Span {
+            text: text.to_owned(),
+            styles,
+            url: self.link_url.clone(),
+        });
+    }
+
+    /// Styles active at the current parser position.
+    pub fn context_styles(&self) -> Vec<Style> {
+        let mut styles = self.inline.clone();
+        if self.heading > 0 {
+            styles.push(Style::Heading(self.heading));
+        }
+        if self.quote_depth > 0 {
+            styles.push(Style::Quote(self.quote_depth));
+        }
+        styles
+    }
+
+    /// Emit the pending list prefix, if any.
+    pub fn flush_prefix(&mut self) {
+        if let Some(prefix) = self.item_prefix.take() {
+            self.emit(&prefix, self.separator_styles());
+        }
+    }
+
+    /// Consume a Markdown text event.
+    pub fn text(&mut self, text: &str) {
+        if let Some(table) = self.table.as_mut() {
+            table.cell.push_str(text);
+            return;
+        }
+        if let Some(buffer) = self.code_buf.as_mut() {
+            buffer.push_str(text);
+            return;
+        }
+        self.flush_prefix();
+        self.emit(text, self.context_styles());
+    }
+
+    /// Consume an inline-code event.
+    pub fn code(&mut self, code: &str) {
+        if let Some(table) = self.table.as_mut() {
+            table.cell.push_str(code);
+            return;
+        }
+        self.flush_prefix();
+        let mut styles = self.context_styles();
+        styles.push(Style::Code);
+        self.emit(code, styles);
+    }
+
+    /// Consume a soft or hard line break.
+    pub fn line_break(&mut self) {
+        if let Some(table) = self.table.as_mut() {
+            table.cell.push(' ');
+            return;
+        }
+        self.emit("\n", self.separator_styles());
+    }
+
+    /// Consume a task-list marker.
+    pub fn task_marker(&mut self, checked: bool) {
+        let marker = if checked { "[x] " } else { "[ ] " };
+        if let Some(table) = self.table.as_mut() {
+            table.cell.push_str(marker);
+            return;
+        }
+        if self.item_prefix.is_some() {
+            self.item_prefix = None;
+            let prefix = format!("{}{marker}", self.item_indent);
+            self.emit(&prefix, self.separator_styles());
+        } else {
+            self.emit(marker, Vec::new());
+        }
+    }
 }
 
 impl Default for Renderer {
