@@ -15,6 +15,13 @@ use crate::core::error::Result;
 /// Open (creating if needed) the database, bring the schema to the current
 /// version, and rebuild the FTS index if it is out of sync with the notes
 /// table.
+///
+/// # Errors
+///
+/// Returns [`crate::core::error::Error::Io`] when the parent directory
+/// cannot be created, [`crate::core::error::Error::Migration`] when the
+/// stored schema cannot be brought to the current version, and
+/// [`crate::core::error::Error::Database`] for other SQL failures.
 pub async fn connect(db_path: impl AsRef<Path>) -> Result<SqlitePool> {
     let path = db_path.as_ref().to_path_buf();
     if let Some(parent) = path.parent() {

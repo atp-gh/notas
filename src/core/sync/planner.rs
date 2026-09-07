@@ -38,6 +38,7 @@ use super::model::{LocalNote, RemoteEntry, Sidecar, SyncAction, SyncUuid};
 /// assert_ne!(content_hash("hello"), content_hash("hello!"));
 /// assert_eq!(content_hash(""), "cbf29ce484222325");
 /// ```
+#[must_use]
 pub fn content_hash(content: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in content.as_bytes() {
@@ -121,6 +122,7 @@ fn sidecar_meta_key(sidecar: &Sidecar) -> (&str, Option<&str>, Vec<String>, bool
 /// );
 /// assert!(plan_sync(&local, &[], &remote).is_empty());
 /// ```
+#[must_use]
 pub fn plan_sync(
     local: &[LocalNote],
     tombstones: &[(SyncUuid, String)],
