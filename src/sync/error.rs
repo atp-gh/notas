@@ -46,14 +46,6 @@ impl SyncError {
     }
 }
 
-/// Conversion to the legacy string seam. Kept so backend glue can migrate
-/// to [`SyncError`] incrementally; new code should match on the variants.
-impl From<SyncError> for String {
-    fn from(err: SyncError) -> Self {
-        err.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,9 +57,8 @@ mod tests {
     }
 
     #[test]
-    fn sync_error_converts_into_the_string_seam() {
+    fn configuration_error_displays_its_message() {
         let err = SyncError::configuration("backend is encrypted");
-        let message: String = err.into();
-        assert_eq!(message, "backend is encrypted");
+        assert_eq!(err.to_string(), "backend is encrypted");
     }
 }
