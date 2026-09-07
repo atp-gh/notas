@@ -9,7 +9,8 @@ mod tr;
 // Reuse the library target's single core/sync module instances. Keeping the
 // binary as a thin frontend avoids compiling two distinct copies of core
 // types (which can otherwise make integration between targets surprising).
-#[allow(dead_code)]
+// The modules below address the library as `notas::…`; this re-export only
+// pulls them into the binary as one shared instance.
 pub use notas::{application, core, markdown, sync};
 
 use std::process::ExitCode;

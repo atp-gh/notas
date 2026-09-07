@@ -30,7 +30,14 @@ pub fn paths() -> PlatformPaths {
     return macos::paths();
     #[cfg(target_os = "windows")]
     return windows::paths();
-    #[allow(unreachable_code)]
+    // Fallback for platforms without a dedicated module: keep the function
+    // type-checking on every target. The earlier returns are cfg-eliminated
+    // per platform, so this is genuinely unreachable on linux/macos/windows
+    // — and the only reachable code on any other platform.
+    #[expect(
+        unreachable_code,
+        reason = "cfg-eliminated platform returns precede it"
+    )]
     PlatformPaths {
         config_dir: PathBuf::from(".").join(".config").join("notas"),
         data_dir: PathBuf::from(".")

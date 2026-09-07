@@ -495,7 +495,7 @@ mod tests {
     /// and asserts the `AppMsg` each change emits — the same messages the
     /// app's message handler applies to the live UI and saves to disk.
     #[test]
-    #[ignore]
+    #[ignore = "manual probe: needs a display and visual inspection"]
     fn settings_window_probe() {
         gtk::init().expect("gtk init");
         adw::init().expect("adw init");

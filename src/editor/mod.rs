@@ -720,7 +720,7 @@ mod tests {
     /// the source view's vertical adjustment range inside a constrained
     /// window.
     #[test]
-    #[ignore]
+    #[ignore = "manual probe: needs a display and visual inspection"]
     fn source_view_scroll_probe() {
         gtk::init().expect("gtk init");
         adw::init().expect("adw init");
@@ -792,7 +792,7 @@ mod tests {
     /// Manual check that the editor stays editable at the widget level:
     /// `cargo test --bin notas source_view_stays_editable -- --ignored --nocapture`.
     #[test]
-    #[ignore]
+    #[ignore = "manual probe: needs a display and visual inspection"]
     fn source_view_stays_editable() {
         gtk::init().expect("gtk init");
         adw::init().expect("adw init");
@@ -832,7 +832,7 @@ mod tests {
     /// Manual visual check: `cargo test --bin notas preview_screenshot -- --ignored --nocapture`
     /// then screenshot the window from outside.
     #[test]
-    #[ignore]
+    #[ignore = "manual probe: needs a display and visual inspection"]
     fn preview_screenshot() {
         gtk::init().expect("gtk init");
         let buffer = gtk::TextBuffer::new(None);

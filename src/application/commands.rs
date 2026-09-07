@@ -8,8 +8,11 @@ use crate::application::navigation::ViewId;
 use crate::core::model::{NoteId, NotebookId, TagId};
 
 /// Commands submitted to the persistence and synchronization service.
+///
+/// The variants are self-describing payloads (one per repository intent);
+/// per-variant docs would only restate the names.
 #[derive(Debug)]
-#[allow(missing_docs)]
+#[expect(missing_docs, reason = "variant names are self-describing")]
 pub enum DbCommand {
     LoadNotebooks,
     LoadTags,
@@ -54,8 +57,11 @@ pub enum DbCommand {
 }
 
 /// Semantic commands emitted by a frontend.
+///
+/// Like [`DbCommand`], the variants are self-describing; docs would only
+/// restate the names.
 #[derive(Debug, Clone)]
-#[allow(missing_docs)]
+#[expect(missing_docs, reason = "variant names are self-describing")]
 pub enum AppCommand {
     Db(DbEvent),
     SelectView(ViewId),
