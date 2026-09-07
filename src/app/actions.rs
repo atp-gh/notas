@@ -103,14 +103,12 @@ impl App {
                 .notebooks
                 .iter()
                 .find(|n| n.id == *id)
-                .map(|n| n.name.clone())
-                .unwrap_or_else(|| tr!("Notebook").to_string()),
+                .map_or_else(|| tr!("Notebook").to_string(), |n| n.name.clone()),
             ViewMode::Tag(id) => self
                 .tags
                 .iter()
                 .find(|t| t.id == *id)
-                .map(|t| format!("#{}", t.name))
-                .unwrap_or_else(|| tr!("Tag").to_string()),
+                .map_or_else(|| tr!("Tag").to_string(), |t| format!("#{}", t.name)),
             ViewMode::Search(q) => format!("{}: {q}", tr!("Search")),
         };
         self.widgets.view_title.set_text(&title);

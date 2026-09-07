@@ -142,7 +142,7 @@ impl App {
                     self.worker.emit(DbMsg::DeleteForever(id));
                 }
             }
-            AppMsg::SaveNote => self.save_note(),
+            AppMsg::SaveNote | AppMsg::DialogSave => self.save_note(),
             AppMsg::TitleChanged | AppMsg::ContentChanged => {
                 // Decide dirtiness by comparing with the last saved state:
                 // loading a note sets the entry/buffer programmatically,
@@ -355,7 +355,6 @@ impl App {
                 self.settings.sync.encryption.password = value;
                 self.settings.save();
             }
-            AppMsg::DialogSave => self.save_note(),
             AppMsg::DialogDiscard => {
                 self.dirty = false;
                 self.set_dirty(false);
@@ -404,8 +403,8 @@ impl App {
             }
             DbEvent::NoteLoaded(note) => {
                 self.current_note = Some(note.id);
-                self.saved_title = note.title.clone();
-                self.saved_content = note.content.clone();
+                self.saved_title.clone_from(&note.title);
+                self.saved_content.clone_from(&note.content);
                 self.dirty = false;
                 self.widgets.title_entry.set_text(&note.title);
                 self.loading.set(true);
@@ -495,7 +494,10 @@ impl App {
                 Err(e) => dialogs::error(&self.widgets.window, &e),
             },
             DbEvent::SyncDone(stats) => {
-                self.settings.sync.last_synced_at = stats.last_synced_at.clone();
+                self.settings
+                    .sync
+                    .last_synced_at
+                    .clone_from(&stats.last_synced_at);
                 self.settings.save();
                 self.widgets
                     .sync_label
