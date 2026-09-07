@@ -701,8 +701,8 @@ fn build_spans(md: &str) -> Vec<Span> {
     let mut renderer = Renderer::new();
     for event in Parser::new_ext(md, options) {
         match event {
-            Event::Start(tag) => renderer.start_tag(tag),
-            Event::End(tag) => renderer.end_tag(tag),
+            Event::Start(tag) => RendererOps::start_tag(&mut renderer, tag),
+            Event::End(tag) => RendererOps::end_tag(&mut renderer, tag),
             Event::Text(text) => renderer.text(&text),
             Event::Code(text) => renderer.code(&text),
             Event::SoftBreak | Event::HardBreak => renderer.line_break(),

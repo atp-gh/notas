@@ -1,5 +1,7 @@
 //! Platform-neutral Markdown rendering data.
 
+use pulldown_cmark::{CodeBlockKind, Tag};
+
 /// A visual style applied to a rendered Markdown span.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Style {
@@ -237,6 +239,98 @@ impl Renderer {
             self.emit(&prefix, self.separator_styles());
         } else {
             self.emit(marker, Vec::new());
+        }
+    }
+
+    /// Consume a pulldown-cmark start tag.
+    pub fn start_tag(&mut self, tag: Tag<'_>) {
+        match tag {
+            Tag::Paragraph => self.block_start(),
+            Tag::Heading { level, .. } => {
+                self.block_start();
+                self.heading = level as u32;
+            }
+            Tag::BlockQuote(_) => {
+                self.quote_depth += 1;
+                if self.quote_depth == 1 {
+                    self.block_start();
+                } else {
+                    self.sep(1);
+                }
+            }
+            Tag::CodeBlock(kind) => {
+                self.block_start();
+                self.code_buf = Some(String::new());
+                self.code_lang = match kind {
+                    CodeBlockKind::Fenced(info) => {
+                        let lang = info.split_whitespace().next().unwrap_or("").to_owned();
+                        (!lang.is_empty()).then_some(lang)
+                    }
+                    CodeBlockKind::Indented => None,
+                };
+            }
+            Tag::List(start) => {
+                if let Some(blocks) = self.item_blocks.last_mut() {
+                    *blocks += 1;
+                }
+                self.lists.push(ListState {
+                    next: start,
+                    emitted_any: false,
+                });
+            }
+            Tag::Item => {
+                let depth = self.lists.len();
+                let first_item = self.lists.last().is_none_or(|list| !list.emitted_any);
+                if first_item && depth <= 1 {
+                    self.block_start();
+                } else {
+                    self.sep(1);
+                }
+                let marker = match self.lists.last_mut() {
+                    Some(list) => {
+                        list.emitted_any = true;
+                        match list.next {
+                            Some(number) => {
+                                list.next = Some(number + 1);
+                                format!("{number}. ")
+                            }
+                            None => bullet_marker(depth),
+                        }
+                    }
+                    None => bullet_marker(depth),
+                };
+                self.item_indent = " ".repeat(2 * depth.saturating_sub(1));
+                self.item_prefix = Some(format!("{}{}", self.item_indent, marker));
+                self.item_blocks.push(0);
+            }
+            Tag::Strong => self.inline.push(Style::Bold),
+            Tag::Emphasis => self.inline.push(Style::Italic),
+            Tag::Strikethrough => self.inline.push(Style::Strike),
+            Tag::Link { dest_url, .. } => {
+                self.link_url = Some(dest_url.into_string());
+                self.inline.push(Style::Link);
+            }
+            Tag::Table(alignments) => {
+                self.block_start();
+                self.table = Some(TableState {
+                    alignments,
+                    rows: Vec::new(),
+                    row: Vec::new(),
+                    cell: String::new(),
+                });
+            }
+            Tag::TableHead | Tag::TableRow => {
+                if let Some(table) = self.table.as_mut() {
+                    table.row.clear();
+                }
+            }
+            Tag::TableCell => {
+                if let Some(table) = self.table.as_mut() {
+                    table.cell.clear();
+                }
+            }
+            Tag::Image { .. } => {}
+            _ => {}
         }
     }
 }
