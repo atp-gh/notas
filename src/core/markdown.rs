@@ -1,6 +1,7 @@
 //! Platform-neutral Markdown rendering data.
 
-use pulldown_cmark::{CodeBlockKind, Tag};
+use pulldown_cmark::{CodeBlockKind, Tag, TagEnd};
+use unicode_width::UnicodeWidthStr;
 
 /// A visual style applied to a rendered Markdown span.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -331,6 +332,116 @@ impl Renderer {
             }
             Tag::Image { .. } => {}
             _ => {}
+        }
+    }
+
+    /// Consume a pulldown-cmark end tag.
+    pub fn end_tag(&mut self, tag: TagEnd) {
+        match tag {
+            TagEnd::Paragraph => {}
+            TagEnd::Heading(_) => self.heading = 0,
+            TagEnd::BlockQuote(_) => self.quote_depth = self.quote_depth.saturating_sub(1),
+            TagEnd::CodeBlock => {
+                if let Some(buffer) = self.code_buf.take() {
+                    let code = buffer.trim_end_matches('\n');
+                    let language = self.code_lang.take();
+                    if !code.is_empty() || language.is_some() {
+                        let mut styles = self.separator_styles();
+                        styles.push(Style::CodeBlock);
+                        if let Some(language) = language {
+                            let mut language_styles = styles.clone();
+                            language_styles.push(Style::Dim);
+                            self.emit(&format!("{language}\n"), language_styles);
+                        }
+                        if !code.is_empty() {
+                            self.emit(code, styles);
+                        }
+                    }
+                }
+            }
+            TagEnd::List(_) => {
+                self.lists.pop();
+            }
+            TagEnd::Item => {
+                if self.item_blocks.last() == Some(&0) {
+                    self.flush_prefix();
+                }
+                self.item_prefix = None;
+                self.item_blocks.pop();
+            }
+            TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough => {
+                self.inline.pop();
+            }
+            TagEnd::Link => {
+                self.inline.pop();
+                self.link_url = None;
+            }
+            TagEnd::Table => self.render_table(),
+            TagEnd::TableHead | TagEnd::TableRow => {
+                if let Some(table) = self.table.as_mut() {
+                    table.rows.push(std::mem::take(&mut table.row));
+                }
+            }
+            TagEnd::TableCell => {
+                if let Some(table) = self.table.as_mut() {
+                    table.row.push(std::mem::take(&mut table.cell));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Lay the buffered table out as aligned, padded rows.
+    pub fn render_table(&mut self) {
+        let Some(table) = self.table.take() else {
+            return;
+        };
+        if table.rows.is_empty() {
+            return;
+        }
+
+        let columns = table
+            .alignments
+            .len()
+            .max(table.rows.iter().map(Vec::len).max().unwrap_or(0));
+        let mut widths = vec![0usize; columns];
+        for row in &table.rows {
+            for (index, cell) in row.iter().enumerate() {
+                widths[index] = widths[index].max(cell.width());
+            }
+        }
+
+        let mut lines: Vec<(String, Vec<Style>)> = Vec::with_capacity(table.rows.len() + 1);
+        for (row_index, row) in table.rows.iter().enumerate() {
+            let cells: Vec<String> = (0..columns)
+                .map(|index| {
+                    pad_cell(
+                        row.get(index).map(String::as_str).unwrap_or(""),
+                        widths[index],
+                        *table
+                            .alignments
+                            .get(index)
+                            .unwrap_or(&pulldown_cmark::Alignment::None),
+                    )
+                })
+                .collect();
+            if row_index == 0 {
+                lines.push((cells.join(" │ "), vec![Style::Table, Style::Bold]));
+                let rule = widths
+                    .iter()
+                    .map(|width| "─".repeat(*width))
+                    .collect::<Vec<_>>()
+                    .join("─┼─");
+                lines.push((rule, vec![Style::Table, Style::Dim]));
+            } else {
+                lines.push((cells.join(" │ "), vec![Style::Table]));
+            }
+        }
+        for (index, (text, styles)) in lines.into_iter().enumerate() {
+            if index > 0 {
+                self.sep(1);
+            }
+            self.emit(&text, styles);
         }
     }
 }
