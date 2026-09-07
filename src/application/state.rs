@@ -4,6 +4,7 @@ use crate::application::navigation::{ViewId, ViewMode};
 use crate::core::model::NoteId;
 
 /// Returns whether the editor differs from its last persisted snapshot.
+#[must_use]
 pub fn editor_is_dirty(
     current_note: Option<NoteId>,
     current_title: &str,
@@ -15,6 +16,7 @@ pub fn editor_is_dirty(
 }
 
 /// Converts a built-in view selection into navigation state.
+#[must_use]
 pub fn mode_for_view(view: ViewId) -> ViewMode {
     match view {
         ViewId::All => ViewMode::All,

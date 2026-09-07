@@ -35,6 +35,7 @@ pub enum ThemeMode {
 
 impl ThemeMode {
     /// Index into the theme combo row (label order in `settings_window`).
+    #[must_use]
     pub fn index(self) -> u32 {
         match self {
             Self::System => 0,
@@ -44,6 +45,7 @@ impl ThemeMode {
     }
 
     /// Inverse of [`ThemeMode::index`]; unknown indices map to `System`.
+    #[must_use]
     pub fn from_index(index: u32) -> Self {
         match index {
             1 => Self::Light,
@@ -79,7 +81,7 @@ impl PartialEq for Settings {
 }
 
 /// Theme section: `"theme": { "mode": "system" }`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ThemeSettings {
     /// Selected color scheme.
@@ -87,7 +89,7 @@ pub struct ThemeSettings {
 }
 
 /// Editor section: the line-number gutter toggle.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditorSettings {
     /// Whether the editor displays line numbers.
@@ -95,7 +97,7 @@ pub struct EditorSettings {
 }
 
 /// Interface section: window chrome toggles.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InterfaceSettings {
     /// Whether the status bar is visible.
@@ -128,6 +130,7 @@ pub enum SyncType {
 
 impl SyncType {
     /// Index into the sync-type combo row (label order in `settings_window`).
+    #[must_use]
     pub fn index(self) -> u32 {
         match self {
             Self::S3 => 0,
@@ -136,6 +139,7 @@ impl SyncType {
     }
 
     /// Inverse of [`SyncType::index`]; unknown indices map to `S3`.
+    #[must_use]
     pub fn from_index(index: u32) -> Self {
         match index {
             1 => Self::WebDAV,
@@ -149,7 +153,7 @@ impl SyncType {
 /// Credentials are secrets — the README recommends a dedicated,
 /// bucket-scoped credential that can be revoked independently of the main
 /// account.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct S3SyncSettings {
     /// Custom endpoint URL (`https://<account>.r2.cloudflarestorage.com`
@@ -183,6 +187,7 @@ impl Default for S3SyncSettings {
 impl S3SyncSettings {
     /// Whether a sync can even be attempted: a bucket and both credentials
     /// must be present.
+    #[must_use]
     pub fn is_configured(&self) -> bool {
         !self.bucket.trim().is_empty()
             && !self.access_key_id.trim().is_empty()
@@ -199,7 +204,7 @@ impl S3SyncSettings {
 /// settings file like the sync credentials (Joplin-style): it protects
 /// against backend/server compromise, **not** against theft of this
 /// machine. It must be re-entered on every device that syncs.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EncryptionSettings {
     /// Whether uploaded objects are encrypted.
@@ -216,7 +221,7 @@ pub struct EncryptionSettings {
 /// (default `notas`) is created below it and holds the notes. Credentials
 /// are stored in plaintext in the settings file like the S3 keys — the
 /// README recommends a Nextcloud *app password*.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebDavSyncSettings {
     /// DAV collection URL (https), or http when `insecure_tls` is set.
@@ -249,6 +254,7 @@ impl Default for WebDavSyncSettings {
 impl WebDavSyncSettings {
     /// Whether a sync can even be attempted: a URL and both credentials
     /// must be present.
+    #[must_use]
     pub fn is_configured(&self) -> bool {
         !self.url.trim().is_empty()
             && !self.username.trim().is_empty()
@@ -266,7 +272,7 @@ impl WebDavSyncSettings {
 /// Note: the settings file layout changed once (v0.1): the old flat S3
 /// fields (`endpoint`, `bucket`, …) at the top of the sync section are no
 /// longer read — re-enter them under the `s3` section after upgrading.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SyncSettings {
     /// Sync backend whose section is used by `run_sync`.
@@ -297,6 +303,7 @@ impl Default for SyncSettings {
 impl SyncSettings {
     /// Whether a sync can even be attempted for the selected backend: the
     /// backend's own `is_configured` must pass.
+    #[must_use]
     pub fn is_configured(&self) -> bool {
         match self.kind {
             SyncType::S3 => self.s3.is_configured(),
@@ -312,6 +319,7 @@ impl Settings {
     ///
     /// The path is remembered so a later [`Settings::save`] writes back to
     /// the same file.
+    #[must_use]
     pub fn load_from(path: PathBuf) -> Self {
         let display = path.display().to_string();
         match fs::read_to_string(&path) {
@@ -354,6 +362,12 @@ impl Settings {
 
     /// Persist to a specific file, replacing it atomically so a crash
     /// mid-write can never leave a truncated settings file behind.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] when the parent directory cannot be
+    /// created, the temp file cannot be written, or the rename onto
+    /// `path` fails.
     pub fn save_to(&self, path: &Path) -> io::Result<()> {
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(dir)?;
@@ -361,8 +375,7 @@ impl Settings {
         // Unique temp name so concurrent processes never collide.
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         let tmp = dir.join(format!(".settings-{}-{nanos}.tmp", std::process::id()));
         fs::write(&tmp, text)?;
         match fs::rename(&tmp, path) {
@@ -383,8 +396,7 @@ mod tests {
     fn temp_settings_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         std::env::temp_dir().join(format!(
             "notas-settings-test-{name}-{}-{nanos}.json",
             std::process::id()
