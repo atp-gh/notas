@@ -1,6 +1,12 @@
-//! Error types for the platform-neutral core data layer.
+//! Error types for the data core.
+//!
+//! Limited to what the data core itself can produce: database, I/O,
+//! serialization, migration, not-found and input-invariant errors. UI and
+//! sync-transport failures belong to their own layers.
 
-/// Errors that can occur in the data layer.
+use crate::core::model::{NoteId, NotebookId, TagId};
+
+/// Errors that can occur in the data core.
 ///
 /// Converted automatically from the underlying failures with `?`; the UI
 /// layer renders them via `Display`.
@@ -14,13 +20,29 @@ pub enum Error {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// A JSON serialization or deserialization failure.
+    #[error("serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+
+    /// The stored schema could not be migrated to the current version.
+    #[error("schema migration failed: {0}")]
+    Migration(String),
+
     /// A note that was expected to exist does not (anymore).
     #[error("note with id {0} does not exist")]
-    NoteNotFound(i64),
+    NoteNotFound(NoteId),
 
-    /// An encryption failure from [`crate::sync::crypto`].
-    #[error(transparent)]
-    Crypto(#[from] crate::sync::crypto::CryptoError),
+    /// A notebook that was expected to exist does not (anymore).
+    #[error("notebook with id {0} does not exist")]
+    NotebookNotFound(NotebookId),
+
+    /// A tag that was expected to exist does not (anymore).
+    #[error("tag with id {0} does not exist")]
+    TagNotFound(TagId),
+
+    /// An input value violates a data-core invariant.
+    #[error("{0}")]
+    InvalidInput(String),
 }
 
 /// Convenience alias used across the crate.

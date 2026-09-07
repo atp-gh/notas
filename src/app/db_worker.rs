@@ -44,7 +44,7 @@ async fn handle(pool: SqlitePool, msg: DbMsg) -> DbEvent {
         DbMsg::LoadByTag(id) => repo::list_notes_by_tag(&pool, id).await.map(DbEvent::Notes),
         DbMsg::LoadNote(id) => match repo::get_note(&pool, id).await {
             Ok(Some(note)) => Ok(DbEvent::NoteLoaded(note)),
-            Ok(None) => Err(crate::core::Error::NoteNotFound(id)),
+            Ok(None) => Err(crate::core::Error::NoteNotFound(crate::core::NoteId(id))),
             Err(e) => Err(e),
         },
         DbMsg::CreateNote(notebook_id) => repo::create_note(&pool, notebook_id, "Untitled")
@@ -95,7 +95,7 @@ async fn handle(pool: SqlitePool, msg: DbMsg) -> DbEvent {
         DbMsg::SyncNow(settings) => {
             match crate::sync::executor::run_sync(&pool, settings.as_ref()).await {
                 Ok(stats) => Ok(DbEvent::SyncDone(stats)),
-                Err(e) => Ok(DbEvent::SyncFailed(e)),
+                Err(e) => Ok(DbEvent::SyncFailed(e.to_string())),
             }
         }
     };

@@ -42,11 +42,12 @@ use reqwest_dav::{Auth as DavAuth, Client as DavClient, ClientBuilder as DavClie
 use s3::{AddressingStyle, Auth as S3Auth, Client as S3Client, Credentials};
 use sqlx::SqlitePool;
 
-use crate::storage::repo;
-use crate::sync::crypto::{self, Cipher, CryptoError, Verifier};
-use crate::sync::{
+use crate::core::sync::{
     LocalNote, RemoteEntry, Sidecar, SyncAction, SyncStats, content_hash, plan_sync,
 };
+use crate::storage::repo;
+use crate::sync::crypto::{self, Cipher, CryptoError, Verifier};
+use crate::sync::error::SyncError;
 
 use crate::core::config::{S3SyncSettings, SyncSettings, SyncType, WebDavSyncSettings};
 
@@ -63,28 +64,35 @@ trait SyncStore {
     /// Prepare the backend for note traffic (WebDAV creates its
     /// collections; a no-op for S3). Runs before the verifier is touched
     /// so a fresh backend can receive one.
-    async fn ensure_ready(&self) -> Result<(), String>;
+    async fn ensure_ready(&self) -> Result<(), SyncError>;
     /// List the whole remote store, fetching every sidecar, and build the
     /// remote index the planner needs. Sidecars are decrypted with `cipher`
     /// when encryption is active; ones that fail to decrypt are logged and
     /// skipped (the planner re-uploads a matching local note).
-    async fn list(&self, cipher: Option<&Cipher>) -> Result<HashMap<String, RemoteEntry>, String>;
+    async fn list(
+        &self,
+        cipher: Option<&Cipher>,
+    ) -> Result<HashMap<String, RemoteEntry>, SyncError>;
     /// Fetch the markdown body of a note, decrypted when a cipher is active.
-    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &str) -> Result<String, String>;
+    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &str) -> Result<String, SyncError>;
     /// Upload a note's markdown body and sidecar (encrypted when a cipher
     /// is active).
-    async fn put_note(&self, cipher: Option<&Cipher>, note: &LocalNote) -> Result<(), String>;
+    async fn put_note(&self, cipher: Option<&Cipher>, note: &LocalNote) -> Result<(), SyncError>;
     /// Upload a sidecar alone, used for tombstones (encrypted likewise).
-    async fn put_sidecar(&self, cipher: Option<&Cipher>, sidecar: &Sidecar) -> Result<(), String>;
+    async fn put_sidecar(
+        &self,
+        cipher: Option<&Cipher>,
+        sidecar: &Sidecar,
+    ) -> Result<(), SyncError>;
     /// Read the encryption verifier object, or `None` when the backend has
     /// never been encrypted (or the object was deleted).
-    async fn get_verifier(&self) -> Result<Option<Vec<u8>>, String>;
+    async fn get_verifier(&self) -> Result<Option<Vec<u8>>, SyncError>;
     /// Write the encryption verifier object.
-    async fn put_verifier(&self, bytes: &[u8]) -> Result<(), String>;
+    async fn put_verifier(&self, bytes: &[u8]) -> Result<(), SyncError>;
 }
 
 /// Run one full sync against the configured backend, then return stats.
-pub async fn run_sync(pool: &SqlitePool, settings: &SyncSettings) -> Result<SyncStats, String> {
+pub async fn run_sync(pool: &SqlitePool, settings: &SyncSettings) -> Result<SyncStats, SyncError> {
     match settings.kind {
         SyncType::S3 => {
             let store = S3Store::new(&settings.s3)?;
@@ -104,7 +112,7 @@ async fn run_sync_with(
     pool: &SqlitePool,
     store: &impl SyncStore,
     settings: &SyncSettings,
-) -> Result<SyncStats, String> {
+) -> Result<SyncStats, SyncError> {
     // 0. Backend readiness + encryption state. Resolving the cipher reads
     //    (or, on a never-encrypted backend, writes) the verifier object, so
     //    a wrong password aborts before any note traffic can clobber the
@@ -114,18 +122,12 @@ async fn run_sync_with(
 
     // 1. Assign uuids to notes created since the last sync so every note
     //    has a stable cross-device identity.
-    repo::ensure_note_uuids(pool)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+    repo::ensure_note_uuids(pool).await?;
 
     // 2. Remote index + local index + tombstones.
     let remote = store.list(cipher.as_ref()).await?;
-    let local = repo::sync_local_index(pool)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
-    let tombstones = repo::list_tombstones(pool)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+    let local = repo::sync_local_index(pool).await?;
+    let tombstones = repo::list_tombstones(pool).await?;
 
     // 3. Plan, then execute.
     let actions = plan_sync(&local, &tombstones, &remote);
@@ -156,15 +158,11 @@ async fn run_sync_with(
                         continue;
                     }
                 };
-                repo::apply_remote_note(pool, &sidecar, &content)
-                    .await
-                    .map_err(|e| format!("{e:#}"))?;
+                repo::apply_remote_note(pool, &sidecar, &content).await?;
                 stats.downloaded += 1;
             }
             SyncAction::TrashLocal { uuid } => {
-                repo::trash_note_by_uuid_no_bump(pool, &uuid)
-                    .await
-                    .map_err(|e| format!("{e:#}"))?;
+                repo::trash_note_by_uuid_no_bump(pool, &uuid).await?;
                 stats.trashed += 1;
             }
             SyncAction::ConflictCopy { sidecar } => {
@@ -178,9 +176,7 @@ async fn run_sync_with(
                         continue;
                     }
                 };
-                repo::create_conflict_copy(pool, &sidecar, &content)
-                    .await
-                    .map_err(|e| format!("{e:#}"))?;
+                repo::create_conflict_copy(pool, &sidecar, &content).await?;
                 stats.conflicts += 1;
             }
             SyncAction::UploadTombstone { uuid, deleted_at } => {
@@ -204,8 +200,7 @@ async fn run_sync_with(
     //    note timestamps themselves stay UTC in the database).
     stats.last_synced_at = sqlx::query_scalar::<_, String>("SELECT datetime('now', 'localtime')")
         .fetch_one(pool)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+        .await?;
 
     Ok(stats)
 }
@@ -229,40 +224,41 @@ async fn run_sync_with(
 async fn resolve_cipher(
     store: &impl SyncStore,
     settings: &SyncSettings,
-) -> Result<Option<Cipher>, String> {
+) -> Result<Option<Cipher>, SyncError> {
     let enc = &settings.encryption;
     let verifier_bytes = store.get_verifier().await?;
 
     if !enc.enabled {
         if verifier_bytes.is_some() {
-            return Err(
+            return Err(SyncError::configuration(
                 "this backend is encrypted — enable “Encrypt synced notes” in Settings and \
-                 enter the encryption password"
-                    .to_string(),
-            );
+                 enter the encryption password",
+            ));
         }
         return Ok(None);
     }
 
     let password = enc.password.trim();
     if password.len() < crypto::MIN_PASSWORD_LEN {
-        return Err(format!(
+        return Err(SyncError::configuration(format!(
             "the encryption password must be at least {} characters",
             crypto::MIN_PASSWORD_LEN
-        ));
+        )));
     }
 
     match verifier_bytes {
         Some(bytes) => {
-            let verifier: Verifier = serde_json::from_slice(&bytes)
-                .map_err(|e| format!("cannot read the encryption verifier on the backend: {e}"))?;
+            let verifier: Verifier = serde_json::from_slice(&bytes).map_err(|e| {
+                SyncError::configuration(format!(
+                    "cannot read the encryption verifier on the backend: {e}"
+                ))
+            })?;
             let cipher = Cipher::derive(password, verifier.salt_bytes()?)?;
             if !cipher.verify(&verifier) {
-                return Err(
+                return Err(SyncError::configuration(
                     "the encryption password is wrong — enter the password that encrypted \
-                     this backend"
-                        .to_string(),
-                );
+                     this backend",
+                ));
             }
             Ok(Some(cipher))
         }
@@ -270,7 +266,7 @@ async fn resolve_cipher(
             let cipher = Cipher::generate(password)?;
             let verifier = cipher.verifier()?;
             let bytes = serde_json::to_vec(&verifier)
-                .map_err(|e| format!("cannot build the verifier: {e}"))?;
+                .map_err(|e| SyncError::configuration(format!("cannot build the verifier: {e}")))?;
             store.put_verifier(&bytes).await?;
             Ok(Some(cipher))
         }
@@ -308,7 +304,7 @@ struct S3Store {
 
 impl S3Store {
     /// Build the client from the S3 settings.
-    fn new(settings: &S3SyncSettings) -> Result<Self, String> {
+    fn new(settings: &S3SyncSettings) -> Result<Self, SyncError> {
         let client = build_client(settings)?;
         let bucket = settings.bucket.trim().to_string();
         let prefix = normalize_prefix(&settings.prefix);
@@ -321,31 +317,38 @@ impl S3Store {
 }
 
 impl SyncStore for S3Store {
-    async fn ensure_ready(&self) -> Result<(), String> {
+    async fn ensure_ready(&self) -> Result<(), SyncError> {
         Ok(())
     }
 
-    async fn list(&self, cipher: Option<&Cipher>) -> Result<HashMap<String, RemoteEntry>, String> {
+    async fn list(
+        &self,
+        cipher: Option<&Cipher>,
+    ) -> Result<HashMap<String, RemoteEntry>, SyncError> {
         list_remote(&self.client, &self.bucket, &self.prefix, cipher).await
     }
 
-    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &str) -> Result<String, String> {
+    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &str) -> Result<String, SyncError> {
         get_md(&self.client, &self.bucket, &self.prefix, cipher, uuid).await
     }
 
-    async fn put_note(&self, cipher: Option<&Cipher>, note: &LocalNote) -> Result<(), String> {
+    async fn put_note(&self, cipher: Option<&Cipher>, note: &LocalNote) -> Result<(), SyncError> {
         put_note(&self.client, &self.bucket, &self.prefix, cipher, note).await
     }
 
-    async fn put_sidecar(&self, cipher: Option<&Cipher>, sidecar: &Sidecar) -> Result<(), String> {
+    async fn put_sidecar(
+        &self,
+        cipher: Option<&Cipher>,
+        sidecar: &Sidecar,
+    ) -> Result<(), SyncError> {
         put_sidecar(&self.client, &self.bucket, &self.prefix, cipher, sidecar).await
     }
 
-    async fn get_verifier(&self) -> Result<Option<Vec<u8>>, String> {
+    async fn get_verifier(&self) -> Result<Option<Vec<u8>>, SyncError> {
         get_verifier(&self.client, &self.bucket, &self.prefix).await
     }
 
-    async fn put_verifier(&self, bytes: &[u8]) -> Result<(), String> {
+    async fn put_verifier(&self, bytes: &[u8]) -> Result<(), SyncError> {
         put_verifier(&self.client, &self.bucket, &self.prefix, bytes).await
     }
 }
@@ -356,7 +359,7 @@ impl SyncStore for S3Store {
 /// `https://s3.<region>.amazonaws.com`); a custom endpoint (R2, B2,
 /// MinIO, …) switches to path-style addressing, which those
 /// S3-compatible servers expect.
-fn build_client(settings: &S3SyncSettings) -> Result<S3Client, String> {
+fn build_client(settings: &S3SyncSettings) -> Result<S3Client, SyncError> {
     let region = settings.region.trim();
     let custom_endpoint = !settings.endpoint.trim().is_empty();
     let endpoint = if custom_endpoint {
@@ -374,17 +377,17 @@ fn build_client(settings: &S3SyncSettings) -> Result<S3Client, String> {
             settings.access_key_id.trim(),
             settings.secret_access_key.trim(),
         )
-        .map_err(|e| format!("{e:#}"))?,
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?,
     );
     S3Client::builder(endpoint)
-        .map_err(|e| format!("{e:#}"))?
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?
         .region(region)
         .auth(auth)
         .addressing_style(addressing)
         .timeout(Duration::from_secs(30))
         .max_attempts(3)
         .build()
-        .map_err(|e| format!("{e:#}"))
+        .map_err(|e| SyncError::transport(format!("{e:#}")))
 }
 
 /// Normalize the configured key prefix to `name/` form (`notas/` default).
@@ -420,15 +423,19 @@ async fn list_remote(
     bucket: &str,
     prefix: &str,
     cipher: Option<&Cipher>,
-) -> Result<HashMap<String, RemoteEntry>, String> {
+) -> Result<HashMap<String, RemoteEntry>, SyncError> {
     let mut remote: HashMap<String, RemoteEntry> = HashMap::new();
     let mut pager = client
         .objects()
         .list_v2(bucket)
         .prefix(prefix)
-        .map_err(|e| format!("{e:#}"))?
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?
         .pager();
-    while let Some(page) = pager.next_page().await.map_err(|e| format!("{e:#}"))? {
+    while let Some(page) = pager
+        .next_page()
+        .await
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?
+    {
         for obj in page.contents {
             if let Some(uuid) = parse_key(prefix, &obj.key, "notes/", ".md") {
                 remote.entry(uuid).or_default().has_md = true;
@@ -498,7 +505,7 @@ async fn put_note(
     prefix: &str,
     cipher: Option<&Cipher>,
     note: &LocalNote,
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     let sidecar = Sidecar {
         uuid: note.uuid.clone(),
         title: note.title.clone(),
@@ -514,11 +521,11 @@ async fn put_note(
         .objects()
         .put(bucket, md_key(prefix, &note.uuid))
         .content_type("text/markdown; charset=utf-8")
-        .map_err(|e| format!("{e:#}"))?
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?
         .body_bytes(body)
         .send()
         .await
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?;
     put_sidecar(client, bucket, prefix, cipher, &sidecar).await
 }
 
@@ -528,18 +535,19 @@ async fn put_sidecar(
     prefix: &str,
     cipher: Option<&Cipher>,
     sidecar: &Sidecar,
-) -> Result<(), String> {
-    let json = serde_json::to_string(sidecar).map_err(|e| format!("{e:#}"))?;
+) -> Result<(), SyncError> {
+    let json = serde_json::to_string(sidecar)
+        .map_err(|e| SyncError::transport(format!("cannot encode the sidecar: {e}")))?;
     let body = encrypt_body(cipher, json.as_bytes())?;
     client
         .objects()
         .put(bucket, meta_key(prefix, &sidecar.uuid))
         .content_type("application/json")
-        .map_err(|e| format!("{e:#}"))?
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?
         .body_bytes(body)
         .send()
         .await
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?;
     Ok(())
 }
 
@@ -549,16 +557,20 @@ async fn get_md(
     prefix: &str,
     cipher: Option<&Cipher>,
     uuid: &str,
-) -> Result<String, String> {
+) -> Result<String, SyncError> {
     let output = client
         .objects()
         .get(bucket, md_key(prefix, uuid))
         .send()
         .await
-        .map_err(|e| format!("{e:#}"))?;
-    let bytes = output.bytes().await.map_err(|e| format!("{e:#}"))?;
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?;
+    let bytes = output
+        .bytes()
+        .await
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?;
     let plain = decrypt_body(cipher, &bytes)?;
-    String::from_utf8(plain).map_err(|e| format!("note {uuid} is not valid UTF-8: {e}"))
+    String::from_utf8(plain)
+        .map_err(|e| SyncError::transport(format!("note {uuid} is not valid UTF-8: {e}")))
 }
 
 /// Fetch the verifier object; a 404 (never encrypted) is `None`.
@@ -566,15 +578,22 @@ async fn get_verifier(
     client: &S3Client,
     bucket: &str,
     prefix: &str,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<Option<Vec<u8>>, SyncError> {
     let key = verifier_key(prefix);
     let output = match client.objects().get(bucket, &key).send().await {
         Ok(output) => output,
         // A missing object is the normal "never encrypted" answer.
         Err(e) if e.status().is_some_and(|s| s.as_u16() == 404) => return Ok(None),
-        Err(e) => return Err(format!("cannot read the encryption verifier: {e:#}")),
+        Err(e) => {
+            return Err(SyncError::transport(format!(
+                "cannot read the encryption verifier: {e:#}"
+            )));
+        }
     };
-    let bytes = output.bytes().await.map_err(|e| format!("{e:#}"))?;
+    let bytes = output
+        .bytes()
+        .await
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?;
     Ok(Some(bytes.to_vec()))
 }
 
@@ -584,16 +603,16 @@ async fn put_verifier(
     bucket: &str,
     prefix: &str,
     bytes: &[u8],
-) -> Result<(), String> {
+) -> Result<(), SyncError> {
     client
         .objects()
         .put(bucket, verifier_key(prefix))
         .content_type("application/json")
-        .map_err(|e| format!("{e:#}"))?
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?
         .body_bytes(bytes.to_vec())
         .send()
         .await
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?;
     Ok(())
 }
 
@@ -618,13 +637,13 @@ struct WebDavStore {
 impl WebDavStore {
     /// Build the store from the WebDAV settings. `url` must be https (or
     /// plain http when the user opted into insecure TLS).
-    fn new(settings: &WebDavSyncSettings) -> Result<Self, String> {
+    fn new(settings: &WebDavSyncSettings) -> Result<Self, SyncError> {
         let url = webdav_base_url(settings)?;
         let agent = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .danger_accept_invalid_certs(settings.insecure_tls)
             .build()
-            .map_err(|e| format!("cannot build the HTTP client: {e}"))?;
+            .map_err(|e| SyncError::transport(format!("cannot build the HTTP client: {e}")))?;
         // Empty username means an anonymous server; otherwise Basic auth.
         let auth = if settings.username.trim().is_empty() {
             DavAuth::Anonymous
@@ -636,7 +655,7 @@ impl WebDavStore {
             .set_host(url)
             .set_auth(auth)
             .build()
-            .map_err(|e| format!("cannot build the WebDAV client: {e}"))?;
+            .map_err(|e| SyncError::transport(format!("cannot build the WebDAV client: {e}")))?;
         let directory = settings.directory.trim().trim_matches('/').to_string();
         Ok(Self { client, directory })
     }
@@ -661,7 +680,7 @@ impl WebDavStore {
     /// Create the base collection and its two sub-collections if missing.
     /// MKCOL on an existing collection is refused (405) by most servers,
     /// so "already there" statuses count as success.
-    async fn ensure_collections(&self) -> Result<(), String> {
+    async fn ensure_collections(&self) -> Result<(), SyncError> {
         // The URL itself is expected to exist; only an explicit directory
         // is created. Without one, the notes go straight into the URL.
         if !self.directory.is_empty() {
@@ -671,7 +690,7 @@ impl WebDavStore {
         self.ensure_collection(&self.meta_collection()).await
     }
 
-    async fn ensure_collection(&self, path: &str) -> Result<(), String> {
+    async fn ensure_collection(&self, path: &str) -> Result<(), SyncError> {
         let response = self.client.mkcol_raw(path).await.map_err(webdav_error)?;
         let code = response.status().as_u16();
         if collection_ok(code) {
@@ -683,7 +702,11 @@ impl WebDavStore {
 
     /// PROPFIND one collection (depth 1) and return the uuids of the
     /// files in it, identified by their `suffix` (`.md`/`.json`).
-    async fn list_collection(&self, collection: &str, suffix: &str) -> Result<Vec<String>, String> {
+    async fn list_collection(
+        &self,
+        collection: &str,
+        suffix: &str,
+    ) -> Result<Vec<String>, SyncError> {
         let responses = self
             .client
             .list_rsp(collection, Depth::Number(1))
@@ -702,7 +725,7 @@ impl WebDavStore {
         &self,
         cipher: Option<&Cipher>,
         uuid: &str,
-    ) -> Result<Option<Sidecar>, String> {
+    ) -> Result<Option<Sidecar>, SyncError> {
         let path = format!("{}/{uuid}.json", self.meta_collection());
         let response = self.client.get_raw(&path).await.map_err(webdav_error)?;
         let code = response.status().as_u16();
@@ -715,7 +738,7 @@ impl WebDavStore {
         let bytes = response
             .bytes()
             .await
-            .map_err(|e| format!("cannot read sidecar for {uuid}: {e}"))?;
+            .map_err(|e| SyncError::transport(format!("cannot read sidecar for {uuid}: {e}")))?;
         let plain = match decrypt_body(cipher, &bytes) {
             Ok(plain) => plain,
             Err(e) => {
@@ -734,7 +757,7 @@ impl WebDavStore {
 
     /// PUT one file with an explicit content type. The body is bytes so
     /// encrypted objects (binary ciphertext) need no base64 round-trip.
-    async fn put(&self, path: &str, content_type: &str, body: Vec<u8>) -> Result<(), String> {
+    async fn put(&self, path: &str, content_type: &str, body: Vec<u8>) -> Result<(), SyncError> {
         let builder = self
             .client
             .start_request(reqwest::Method::PUT, path)
@@ -745,7 +768,7 @@ impl WebDavStore {
             .body(body)
             .send()
             .await
-            .map_err(|e| format!("cannot upload: {e}"))?;
+            .map_err(|e| SyncError::transport(format!("cannot upload: {e}")))?;
         let code = response.status().as_u16();
         if response.status().is_success() {
             Ok(())
@@ -763,7 +786,7 @@ impl WebDavStore {
 
     /// GET the verifier object; `None` when the server says 404 (the
     /// backend has never been encrypted).
-    async fn get_verifier(&self) -> Result<Option<Vec<u8>>, String> {
+    async fn get_verifier(&self) -> Result<Option<Vec<u8>>, SyncError> {
         let response = self
             .client
             .get_raw(&self.verifier_path())
@@ -776,28 +799,30 @@ impl WebDavStore {
         if !response.status().is_success() {
             return Err(webdav_status_error("read encryption verifier", code));
         }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| format!("cannot read the encryption verifier: {e}"))?;
+        let bytes = response.bytes().await.map_err(|e| {
+            SyncError::transport(format!("cannot read the encryption verifier: {e}"))
+        })?;
         Ok(Some(bytes.to_vec()))
     }
 
     /// PUT the verifier object.
-    async fn put_verifier(&self, bytes: &[u8]) -> Result<(), String> {
+    async fn put_verifier(&self, bytes: &[u8]) -> Result<(), SyncError> {
         self.put(&self.verifier_path(), "application/json", bytes.to_vec())
             .await
     }
 }
 
 impl SyncStore for WebDavStore {
-    async fn ensure_ready(&self) -> Result<(), String> {
+    async fn ensure_ready(&self) -> Result<(), SyncError> {
         // Runs before the verifier is touched so a fresh backend can
         // receive the verifier object.
         self.ensure_collections().await
     }
 
-    async fn list(&self, cipher: Option<&Cipher>) -> Result<HashMap<String, RemoteEntry>, String> {
+    async fn list(
+        &self,
+        cipher: Option<&Cipher>,
+    ) -> Result<HashMap<String, RemoteEntry>, SyncError> {
         let mut remote: HashMap<String, RemoteEntry> = HashMap::new();
         // Same shape as the S3 index: the notes collection marks `has_md`,
         // the meta collection creates the entry, then sidecars are read.
@@ -831,7 +856,7 @@ impl SyncStore for WebDavStore {
         Ok(remote)
     }
 
-    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &str) -> Result<String, String> {
+    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &str) -> Result<String, SyncError> {
         let path = format!("{}/{uuid}.md", self.notes_collection());
         let response = self.client.get_raw(&path).await.map_err(webdav_error)?;
         let code = response.status().as_u16();
@@ -841,12 +866,13 @@ impl SyncStore for WebDavStore {
         let bytes = response
             .bytes()
             .await
-            .map_err(|e| format!("cannot read note {uuid}: {e}"))?;
+            .map_err(|e| SyncError::transport(format!("cannot read note {uuid}: {e}")))?;
         let plain = decrypt_body(cipher, &bytes)?;
-        String::from_utf8(plain).map_err(|e| format!("note {uuid} is not valid UTF-8: {e}"))
+        String::from_utf8(plain)
+            .map_err(|e| SyncError::transport(format!("note {uuid} is not valid UTF-8: {e}")))
     }
 
-    async fn put_note(&self, cipher: Option<&Cipher>, note: &LocalNote) -> Result<(), String> {
+    async fn put_note(&self, cipher: Option<&Cipher>, note: &LocalNote) -> Result<(), SyncError> {
         let sidecar = Sidecar {
             uuid: note.uuid.clone(),
             title: note.title.clone(),
@@ -864,18 +890,23 @@ impl SyncStore for WebDavStore {
         self.put_sidecar(cipher, &sidecar).await
     }
 
-    async fn put_sidecar(&self, cipher: Option<&Cipher>, sidecar: &Sidecar) -> Result<(), String> {
+    async fn put_sidecar(
+        &self,
+        cipher: Option<&Cipher>,
+        sidecar: &Sidecar,
+    ) -> Result<(), SyncError> {
         let path = format!("{}/{}.json", self.meta_collection(), sidecar.uuid);
-        let json = serde_json::to_string(sidecar).map_err(|e| format!("{e:#}"))?;
+        let json = serde_json::to_string(sidecar)
+            .map_err(|e| SyncError::transport(format!("cannot encode the sidecar: {e}")))?;
         let body = encrypt_body(cipher, json.as_bytes())?;
         self.put(&path, "application/json", body).await
     }
 
-    async fn get_verifier(&self) -> Result<Option<Vec<u8>>, String> {
+    async fn get_verifier(&self) -> Result<Option<Vec<u8>>, SyncError> {
         self.get_verifier().await
     }
 
-    async fn put_verifier(&self, bytes: &[u8]) -> Result<(), String> {
+    async fn put_verifier(&self, bytes: &[u8]) -> Result<(), SyncError> {
         self.put_verifier(bytes).await
     }
 }
@@ -884,30 +915,33 @@ impl SyncStore for WebDavStore {
 ///
 /// A missing scheme defaults to `https://`; plain `http://` is only
 /// accepted when the user opted into insecure TLS.
-fn webdav_base_url(settings: &WebDavSyncSettings) -> Result<String, String> {
+fn webdav_base_url(settings: &WebDavSyncSettings) -> Result<String, SyncError> {
     let raw = settings.url.trim();
     if raw.is_empty() {
-        return Err("WebDAV URL is empty — set the server URL in Settings".to_string());
+        return Err(SyncError::configuration(
+            "WebDAV URL is empty — set the server URL in Settings",
+        ));
     }
     let with_scheme = if raw.contains("://") {
         raw.to_string()
     } else {
         format!("https://{raw}")
     };
-    let parsed = reqwest::Url::parse(&with_scheme)
-        .map_err(|e| format!("WebDAV URL \"{raw}\" is not a valid URL: {e}"))?;
+    let parsed = reqwest::Url::parse(&with_scheme).map_err(|e| {
+        SyncError::configuration(format!("WebDAV URL \"{raw}\" is not a valid URL: {e}"))
+    })?;
     match parsed.scheme() {
         "https" => {}
         "http" if settings.insecure_tls => {}
         "http" => {
-            return Err(
-                "WebDAV URL uses plain http — enable “allow insecure TLS” to accept it".to_string(),
-            );
+            return Err(SyncError::configuration(
+                "WebDAV URL uses plain http — enable “allow insecure TLS” to accept it",
+            ));
         }
         other => {
-            return Err(format!(
+            return Err(SyncError::configuration(format!(
                 "WebDAV URL scheme \"{other}\" is not supported — use https"
-            ));
+            )));
         }
     }
     Ok(with_scheme.trim_end_matches('/').to_string())
@@ -930,9 +964,9 @@ fn collection_ok(code: u16) -> bool {
     code / 100 == 2 || matches!(code, 301 | 302 | 405)
 }
 
-/// Map a `reqwest_dav` error to a human-readable string, extracting the
+/// Map a `reqwest_dav` error to a typed sync error, extracting the
 /// HTTP status where the crate wrapped it.
-fn webdav_error(err: reqwest_dav::Error) -> String {
+fn webdav_error(err: reqwest_dav::Error) -> SyncError {
     use reqwest_dav::DecodeError;
     match &err {
         reqwest_dav::Error::Decode(DecodeError::StatusMismatched(status)) => {
@@ -941,14 +975,16 @@ fn webdav_error(err: reqwest_dav::Error) -> String {
         reqwest_dav::Error::Decode(DecodeError::Server(server)) => {
             webdav_status_error("request", server.response_code)
         }
-        reqwest_dav::Error::Reqwest(e) => format!("WebDAV network error: {e}"),
-        other => format!("WebDAV error: {other}"),
+        reqwest_dav::Error::Reqwest(e) => {
+            SyncError::transport(format!("WebDAV network error: {e}"))
+        }
+        other => SyncError::transport(format!("WebDAV error: {other}")),
     }
 }
 
-/// Friendly message for a failed WebDAV operation with its HTTP status.
-fn webdav_status_error(operation: &str, code: u16) -> String {
-    match code {
+/// Friendly typed error for a failed WebDAV operation with its status.
+fn webdav_status_error(operation: &str, code: u16) -> SyncError {
+    let message = match code {
         401 | 403 => format!(
             "WebDAV {operation}: the server rejected the credentials (HTTP {code}) — \
              check the username and password; for Nextcloud use an app password"
@@ -963,7 +999,8 @@ fn webdav_status_error(operation: &str, code: u16) -> String {
             "WebDAV {operation}: conflict (HTTP 409) — a parent folder is missing on the server"
         ),
         _ => format!("WebDAV {operation} failed (HTTP {code})"),
-    }
+    };
+    SyncError::transport(message)
 }
 
 #[cfg(test)]
@@ -1019,7 +1056,7 @@ mod tests {
             ..webdav_settings("http://192.168.1.10/webdav")
         };
         let err = webdav_base_url(&plain).unwrap_err();
-        assert!(err.contains("insecure"), "{err}");
+        assert!(err.to_string().contains("insecure"), "{err}");
         plain.insecure_tls = true;
         assert_eq!(
             webdav_base_url(&plain).unwrap(),
@@ -1027,11 +1064,16 @@ mod tests {
         );
 
         let err = webdav_base_url(&webdav_settings("ftp://example.com")).unwrap_err();
-        assert!(err.contains("https"), "{err}");
+        assert!(err.to_string().contains("https"), "{err}");
 
         let mut empty = webdav_settings("");
         empty.url.clear();
-        assert!(webdav_base_url(&empty).unwrap_err().contains("empty"));
+        assert!(
+            webdav_base_url(&empty)
+                .unwrap_err()
+                .to_string()
+                .contains("empty")
+        );
     }
 
     #[test]
@@ -1339,8 +1381,8 @@ mod webdav_tests {
             last_synced_at: String::new(),
         };
         let err = run_sync(&pool, &settings).await.unwrap_err();
-        assert!(err.contains("401"), "{err}");
-        assert!(err.contains("app password"), "{err}");
+        assert!(err.to_string().contains("401"), "{err}");
+        assert!(err.to_string().contains("app password"), "{err}");
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1643,7 +1685,7 @@ mod webdav_tests {
         let pool = db::connect(dir.join("a.db")).await.unwrap();
         let settings = encrypted_settings(&server.uri(), "not the right password");
         let err = run_sync(&pool, &settings).await.unwrap_err();
-        assert!(err.contains("password"), "{err}");
+        assert!(err.to_string().contains("password"), "{err}");
         server.verify().await;
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
@@ -1680,7 +1722,7 @@ mod webdav_tests {
             last_synced_at: String::new(),
         };
         let err = run_sync(&pool, &settings).await.unwrap_err();
-        assert!(err.contains("encrypted"), "{err}");
+        assert!(err.to_string().contains("encrypted"), "{err}");
         server.verify().await;
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
