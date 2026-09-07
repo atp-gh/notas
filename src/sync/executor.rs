@@ -60,7 +60,11 @@ use crate::application::config::{S3SyncSettings, SyncSettings, SyncType, WebDavS
 /// methods read/write `meta/.encryption-verifier`, the object that carries
 /// the key salt and a wrong-password check (see
 /// [`crate::sync::crypto::Verifier`]).
-trait SyncStore {
+///
+/// Implementations must be `Send + Sync`: the executor runs on the DB
+/// worker's multi-threaded tokio runtime, and `run_sync_with` is awaited
+/// inside a `relm4::spawn` future that requires `Send`.
+trait SyncStore: Send + Sync {
     /// Prepare the backend for note traffic (WebDAV creates its
     /// collections; a no-op for S3). Runs before the verifier is touched
     /// so a fresh backend can receive one.
@@ -100,6 +104,15 @@ trait SyncStore {
 ///
 /// All local database steps go through the [`Repository`] facade — the
 /// executor never runs SQL against the underlying pool directly.
+///
+/// # Errors
+///
+/// Returns [`SyncError::Transport`] when the backend rejects a request,
+/// [`SyncError::Crypto`] when the encryption password is wrong or a blob
+/// cannot be opened, [`SyncError::Configuration`] when the settings are
+/// incomplete or inconsistent with the remote state, and
+/// [`SyncError::Database`]/[`SyncError::Repository`] when a local database
+/// step fails.
 pub async fn run_sync(repo: &Repository, settings: &SyncSettings) -> Result<SyncStats, SyncError> {
     match settings.kind {
         SyncType::S3 => {
@@ -712,21 +725,12 @@ impl WebDavStore {
         Ok(Self { client, directory })
     }
 
-    /// Path of one notes/meta sub-collection relative to the host.
-    fn collection_path(&self, dir: &str, child: &str) -> String {
-        if dir.is_empty() {
-            child.to_string()
-        } else {
-            format!("{dir}/{child}")
-        }
-    }
-
     fn notes_collection(&self) -> String {
-        self.collection_path(&self.directory, "notes")
+        collection_path(&self.directory, "notes")
     }
 
     fn meta_collection(&self) -> String {
-        self.collection_path(&self.directory, "meta")
+        collection_path(&self.directory, "meta")
     }
 
     /// Create the base collection and its two sub-collections if missing.
@@ -881,6 +885,15 @@ impl WebDavStore {
     }
 }
 
+/// Path of one notes/meta sub-collection relative to the host.
+fn collection_path(dir: &str, child: &str) -> String {
+    if dir.is_empty() {
+        child.to_string()
+    } else {
+        format!("{dir}/{child}")
+    }
+}
+
 impl SyncStore for WebDavStore {
     async fn ensure_ready(&self) -> Result<(), SyncError> {
         // Runs before the verifier is touched so a fresh backend can
@@ -976,11 +989,11 @@ impl SyncStore for WebDavStore {
     }
 
     async fn get_verifier(&self) -> Result<Option<Vec<u8>>, SyncError> {
-        self.get_verifier().await
+        WebDavStore::get_verifier(self).await
     }
 
     async fn put_verifier(&self, bytes: &[u8]) -> Result<(), SyncError> {
-        self.put_verifier(bytes).await
+        WebDavStore::put_verifier(self, bytes).await
     }
 }
 
