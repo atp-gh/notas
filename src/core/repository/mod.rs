@@ -284,7 +284,7 @@ impl Repository {
     /// # Errors
     ///
     /// Returns [`crate::core::error::Error::Database`] when the query fails.
-    pub async fn list_tombstones(&self) -> Result<Vec<(String, String)>> {
+    pub async fn list_tombstones(&self) -> Result<Vec<(crate::core::sync::SyncUuid, String)>> {
         sync_state::list_tombstones(&self.pool).await
     }
 
@@ -333,8 +333,11 @@ impl Repository {
     /// # Errors
     ///
     /// Returns [`crate::core::error::Error::Database`] on SQL failures.
-    pub async fn trash_note_by_uuid_no_bump(&self, uuid: &str) -> Result<()> {
-        sync_state::trash_note_by_uuid_no_bump(&self.pool, uuid).await
+    pub async fn trash_note_by_uuid_no_bump(
+        &self,
+        uuid: &crate::core::sync::SyncUuid,
+    ) -> Result<()> {
+        sync_state::trash_note_by_uuid_no_bump(&self.pool, uuid.as_str()).await
     }
 
     // ------------------------------------------------------------- search

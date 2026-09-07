@@ -18,13 +18,17 @@ use serde::{Deserialize, Serialize};
 /// valid sync id: it must be a non-empty ASCII string (historically a hex
 /// uuid, but foreign/legacy ids are tolerated as long as they are
 /// non-empty and contain no separators that would break storage paths).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// The wire format stays a plain JSON string (serde is transparent), so
+/// remote stores written by older versions keep working.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct SyncUuid(String);
 
 impl SyncUuid {
-    /// Wrap a raw string. The executor only builds this after
-    /// [`Sidecar::validated`] or its own key parsing, so invalid values
-    /// are reported by [`Sidecar::validated`], not here.
+    /// Wrap a raw string. The executor only builds this from trusted
+    /// sources (the local database, or keys it laid down itself), so
+    /// invalid values are reported by [`Sidecar::validated`], not here.
     #[must_use]
     pub fn new(raw: impl Into<String>) -> Self {
         Self(raw.into())
@@ -40,6 +44,18 @@ impl SyncUuid {
 impl std::fmt::Display for SyncUuid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for SyncUuid {
+    fn from(raw: &str) -> Self {
+        Self(raw.to_owned())
+    }
+}
+
+impl From<String> for SyncUuid {
+    fn from(raw: String) -> Self {
+        Self(raw)
     }
 }
 
@@ -88,7 +104,7 @@ fn is_sqlite_datetime(value: &str) -> bool {
 #[serde(rename_all = "snake_case")]
 pub struct Sidecar {
     /// Stable cross-device identity.
-    pub uuid: String,
+    pub uuid: SyncUuid,
     /// Display title at upload time.
     pub title: String,
     /// Notebook path at upload time (`"Parent/Child"`), or `None`.
@@ -117,10 +133,11 @@ impl Sidecar {
     ///
     /// Returns [`SidecarError`] describing the violated invariant.
     pub fn validated(&self) -> Result<&Self, SidecarError> {
-        if self.uuid.is_empty() {
+        let uuid = self.uuid.as_str();
+        if uuid.is_empty() {
             return Err(SidecarError::EmptyUuid);
         }
-        if self.uuid.contains('/') || self.uuid.contains('\\') {
+        if uuid.contains('/') || uuid.contains('\\') {
             return Err(SidecarError::UuidWithSeparators);
         }
         if !is_sqlite_datetime(&self.updated_at) {
@@ -157,7 +174,7 @@ pub fn normalize_tags(tags: &[String]) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalNote {
     /// Stable cross-device identity.
-    pub uuid: String,
+    pub uuid: SyncUuid,
     /// Display title.
     pub title: String,
     /// Markdown body.
@@ -209,7 +226,7 @@ pub enum SyncAction {
     /// device, and its timestamp is older than the tombstone).
     TrashLocal {
         /// The uuid of the local note to trash.
-        uuid: String,
+        uuid: SyncUuid,
     },
     /// Keep the local note as-is and create a local copy of the remote
     /// version (new uuid, title suffixed `(conflict copy)`). Both texts
@@ -221,7 +238,7 @@ pub enum SyncAction {
     /// Upload a tombstone sidecar for a note permanently deleted locally.
     UploadTombstone {
         /// The uuid of the deleted note.
-        uuid: String,
+        uuid: SyncUuid,
         /// When the note was deleted locally (`YYYY-MM-DD HH:MM:SS` UTC).
         deleted_at: String,
     },

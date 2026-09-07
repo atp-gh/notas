@@ -36,5 +36,5 @@
 pub mod model;
 pub mod planner;
 
-pub use model::{LocalNote, RemoteEntry, Sidecar, SyncAction, SyncStats};
+pub use model::{LocalNote, RemoteEntry, Sidecar, SyncAction, SyncStats, SyncUuid};
 pub use planner::{content_hash, plan_sync};

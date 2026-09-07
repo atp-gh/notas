@@ -7,7 +7,7 @@ use sqlx::SqlitePool;
 
 use crate::core::error::Result;
 use crate::core::model::NoteId;
-use crate::core::sync::{LocalNote, Sidecar};
+use crate::core::sync::{LocalNote, Sidecar, SyncUuid};
 
 /// Assign a uuid to every note that does not have one yet (notes created
 /// before the sync feature, or before the first sync). Returns the number
@@ -92,7 +92,11 @@ pub(crate) async fn local_index(pool: &SqlitePool) -> Result<Vec<LocalNote>> {
         .into_iter()
         .map(
             |(id, notebook_id, title, content, is_trashed, updated_at, uuid)| LocalNote {
-                uuid: uuid.unwrap_or_default(),
+                // The query filters `uuid IS NOT NULL`; the empty-uuid
+                // default only keeps the type honest against a schema
+                // regression (and would surface as an upload that the
+                // next listing round-trips as an orphan key).
+                uuid: uuid.map_or_else(|| SyncUuid::new(String::new()), SyncUuid::new),
                 title,
                 content,
                 is_trashed,
@@ -106,13 +110,16 @@ pub(crate) async fn local_index(pool: &SqlitePool) -> Result<Vec<LocalNote>> {
 
 /// Every locally recorded tombstone: `(uuid, deleted_at)` pairs for notes
 /// permanently deleted on this device.
-pub(crate) async fn list_tombstones(pool: &SqlitePool) -> Result<Vec<(String, String)>> {
+pub(crate) async fn list_tombstones(pool: &SqlitePool) -> Result<Vec<(SyncUuid, String)>> {
     let rows = sqlx::query_as::<_, (String, String)>(
         "SELECT uuid, deleted_at FROM sync_tombstones ORDER BY deleted_at",
     )
     .fetch_all(pool)
     .await?;
-    Ok(rows)
+    Ok(rows
+        .into_iter()
+        .map(|(uuid, at)| (SyncUuid::new(uuid), at))
+        .collect())
 }
 
 /// Resolve a notebook path (`"Parent/Child"`) to its leaf notebook id,
@@ -168,7 +175,7 @@ pub(crate) async fn apply_remote_note(
     let notebook_id = find_or_create_notebook_path(&mut tx, sidecar.notebook.as_deref()).await?;
     let note_id: NoteId =
         match sqlx::query_scalar::<_, NoteId>("SELECT id FROM notes WHERE uuid = ?")
-            .bind(&sidecar.uuid)
+            .bind(sidecar.uuid.as_str())
             .fetch_optional(&mut *tx)
             .await?
         {
@@ -182,7 +189,7 @@ pub(crate) async fn apply_remote_note(
                 .bind(content)
                 .bind(sidecar.trashed)
                 .bind(&sidecar.updated_at)
-                .bind(&sidecar.uuid)
+                .bind(sidecar.uuid.as_str())
                 .execute(&mut *tx)
                 .await?
                 .rows_affected();
@@ -201,7 +208,7 @@ pub(crate) async fn apply_remote_note(
                     "INSERT INTO notes (uuid, notebook_id, title, content, is_trashed, \
              created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
                 )
-                .bind(&sidecar.uuid)
+                .bind(sidecar.uuid.as_str())
                 .bind(notebook_id)
                 .bind(&sidecar.title)
                 .bind(content)

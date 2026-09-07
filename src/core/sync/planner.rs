@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::model::{LocalNote, RemoteEntry, Sidecar, SyncAction};
+use super::model::{LocalNote, RemoteEntry, Sidecar, SyncAction, SyncUuid};
 
 /// FNV-1a 64-bit hash of the markdown content, hex-encoded. Used only for
 /// change detection (equal timestamps, different body); deliberately not
@@ -69,12 +69,12 @@ fn sidecar_meta_key(sidecar: &Sidecar) -> (&str, Option<&str>, Vec<String>, bool
 /// - `remote` — what the store holds, keyed by uuid.
 pub fn plan_sync(
     local: &[LocalNote],
-    tombstones: &[(String, String)],
-    remote: &HashMap<String, RemoteEntry>,
+    tombstones: &[(SyncUuid, String)],
+    remote: &HashMap<SyncUuid, RemoteEntry>,
 ) -> Vec<SyncAction> {
-    let local_by_uuid: HashMap<&str, &LocalNote> =
-        local.iter().map(|n| (n.uuid.as_str(), n)).collect();
-    let tombstone_uuids: HashSet<&str> = tombstones.iter().map(|(uuid, _)| uuid.as_str()).collect();
+    let local_by_uuid: HashMap<&SyncUuid, &LocalNote> =
+        local.iter().map(|n| (&n.uuid, n)).collect();
+    let tombstone_uuids: HashSet<&SyncUuid> = tombstones.iter().map(|(uuid, _)| uuid).collect();
     let mut actions = Vec::new();
 
     // --- local notes ------------------------------------------------------
@@ -162,7 +162,7 @@ pub fn plan_sync(
     // The remote index is a HashMap: sort by uuid so the action order —
     // and therefore the order the executor creates notes in — does not
     // depend on hash iteration order.
-    let mut remote_uuids: Vec<&str> = remote.keys().map(String::as_str).collect();
+    let mut remote_uuids: Vec<&SyncUuid> = remote.keys().collect();
     remote_uuids.sort_unstable();
     for uuid in remote_uuids {
         let entry = &remote[uuid];
@@ -211,7 +211,7 @@ mod tests {
         }
     }
 
-    fn remote_one(sidecar: Sidecar) -> HashMap<String, RemoteEntry> {
+    fn remote_one(sidecar: Sidecar) -> HashMap<SyncUuid, RemoteEntry> {
         let mut remote = HashMap::new();
         remote.insert(
             sidecar.uuid.clone(),
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![SyncAction::Download {
-                sidecar: remote["u1"].sidecar.clone().unwrap()
+                sidecar: remote[&SyncUuid::new("u1")].sidecar.clone().unwrap()
             }]
         );
     }
@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![SyncAction::Download {
-                sidecar: remote["u1"].sidecar.clone().unwrap()
+                sidecar: remote[&SyncUuid::new("u1")].sidecar.clone().unwrap()
             }]
         );
     }
@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![SyncAction::ConflictCopy {
-                sidecar: remote["u1"].sidecar.clone().unwrap()
+                sidecar: remote[&SyncUuid::new("u1")].sidecar.clone().unwrap()
             }]
         );
     }
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![SyncAction::Download {
-                sidecar: remote["u1"].sidecar.clone().unwrap()
+                sidecar: remote[&SyncUuid::new("u1")].sidecar.clone().unwrap()
             }]
         );
 
@@ -400,7 +400,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![SyncAction::Download {
-                sidecar: remote["u1"].sidecar.clone().unwrap()
+                sidecar: remote[&SyncUuid::new("u1")].sidecar.clone().unwrap()
             }]
         );
     }
@@ -449,7 +449,7 @@ mod tests {
         for uuid in uuids {
             let n = note(uuid, uuid, "body", "2026-01-01 10:00:00");
             remote.insert(
-                uuid.to_owned(),
+                SyncUuid::new(uuid),
                 RemoteEntry {
                     sidecar: Some(sidecar_of(&n)),
                     has_md: true,
@@ -485,7 +485,7 @@ mod tests {
         assert_eq!(
             actions,
             vec![SyncAction::Download {
-                sidecar: remote["u1"].sidecar.clone().unwrap()
+                sidecar: remote[&SyncUuid::new("u1")].sidecar.clone().unwrap()
             }]
         );
     }

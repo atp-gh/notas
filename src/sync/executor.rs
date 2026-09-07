@@ -44,7 +44,7 @@ use sqlx::SqlitePool;
 
 use crate::core::repository::Repository;
 use crate::core::sync::{
-    LocalNote, RemoteEntry, Sidecar, SyncAction, SyncStats, content_hash, plan_sync,
+    LocalNote, RemoteEntry, Sidecar, SyncAction, SyncStats, SyncUuid, content_hash, plan_sync,
 };
 use crate::sync::crypto::{self, Cipher, CryptoError, Verifier};
 use crate::sync::error::SyncError;
@@ -72,9 +72,9 @@ trait SyncStore {
     async fn list(
         &self,
         cipher: Option<&Cipher>,
-    ) -> Result<HashMap<String, RemoteEntry>, SyncError>;
+    ) -> Result<HashMap<SyncUuid, RemoteEntry>, SyncError>;
     /// Fetch the markdown body of a note, decrypted when a cipher is active.
-    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &str) -> Result<String, SyncError>;
+    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &SyncUuid) -> Result<String, SyncError>;
     /// Upload a note's markdown body and sidecar (encrypted when a cipher
     /// is active).
     async fn put_note(&self, cipher: Option<&Cipher>, note: &LocalNote) -> Result<(), SyncError>;
@@ -324,12 +324,19 @@ impl SyncStore for S3Store {
     async fn list(
         &self,
         cipher: Option<&Cipher>,
-    ) -> Result<HashMap<String, RemoteEntry>, SyncError> {
+    ) -> Result<HashMap<SyncUuid, RemoteEntry>, SyncError> {
         list_remote(&self.client, &self.bucket, &self.prefix, cipher).await
     }
 
-    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &str) -> Result<String, SyncError> {
-        get_md(&self.client, &self.bucket, &self.prefix, cipher, uuid).await
+    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &SyncUuid) -> Result<String, SyncError> {
+        get_md(
+            &self.client,
+            &self.bucket,
+            &self.prefix,
+            cipher,
+            uuid.as_str(),
+        )
+        .await
     }
 
     async fn put_note(&self, cipher: Option<&Cipher>, note: &LocalNote) -> Result<(), SyncError> {
@@ -423,8 +430,8 @@ async fn list_remote(
     bucket: &str,
     prefix: &str,
     cipher: Option<&Cipher>,
-) -> Result<HashMap<String, RemoteEntry>, SyncError> {
-    let mut remote: HashMap<String, RemoteEntry> = HashMap::new();
+) -> Result<HashMap<SyncUuid, RemoteEntry>, SyncError> {
+    let mut remote: HashMap<SyncUuid, RemoteEntry> = HashMap::new();
     let mut pager = client
         .objects()
         .list_v2(bucket)
@@ -446,11 +453,11 @@ async fn list_remote(
     }
 
     // The listing carries keys but not bodies, so fetch each sidecar.
-    let uuids: Vec<String> = remote.keys().cloned().collect();
+    let uuids: Vec<SyncUuid> = remote.keys().cloned().collect();
     for uuid in uuids {
         let output = match client
             .objects()
-            .get(bucket, meta_key(prefix, &uuid))
+            .get(bucket, meta_key(prefix, uuid.as_str()))
             .send()
             .await
         {
@@ -496,12 +503,12 @@ async fn list_remote(
 }
 
 /// Split a listed key into its note uuid, if it matches `dir/…<suffix>`.
-fn parse_key(prefix: &str, key: &str, dir: &str, suffix: &str) -> Option<String> {
+fn parse_key(prefix: &str, key: &str, dir: &str, suffix: &str) -> Option<SyncUuid> {
     key.strip_prefix(prefix)
         .and_then(|rest| rest.strip_prefix(dir))
         .and_then(|rest| rest.strip_suffix(suffix))
         .filter(|uuid| !uuid.is_empty())
-        .map(str::to_string)
+        .map(SyncUuid::new)
 }
 
 async fn put_note(
@@ -524,7 +531,7 @@ async fn put_note(
     let body = encrypt_body(cipher, note.content.as_bytes())?;
     client
         .objects()
-        .put(bucket, md_key(prefix, &note.uuid))
+        .put(bucket, md_key(prefix, note.uuid.as_str()))
         .content_type("text/markdown; charset=utf-8")
         .map_err(|e| SyncError::transport(format!("{e:#}")))?
         .body_bytes(body)
@@ -546,7 +553,7 @@ async fn put_sidecar(
     let body = encrypt_body(cipher, json.as_bytes())?;
     client
         .objects()
-        .put(bucket, meta_key(prefix, &sidecar.uuid))
+        .put(bucket, meta_key(prefix, sidecar.uuid.as_str()))
         .content_type("application/json")
         .map_err(|e| SyncError::transport(format!("{e:#}")))?
         .body_bytes(body)
@@ -711,7 +718,7 @@ impl WebDavStore {
         &self,
         collection: &str,
         suffix: &str,
-    ) -> Result<Vec<String>, SyncError> {
+    ) -> Result<Vec<SyncUuid>, SyncError> {
         let responses = self
             .client
             .list_rsp(collection, Depth::Number(1))
@@ -729,9 +736,9 @@ impl WebDavStore {
     async fn get_sidecar(
         &self,
         cipher: Option<&Cipher>,
-        uuid: &str,
+        uuid: &SyncUuid,
     ) -> Result<Option<Sidecar>, SyncError> {
-        let path = format!("{}/{uuid}.json", self.meta_collection());
+        let path = format!("{}/{}.json", self.meta_collection(), uuid);
         let response = self.client.get_raw(&path).await.map_err(webdav_error)?;
         let code = response.status().as_u16();
         if code == 404 {
@@ -827,8 +834,8 @@ impl SyncStore for WebDavStore {
     async fn list(
         &self,
         cipher: Option<&Cipher>,
-    ) -> Result<HashMap<String, RemoteEntry>, SyncError> {
-        let mut remote: HashMap<String, RemoteEntry> = HashMap::new();
+    ) -> Result<HashMap<SyncUuid, RemoteEntry>, SyncError> {
+        let mut remote: HashMap<SyncUuid, RemoteEntry> = HashMap::new();
         // Same shape as the S3 index: the notes collection marks `has_md`,
         // the meta collection creates the entry, then sidecars are read.
         for uuid in self
@@ -844,7 +851,7 @@ impl SyncStore for WebDavStore {
             remote.entry(uuid).or_default();
         }
 
-        let uuids: Vec<String> = remote.keys().cloned().collect();
+        let uuids: Vec<SyncUuid> = remote.keys().cloned().collect();
         for uuid in uuids {
             match self.get_sidecar(cipher, &uuid).await {
                 Ok(Some(sidecar)) => {
@@ -861,8 +868,8 @@ impl SyncStore for WebDavStore {
         Ok(remote)
     }
 
-    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &str) -> Result<String, SyncError> {
-        let path = format!("{}/{uuid}.md", self.notes_collection());
+    async fn get_md(&self, cipher: Option<&Cipher>, uuid: &SyncUuid) -> Result<String, SyncError> {
+        let path = format!("{}/{}.md", self.notes_collection(), uuid);
         let response = self.client.get_raw(&path).await.map_err(webdav_error)?;
         let code = response.status().as_u16();
         if !response.status().is_success() {
@@ -955,11 +962,11 @@ fn webdav_base_url(settings: &WebDavSyncSettings) -> Result<String, SyncError> {
 /// Extract the uuid of a note file from a PROPFIND href. Servers return
 /// hrefs in wildly different forms (absolute path, full URL, trailing
 /// slash), so only the last path segment matters.
-fn uuid_from_href(href: &str, suffix: &str) -> Option<String> {
+fn uuid_from_href(href: &str, suffix: &str) -> Option<SyncUuid> {
     let name = href.trim_end_matches('/').rsplit('/').next()?;
     name.strip_suffix(suffix)
         .filter(|uuid| !uuid.is_empty())
-        .map(str::to_string)
+        .map(SyncUuid::new)
 }
 
 /// Statuses that mean "the collection exists now": created (2xx), moved
@@ -1023,7 +1030,7 @@ mod tests {
             "01234567-89ab-4cde-8f01-23456789abcd.md",
         ] {
             assert_eq!(
-                uuid_from_href(href, ".md").as_deref(),
+                uuid_from_href(href, ".md").as_ref().map(SyncUuid::as_str),
                 Some("01234567-89ab-4cde-8f01-23456789abcd")
             );
         }
@@ -1033,7 +1040,9 @@ mod tests {
         // way it tolerates an orphan object in the S3 bucket.
         assert_eq!(uuid_from_href("/notas/notes/", ".md"), None);
         assert_eq!(
-            uuid_from_href("/notas/notes/readme.md", ".md").as_deref(),
+            uuid_from_href("/notas/notes/readme.md", ".md")
+                .as_ref()
+                .map(SyncUuid::as_str),
             Some("readme")
         );
         assert_eq!(uuid_from_href("/notas/meta/x.json", ".md"), None);
@@ -1230,7 +1239,7 @@ mod webdav_tests {
     async fn webdav_executor_downloads_a_remote_note() {
         let server = MockServer::start().await;
         accept_mkcol(&server).await;
-        let uuid = "01234567-89ab-4cde-8f01-23456789abcd".to_string();
+        let uuid = SyncUuid::new("01234567-89ab-4cde-8f01-23456789abcd");
         let md_href = format!("/notas/notes/{uuid}.md");
         let meta_href = format!("/notas/meta/{uuid}.json");
 
@@ -1301,7 +1310,7 @@ mod webdav_tests {
     async fn webdav_executor_trashes_a_note_honouring_a_tombstone() {
         let server = MockServer::start().await;
         accept_mkcol(&server).await;
-        let uuid = "01234567-89ab-4cde-8f01-23456789abcd".to_string();
+        let uuid = SyncUuid::new("01234567-89ab-4cde-8f01-23456789abcd");
 
         // Remote holds only a tombstone (deleted sidecar, no md).
         Mock::given(method("PROPFIND"))
@@ -1348,7 +1357,7 @@ mod webdav_tests {
         repo.update_note(note.id, "Old", "old body").await.unwrap();
         repo.ensure_note_uuids().await.unwrap();
         sqlx::query("UPDATE notes SET uuid = ?1, updated_at = '2000-01-01 00:00:00' WHERE id = ?2")
-            .bind(&uuid)
+            .bind(uuid.as_str())
             .bind(note.id.0)
             .execute(&pool)
             .await
@@ -1422,12 +1431,12 @@ mod webdav_tests {
     /// fixture bodies: verifier JSON, encrypted sidecar, encrypted body.
     fn sealed_remote(
         cipher: &Cipher,
-        uuid: &str,
+        uuid: &SyncUuid,
         title: &str,
         body: &str,
     ) -> (String, Vec<u8>, Vec<u8>) {
         let sidecar = Sidecar {
-            uuid: uuid.into(),
+            uuid: uuid.clone(),
             title: title.into(),
             notebook: None,
             tags: vec!["work".into()],
@@ -1526,7 +1535,7 @@ mod webdav_tests {
     async fn webdav_executor_downloads_and_decrypts_remote_notes() {
         let server = MockServer::start().await;
         accept_mkcol(&server).await;
-        let uuid = "01234567-89ab-4cde-8f01-23456789abcd".to_string();
+        let uuid = SyncUuid::new("01234567-89ab-4cde-8f01-23456789abcd");
         let (verifier_json, sidecar_blob, md_blob) =
             sealed_remote(&test_cipher(ENC_PASSWORD), &uuid, "Remote", "remote body");
         let md_href = format!("/notas/notes/{uuid}.md");
@@ -1587,8 +1596,8 @@ mod webdav_tests {
         // skip just that note and keep the rest of the sync running.
         let server = MockServer::start().await;
         accept_mkcol(&server).await;
-        let good_uuid = "01234567-89ab-4cde-8f01-23456789abcd".to_string();
-        let bad_uuid = "01234567-89ab-4cde-8f01-23456789abce".to_string();
+        let good_uuid = SyncUuid::new("01234567-89ab-4cde-8f01-23456789abcd");
+        let bad_uuid = SyncUuid::new("01234567-89ab-4cde-8f01-23456789abce");
         let (verifier_json, good_sidecar, good_md) =
             sealed_remote(&test_cipher(ENC_PASSWORD), &good_uuid, "Good", "good body");
         let (_, bad_sidecar, mut bad_md) =
@@ -1674,7 +1683,7 @@ mod webdav_tests {
     async fn webdav_executor_aborts_on_wrong_encryption_password() {
         let server = MockServer::start().await;
         accept_mkcol(&server).await;
-        let uuid = "01234567-89ab-4cde-8f01-23456789abcd".to_string();
+        let uuid = SyncUuid::new("01234567-89ab-4cde-8f01-23456789abcd");
         let (verifier_json, _, _) =
             sealed_remote(&test_cipher(ENC_PASSWORD), &uuid, "Remote", "body");
 
@@ -1707,7 +1716,7 @@ mod webdav_tests {
     async fn webdav_executor_refuses_plaintext_sync_of_an_encrypted_backend() {
         let server = MockServer::start().await;
         accept_mkcol(&server).await;
-        let uuid = "01234567-89ab-4cde-8f01-23456789abcd".to_string();
+        let uuid = SyncUuid::new("01234567-89ab-4cde-8f01-23456789abcd");
         let (verifier_json, _, _) =
             sealed_remote(&test_cipher(ENC_PASSWORD), &uuid, "Remote", "body");
 
@@ -1749,7 +1758,7 @@ mod webdav_tests {
         // encrypted over the same key (overwrite-in-place).
         let server = MockServer::start().await;
         accept_mkcol(&server).await;
-        let uuid = "01234567-89ab-4cde-8f01-23456789abcd".to_string();
+        let uuid = SyncUuid::new("01234567-89ab-4cde-8f01-23456789abcd");
         let md_href = format!("/notas/notes/{uuid}.md");
         let meta_href = format!("/notas/meta/{uuid}.json");
         let plain_sidecar = serde_json::to_string(&Sidecar {
@@ -1816,7 +1825,7 @@ mod webdav_tests {
         repo.update_note(note.id, "Old", "old body").await.unwrap();
         repo.ensure_note_uuids().await.unwrap();
         sqlx::query("UPDATE notes SET uuid = ?1 WHERE id = ?2")
-            .bind(&uuid)
+            .bind(uuid.as_str())
             .bind(note.id.0)
             .execute(&pool)
             .await
