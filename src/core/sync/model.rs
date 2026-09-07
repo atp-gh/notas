@@ -132,6 +132,26 @@ impl Sidecar {
     /// # Errors
     ///
     /// Returns [`SidecarError`] describing the violated invariant.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use notas::core::sync::{Sidecar, SidecarError};
+    ///
+    /// let sidecar: Sidecar = serde_json::from_str(r#"
+    ///     {"uuid": "a1", "title": "t", "tags": [], "trashed": false,
+    ///      "deleted": false, "updated_at": "2026-01-01 10:00:00",
+    ///      "content_hash": "00"}
+    /// "#).unwrap();
+    /// assert!(sidecar.validated().is_ok());
+    ///
+    /// let bad: Sidecar = serde_json::from_str(r#"
+    ///     {"uuid": "", "title": "t", "tags": [], "trashed": false,
+    ///      "deleted": false, "updated_at": "2026-01-01 10:00:00",
+    ///      "content_hash": "00"}
+    /// "#).unwrap();
+    /// assert_eq!(bad.validated().unwrap_err(), SidecarError::EmptyUuid);
+    /// ```
     pub fn validated(&self) -> Result<&Self, SidecarError> {
         let uuid = self.uuid.as_str();
         if uuid.is_empty() {

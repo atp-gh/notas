@@ -28,6 +28,16 @@ use super::model::{LocalNote, RemoteEntry, Sidecar, SyncAction, SyncUuid};
 /// FNV-1a 64-bit hash of the markdown content, hex-encoded. Used only for
 /// change detection (equal timestamps, different body); deliberately not
 /// cryptographic.
+///
+/// # Examples
+///
+/// ```
+/// use notas::core::sync::content_hash;
+///
+/// assert_eq!(content_hash("hello"), content_hash("hello"));
+/// assert_ne!(content_hash("hello"), content_hash("hello!"));
+/// assert_eq!(content_hash(""), "cbf29ce484222325");
+/// ```
 pub fn content_hash(content: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in content.as_bytes() {
@@ -67,6 +77,50 @@ fn sidecar_meta_key(sidecar: &Sidecar) -> (&str, Option<&str>, Vec<String>, bool
 /// - `tombstones` — `(uuid, deleted_at)` pairs for notes permanently
 ///   deleted locally.
 /// - `remote` — what the store holds, keyed by uuid.
+///
+/// # Examples
+///
+/// A local note with no remote counterpart uploads; an identical pair
+/// converges to nothing:
+///
+/// ```
+/// use std::collections::HashMap;
+/// use notas::core::sync::{LocalNote, RemoteEntry, Sidecar, SyncUuid, plan_sync};
+///
+/// let local = [LocalNote {
+///     uuid: SyncUuid::new("a"),
+///     title: "A".into(),
+///     content: "hello".into(),
+///     is_trashed: false,
+///     updated_at: "2026-01-01 10:00:00".into(),
+///     notebook: None,
+///     tags: Vec::new(),
+/// }];
+///
+/// let mut remote: HashMap<SyncUuid, RemoteEntry> = HashMap::new();
+/// remote.insert(
+///     SyncUuid::new("a"),
+///     RemoteEntry { sidecar: None, has_md: false },
+/// );
+/// assert_eq!(plan_sync(&local, &[], &remote).len(), 1);
+///
+/// // With a matching sidecar for the same body, nothing needs doing.
+/// let sidecar = Sidecar {
+///     uuid: SyncUuid::new("a"),
+///     title: "A".into(),
+///     notebook: None,
+///     tags: Vec::new(),
+///     trashed: false,
+///     deleted: false,
+///     updated_at: "2026-01-01 10:00:00".into(),
+///     content_hash: notas::core::sync::content_hash("hello"),
+/// };
+/// remote.insert(
+///     SyncUuid::new("a"),
+///     RemoteEntry { sidecar: Some(sidecar), has_md: true },
+/// );
+/// assert!(plan_sync(&local, &[], &remote).is_empty());
+/// ```
 pub fn plan_sync(
     local: &[LocalNote],
     tombstones: &[(SyncUuid, String)],
