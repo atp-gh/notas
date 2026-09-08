@@ -12,6 +12,7 @@ Notas keeps all your notes in a single SQLite database on your machine — no ac
 - **Find & replace** — Ctrl+F, F3 for next match, Replace all
 - **Manual save** — Ctrl+S with a dirty indicator and save/discard prompts when switching notes
 - **Trash** — restore or permanently delete
+- **Import from Joplin** — import a full “Export all as Markdown” directory (with or without front matter): the notebook tree is recreated (existing same-name notebooks are merged), timestamps and tags are preserved, and re-importing updates notes by their Joplin id
 - **Export & backup** — Markdown export and one-click SQLite backup (`VACUUM INTO`)
 - **Sync (manual, optional)** — push/pull to any S3-compatible store or WebDAV server, with optional end-to-end encryption
 - **Settings** — theme (follow system / light / dark, applied immediately), line-number gutter, status bar, sync backend & credentials
@@ -84,6 +85,10 @@ src/
 │   │   ├── search.rs # The FTS5 SELECT itself; builds its MATCH string via core::search.
 │   │   ├── export.rs # Pure planning (plan/sanitize_component/yaml_scalar/frontmatter,
 │   │   │             #   per-directory collision counts) + the filesystem writer run().
+│   │   ├── import.rs # Markdown import (Joplin export layout): hand-rolled front-matter
+│   │   │             #   parser, tree walker, in-Rust ISO-8601 → SQLite timestamp
+│   │   │             #   conversion, transactional upsert runner (notebook merge, uuid
+│   │   │             #   update-on-reimport, skip-and-count unreadable files).
 │   │   └── backup.rs # VACUUM INTO snapshot; path embedded (cannot bind) after escaping.
 │   ├── search.rs     # Pure FTS5 MATCH escaping (fts_query): user input -> safe phrase
 │   │                 #   query. Exhaustively unit-tested; no I/O.
@@ -240,6 +245,8 @@ The access key / password are stored **in plaintext** in `settings.json` (like J
 
 ## Known limitations
 
+- Imported Joplin **attachments** (`_resources`) are not copied: image and attachment links stay in the note text but do not render, since Notas has no attachment support yet.
+- A re-import of an export without front matter (no Joplin `id`) duplicates notes instead of updating them; front-matter exports are idempotent by design.
 - Notebook and tag **renames** only propagate once a contained note is edited (the sidecar carries the _current_ names at upload time).
 - If you're editing a note while syncing, the save happens first; the open editor buffer is not re-synced in place (switch notes to reload).
 - Two notes with the same title but different UUIDs are two separate notes and are never merged.

@@ -96,6 +96,14 @@ async fn handle(repo: Repository, msg: DbMsg) -> DbEvent {
             Ok(n) => Ok(DbEvent::ExportDone(Ok(n))),
             Err(e) => Ok(DbEvent::ExportDone(Err(format!("{e:#}")))),
         },
+        DbMsg::ImportScan(dir) => match repo.import_preview(&dir).await {
+            Ok(preview) => Ok(DbEvent::ImportScanDone(Ok(preview))),
+            Err(e) => Ok(DbEvent::ImportScanDone(Err(format!("{e:#}")))),
+        },
+        DbMsg::ImportMarkdown(dir) => match repo.import_markdown(&dir).await {
+            Ok(stats) => Ok(DbEvent::ImportDone(Ok(stats))),
+            Err(e) => Ok(DbEvent::ImportDone(Err(format!("{e:#}")))),
+        },
         DbMsg::Backup(dest) => match repo.backup(&dest).await {
             Ok(()) => Ok(DbEvent::BackupDone(Ok(()))),
             Err(e) => Ok(DbEvent::BackupDone(Err(format!("{e:#}")))),

@@ -25,7 +25,7 @@ use crate::ui::{AppMsg, ViewMode};
 impl App {
     pub(super) fn handle(&mut self, msg: AppMsg, app_sender: &AppSender) {
         match msg {
-            AppMsg::Db(event) => self.handle_db_event(event),
+            AppMsg::Db(event) => self.handle_db_event(event, app_sender),
             AppMsg::SelectView(view) => {
                 self.mode = crate::application::state::mode_for_view(view);
                 self.refresh_current_list();
@@ -215,6 +215,31 @@ impl App {
             AppMsg::ExportTo(path) => {
                 self.worker.emit(DbMsg::ExportMarkdown(path));
             }
+            AppMsg::ImportMarkdown => {
+                let dialog = gtk::FileDialog::new();
+                dialog.set_title(tr!("Import notes from Markdown (Joplin export)"));
+                let s = app_sender.clone();
+                dialog.select_folder(
+                    Some(&self.widgets.window),
+                    None::<&gtk::gio::Cancellable>,
+                    move |result| {
+                        if let Ok(file) = result
+                            && let Some(path) = file.path()
+                        {
+                            let _ = s.send(AppMsg::ImportFrom(path));
+                        }
+                    },
+                );
+            }
+            AppMsg::ImportFrom(path) => {
+                self.pending_import = Some(path.clone());
+                self.worker.emit(DbMsg::ImportScan(path));
+            }
+            AppMsg::ImportConfirmed => {
+                if let Some(path) = self.pending_import.take() {
+                    self.worker.emit(DbMsg::ImportMarkdown(path));
+                }
+            }
             AppMsg::BackupNow => {
                 let dialog = gtk::FileDialog::new();
                 dialog.set_title(tr!("Backup database"));
@@ -383,7 +408,7 @@ impl App {
         }
     }
 
-    fn handle_db_event(&mut self, event: DbEvent) {
+    fn handle_db_event(&mut self, event: DbEvent, app_sender: &AppSender) {
         match event {
             DbEvent::Notebooks(list) => {
                 self.notebooks = list;
@@ -484,6 +509,42 @@ impl App {
                     self.widgets
                         .status_label
                         .set_text(&format!("Exported {n} notes"));
+                }
+                Err(e) => dialogs::error(&self.widgets.window, &e),
+            },
+            DbEvent::ImportScanDone(result) => match result {
+                Ok(preview) => {
+                    let body = format!(
+                        "{} {} and {} {} will be imported. Existing notebooks with the same name will be merged.",
+                        preview.notebooks,
+                        tr!("notebooks"),
+                        preview.notes,
+                        tr!("notes")
+                    );
+                    dialogs::confirm_action(
+                        &self.widgets.window,
+                        app_sender,
+                        tr!("Import notes"),
+                        &body,
+                        tr!("Import"),
+                        AppMsg::ImportConfirmed,
+                    );
+                }
+                Err(e) => dialogs::error(&self.widgets.window, &e),
+            },
+            DbEvent::ImportDone(result) => match result {
+                Ok(stats) => {
+                    let mut parts = vec![format!("{} {}", stats.notes_imported, tr!("imported"))];
+                    if stats.notes_updated > 0 {
+                        parts.push(format!("{} {}", stats.notes_updated, tr!("updated")));
+                    }
+                    if stats.notes_skipped > 0 {
+                        parts.push(format!("{} {}", stats.notes_skipped, tr!("skipped")));
+                    }
+                    self.widgets.status_label.set_text(&parts.join(", "));
+                    self.worker.emit(DbMsg::LoadNotebooks);
+                    self.worker.emit(DbMsg::LoadTags);
+                    self.refresh_current_list();
                 }
                 Err(e) => dialogs::error(&self.widgets.window, &e),
             },

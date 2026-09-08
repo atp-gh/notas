@@ -20,6 +20,7 @@ use crate::core::model::{Note, NoteId, Notebook, NotebookId, SearchHit, Tag, Tag
 
 pub(crate) mod backup;
 pub(crate) mod export;
+pub(crate) mod import;
 pub(crate) mod notebooks;
 pub(crate) mod notes;
 pub(crate) mod search;
@@ -386,5 +387,38 @@ impl Repository {
     /// [`crate::core::error::Error::Database`] on SQL failures.
     pub async fn backup(&self, dest: &Path) -> Result<()> {
         backup::run(&self.pool, dest).await
+    }
+
+    // -------------------------------------------------------------- import
+
+    /// Count what an import of `dir` would touch: notebook directories and
+    /// `.md` files (Joplin's "Export all as Markdown" layout, with or
+    /// without front matter). Reads no file contents.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::Io`] when the tree cannot be
+    /// walked, or [`crate::core::error::Error::InvalidInput`] when `dir` is
+    /// not a directory.
+    pub async fn import_preview(&self, dir: &Path) -> Result<import::ImportPreview> {
+        import::preview(dir).await
+    }
+
+    /// Import every `.md` file under `dir` into the database.
+    ///
+    /// Notebook directories become notebooks (existing same-name notebooks
+    /// are merged into), note timestamps and tags are preserved from the
+    /// front matter, and notes are updated in place when their Joplin `id`
+    /// is already known. The whole run is one transaction; unreadable
+    /// files are skipped and counted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::Io`] when the tree cannot be
+    /// walked, [`crate::core::error::Error::InvalidInput`] when `dir` is not
+    /// a directory, or [`crate::core::error::Error::Database`] when a write
+    /// fails (rolling everything back).
+    pub async fn import_markdown(&self, dir: &Path) -> Result<import::ImportStats> {
+        import::run(&self.pool, dir).await
     }
 }

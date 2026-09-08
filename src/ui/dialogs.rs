@@ -34,6 +34,29 @@ pub(crate) fn unsaved(window: &adw::ApplicationWindow, sender: &AppSender) {
     dialog.present(Some(window));
 }
 
+/// Show a confirmation dialog whose confirm button carries a custom label.
+pub(crate) fn confirm_action(
+    window: &adw::ApplicationWindow,
+    sender: &AppSender,
+    title: &str,
+    body: &str,
+    ok_label: &str,
+    message: AppMsg,
+) {
+    let dialog = adw::AlertDialog::new(Some(title), Some(body));
+    dialog.add_response("cancel", tr!("Cancel"));
+    dialog.add_response("confirm", ok_label);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    let sender = sender.clone();
+    dialog.connect_response(None::<&str>, move |_dialog, response| {
+        if response == "confirm" {
+            let _ = sender.send(message.clone());
+        }
+    });
+    dialog.present(Some(window));
+}
+
 /// Show a destructive confirmation dialog.
 pub(crate) fn confirm(
     window: &adw::ApplicationWindow,
@@ -42,19 +65,14 @@ pub(crate) fn confirm(
     body: &str,
     message: AppMsg,
 ) {
-    let dialog = adw::AlertDialog::new(Some(title), Some(body));
-    dialog.add_response("cancel", tr!("Cancel"));
-    dialog.add_response("confirm", tr!("Delete"));
-    dialog.set_default_response(Some("cancel"));
-    dialog.set_close_response("cancel");
-    dialog.set_response_appearance("confirm", adw::ResponseAppearance::Destructive);
-    let sender = sender.clone();
-    dialog.connect_response(None::<&str>, move |_dialog, response| {
-        if response == "confirm" {
-            let _ = sender.send(message.clone());
-        }
-    });
-    dialog.present(Some(window));
+    confirm_action(
+        window,
+        sender,
+        title,
+        body,
+        tr!("Delete"),
+        message,
+    );
 }
 
 /// Show an error message owned by the current window.

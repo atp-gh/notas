@@ -14,6 +14,7 @@ mod messages;
 use layout::wire_initial_split;
 
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -59,6 +60,8 @@ pub struct App {
     pending_open: Option<NoteId>,
     pending_new_note: bool,
     pending_close: bool,
+    /// Export directory waiting for the user to confirm the import.
+    pending_import: Option<PathBuf>,
     row_ids: Rc<RefCell<Vec<i64>>>,
     tag_ids: Rc<RefCell<Vec<i64>>>,
     loading: Rc<Cell<bool>>,
@@ -348,12 +351,15 @@ impl SimpleComponent for App {
             preview_btn.connect_toggled(move |_| emit(AppMsg::TogglePreview));
         }
 
+        let import_btn = gtk::Button::with_label(tr!("Import Markdown…"));
         let export_btn = gtk::Button::with_label(tr!("Export Markdown…"));
         let backup_btn = gtk::Button::with_label(tr!("Backup database…"));
         let sync_btn = gtk::Button::with_label(tr!("Sync now…"));
         let settings_btn = gtk::Button::with_label(tr!("Settings…"));
         let quit_btn = gtk::Button::with_label(tr!("Quit"));
         {
+            let s = emit.clone();
+            import_btn.connect_clicked(move |_| s(AppMsg::ImportMarkdown));
             let s = emit.clone();
             export_btn.connect_clicked(move |_| s(AppMsg::ExportMarkdown));
             let s = emit.clone();
@@ -367,6 +373,7 @@ impl SimpleComponent for App {
         }
         let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
         menu_box.set_margin_all(8);
+        menu_box.append(&import_btn);
         menu_box.append(&export_btn);
         menu_box.append(&backup_btn);
         menu_box.append(&sync_btn);
@@ -518,6 +525,7 @@ impl SimpleComponent for App {
             pending_open: None,
             pending_new_note: false,
             pending_close: false,
+            pending_import: None,
             row_ids,
             tag_ids,
             loading,

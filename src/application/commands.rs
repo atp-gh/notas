@@ -52,6 +52,8 @@ pub enum DbCommand {
     LoadNoteTags(NoteId),
     Search(String),
     ExportMarkdown(PathBuf),
+    ImportScan(PathBuf),
+    ImportMarkdown(PathBuf),
     Backup(PathBuf),
     SyncNow(Box<SyncSettings>),
 }
@@ -92,6 +94,9 @@ pub enum AppCommand {
     TagsEdited(Vec<String>),
     ExportMarkdown,
     ExportTo(PathBuf),
+    ImportMarkdown,
+    ImportFrom(PathBuf),
+    ImportConfirmed,
     BackupNow,
     BackupTo(PathBuf),
     DialogSave,

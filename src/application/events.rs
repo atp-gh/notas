@@ -1,6 +1,7 @@
 //! Events emitted by core services.
 
 use crate::core::model::{Note, NoteId, Notebook, SearchHit, Tag, TagCount};
+use crate::core::repository::import::{ImportPreview, ImportStats};
 use crate::core::sync::SyncStats;
 
 /// Results emitted by persistence and synchronization services.
@@ -26,6 +27,8 @@ pub enum DbEvent {
     NoteTags(Vec<Tag>),
     SearchResults(Vec<SearchHit>),
     ExportDone(Result<usize, String>),
+    ImportScanDone(Result<ImportPreview, String>),
+    ImportDone(Result<ImportStats, String>),
     BackupDone(Result<(), String>),
     SyncDone(SyncStats),
     SyncFailed(String),
