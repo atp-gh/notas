@@ -164,6 +164,41 @@ pub(crate) fn build_tree_pane(
     }
 }
 
+/// Order notebooks so every parent precedes its children, no matter how
+/// the input is sorted. The sidebar's list comes from
+/// [`notas::core::repository::Repository::list_notebooks`], which orders
+/// by name — a child like `AI` under `Interview` can therefore precede its
+/// parent — and GTK requires a parent row to exist before its children
+/// are inserted. The result keeps the input's relative order within each
+/// level. A notebook whose parent id is missing (corrupt data) is placed
+/// at the root rather than dropped or looped over forever.
+pub(crate) fn parent_first_order(notebooks: &[Notebook]) -> Vec<&Notebook> {
+    let mut ordered: Vec<&Notebook> = Vec::with_capacity(notebooks.len());
+    let mut pending: Vec<&Notebook> = notebooks.iter().collect();
+    while !pending.is_empty() {
+        let mut next_pending = Vec::new();
+        let mut progressed = false;
+        for notebook in pending {
+            let parent_ready = notebook
+                .parent_id
+                .is_none_or(|parent_id| ordered.iter().any(|n| n.id == parent_id));
+            if parent_ready {
+                ordered.push(notebook);
+                progressed = true;
+            } else {
+                next_pending.push(notebook);
+            }
+        }
+        if !progressed {
+            // Only orphans remain; hang them at the root instead of looping.
+            ordered.extend(next_pending);
+            break;
+        }
+        pending = next_pending;
+    }
+    ordered
+}
+
 /// Rebuild a notebook tree from the core model list.
 #[expect(
     deprecated,
@@ -172,7 +207,7 @@ pub(crate) fn build_tree_pane(
 pub(crate) fn rebuild_tree(store: &gtk::TreeStore, notebooks: &[Notebook]) {
     store.clear();
     let mut iters = std::collections::HashMap::new();
-    for notebook in notebooks {
+    for notebook in parent_first_order(notebooks) {
         let parent = notebook
             .parent_id
             .and_then(|parent_id| iters.get(&parent_id).cloned());
@@ -182,5 +217,60 @@ pub(crate) fn rebuild_tree(store: &gtk::TreeStore, notebooks: &[Notebook]) {
             &[(0, &notebook.id.0), (1, &notebook.name)],
         );
         iters.insert(notebook.id, iter);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nb(id: i64, parent_id: Option<i64>) -> Notebook {
+        Notebook {
+            id: NotebookId(id),
+            parent_id: parent_id.map(NotebookId),
+            name: format!("nb{id}"),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn child_sorted_before_parent_is_reordered_after_it() {
+        // The name-sorted sidebar order would put the child "AI" before its
+        // parent "Interview"; the orderer must fix exactly that.
+        let notebooks = vec![nb(2, Some(1)), nb(1, None)];
+        let ordered = parent_first_order(&notebooks);
+        let ids: Vec<i64> = ordered.iter().map(|n| n.id.0).collect();
+        assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn deep_chain_is_built_root_first() {
+        let notebooks = vec![nb(3, Some(2)), nb(1, None), nb(2, Some(1))];
+        let ids: Vec<i64> = parent_first_order(&notebooks)
+            .iter()
+            .map(|n| n.id.0)
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn siblings_keep_input_order() {
+        let notebooks = vec![nb(2, None), nb(1, None)];
+        let ids: Vec<i64> = parent_first_order(&notebooks)
+            .iter()
+            .map(|n| n.id.0)
+            .collect();
+        assert_eq!(ids, vec![2, 1]);
+    }
+
+    #[test]
+    fn orphaned_notebook_is_placed_at_root() {
+        let notebooks = vec![nb(2, Some(99)), nb(1, None)];
+        let ids: Vec<i64> = parent_first_order(&notebooks)
+            .iter()
+            .map(|n| n.id.0)
+            .collect();
+        assert_eq!(ids, vec![1, 2]);
     }
 }
