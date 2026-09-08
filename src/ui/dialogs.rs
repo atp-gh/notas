@@ -65,14 +65,7 @@ pub(crate) fn confirm(
     body: &str,
     message: AppMsg,
 ) {
-    confirm_action(
-        window,
-        sender,
-        title,
-        body,
-        tr!("Delete"),
-        message,
-    );
+    confirm_action(window, sender, title, body, tr!("Delete"), message);
 }
 
 /// Show an error message owned by the current window.

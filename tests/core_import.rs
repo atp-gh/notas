@@ -13,14 +13,7 @@ async fn repo() -> (Repository, tempfile::TempDir) {
 }
 
 /// Write one Joplin-style note file (front matter + body) under `dir`.
-fn write_joplin_note(
-    dir: &Path,
-    rel: &str,
-    id: &str,
-    title: &str,
-    tags: &[&str],
-    body: &str,
-) {
+fn write_joplin_note(dir: &Path, rel: &str, id: &str, title: &str, tags: &[&str], body: &str) {
     let path = dir.join(rel);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let tags = if tags.is_empty() {
@@ -143,7 +136,14 @@ async fn import_updates_notes_with_the_same_joplin_id() {
 async fn import_skips_unreadable_files_and_continues() {
     let (repo, dir) = repo().await;
     let root = dir.path().join("export");
-    write_joplin_note(&root, "Good.md", "e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2", "Good", &[], "ok");
+    write_joplin_note(
+        &root,
+        "Good.md",
+        "e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2",
+        "Good",
+        &[],
+        "ok",
+    );
     // Invalid UTF-8: read_to_string fails, the note is skipped, not fatal.
     let bad = root.join("Bad.md");
     std::fs::write(bad, b"\xff\xfe\x80 not utf8").unwrap();
@@ -158,7 +158,14 @@ async fn import_skips_unreadable_files_and_continues() {
 async fn import_ignores_resources_and_non_md_files() {
     let (repo, dir) = repo().await;
     let root = dir.path().join("export");
-    write_joplin_note(&root, "Note.md", "f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3", "Note", &[], "body");
+    write_joplin_note(
+        &root,
+        "Note.md",
+        "f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3",
+        "Note",
+        &[],
+        "body",
+    );
     std::fs::create_dir_all(root.join("_resources")).unwrap();
     std::fs::write(root.join("_resources/attached.png"), b"png").unwrap();
     std::fs::write(root.join("notes.txt"), "not a note").unwrap();
@@ -204,12 +211,11 @@ async fn import_without_front_matter_uses_the_file_name() {
 async fn import_round_trips_a_notas_export() {
     let (repo, dir) = repo().await;
     let work = repo.create_notebook(None, "Work").await.unwrap();
-    let year = repo
-        .create_notebook(Some(work.id), "2026")
+    let year = repo.create_notebook(Some(work.id), "2026").await.unwrap();
+    let note = repo.create_note(Some(year.id), "Deep note").await.unwrap();
+    repo.update_note(note.id, "Deep note", "body")
         .await
         .unwrap();
-    let note = repo.create_note(Some(year.id), "Deep note").await.unwrap();
-    repo.update_note(note.id, "Deep note", "body").await.unwrap();
     let loose = repo.create_note(None, "Loose").await.unwrap();
     repo.update_note(loose.id, "Loose", "loose body")
         .await
@@ -229,7 +235,10 @@ async fn import_round_trips_a_notas_export() {
     let notes = repo2.list_all_notes().await.unwrap();
     let deep = notes.iter().find(|n| n.title == "Deep note").unwrap();
     assert_eq!(deep.content, "body");
-    assert_eq!(deep.created_at, note.created_at, "timestamp survives the trip");
+    assert_eq!(
+        deep.created_at, note.created_at,
+        "timestamp survives the trip"
+    );
     let loose = notes.iter().find(|n| n.title == "Loose").unwrap();
     assert_eq!(loose.content, "loose body");
     assert!(loose.notebook_id.is_none(), "unfiled notes stay unfiled");
@@ -249,7 +258,10 @@ async fn import_skips_symlinks() {
 
     let stats = repo.import_markdown(&root).await.unwrap();
     assert_eq!(stats.notes_imported, 1, "only the real file is imported");
-    assert_eq!(stats.notebooks_created, 1, "the symlinked dir is not a notebook");
+    assert_eq!(
+        stats.notebooks_created, 1,
+        "the symlinked dir is not a notebook"
+    );
     let notes = repo.list_all_notes().await.unwrap();
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].title, "real");
@@ -271,7 +283,14 @@ async fn import_handles_deep_directory_trees() {
     // A single 66-level chain; the walker stops descending at MAX_DEPTH
     // (64), so only d1..d64 become notebooks and only files at depth <= 64
     // (inside d63) are seen.
-    write_joplin_note(&root, &format!("{}/inside.md", chain_rel(63)), "aa", "Inside 64", &[], "ok");
+    write_joplin_note(
+        &root,
+        &format!("{}/inside.md", chain_rel(63)),
+        "aa",
+        "Inside 64",
+        &[],
+        "ok",
+    );
     write_joplin_note(
         &root,
         &format!("{}/beyond.md", chain_rel(64)),
@@ -291,7 +310,10 @@ async fn import_handles_deep_directory_trees() {
 
     let stats = repo.import_markdown(&root).await.unwrap();
     assert_eq!(stats.notebooks_created, 64, "d1..d64 become notebooks");
-    assert_eq!(stats.notes_imported, 1, "only the depth-64 note is imported");
+    assert_eq!(
+        stats.notes_imported, 1,
+        "only the depth-64 note is imported"
+    );
     let notes = repo.list_all_notes().await.unwrap();
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].title, "Inside 64");
@@ -352,8 +374,14 @@ async fn import_keeps_created_at_when_reimport_lacks_created() {
     let stats = repo.import_markdown(&root).await.unwrap();
     assert_eq!(stats.notes_updated, 1);
     let notes = repo.list_all_notes().await.unwrap();
-    assert_eq!(notes[0].created_at, "2020-05-05 05:05:05", "created survives");
-    assert_ne!(notes[0].updated_at, "2020-05-05 05:05:05", "updated falls to now");
+    assert_eq!(
+        notes[0].created_at, "2020-05-05 05:05:05",
+        "created survives"
+    );
+    assert_ne!(
+        notes[0].updated_at, "2020-05-05 05:05:05",
+        "updated falls to now"
+    );
 }
 
 #[tokio::test]
@@ -386,7 +414,14 @@ async fn import_ignores_nested_resources_folders() {
     // A `_resources` folder at any depth is skipped entirely — even when
     // it contains a `.md` file.
     write_joplin_note(&root, "Work/real.md", "id1", "Real", &[], "ok");
-    write_joplin_note(&root, "Work/_resources/hidden.md", "id2", "Hidden", &[], "no");
+    write_joplin_note(
+        &root,
+        "Work/_resources/hidden.md",
+        "id2",
+        "Hidden",
+        &[],
+        "no",
+    );
 
     let stats = repo.import_markdown(&root).await.unwrap();
     assert_eq!(stats.notebooks_created, 1, "only Work");
