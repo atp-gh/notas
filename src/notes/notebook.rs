@@ -1,13 +1,14 @@
 //! GTK notebook-tree widgets: the sidebar pane that hosts the notebook
 //! tree with its right-click context menu, plus hierarchy rendering.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk::prelude::*;
 use libadwaita as adw;
 use relm4::RelmWidgetExt;
 
+use crate::notes::Clipboard;
 use crate::tr;
 use crate::ui::dialogs;
 use crate::ui::protocol::AppMsg;
@@ -30,8 +31,12 @@ pub(crate) struct NotebookPane {
 }
 
 /// Build the notebooks section: heading + "new notebook" button, the
-/// notebook tree, and its rename/delete context menu (opened on a
-/// right-click, remembered via `pending`).
+/// notebook tree, and its copy/cut/paste/rename/trash context menu.
+///
+/// Right-click selects the row first (so paste targets the row under the
+/// cursor), anchors the popover at the cursor via `set_pointing_to`, and
+/// disables Paste while the in-app clipboard is empty. Right-clicking the
+/// empty area shows only Paste (target = top level).
 #[expect(
     deprecated,
     reason = "the existing TreeView backend remains until the ColumnView migration"
@@ -40,6 +45,7 @@ pub(crate) fn build_tree_pane(
     window: &adw::ApplicationWindow,
     sender: &relm4::Sender<AppMsg>,
     pending: &Rc<Cell<i64>>,
+    clipboard: &Rc<RefCell<Option<Clipboard>>>,
 ) -> NotebookPane {
     let notebooks_label = gtk::Label::new(Some(tr!("Notebooks")));
     notebooks_label.set_halign(gtk::Align::Start);
@@ -95,11 +101,51 @@ pub(crate) fn build_tree_pane(
     }
 
     let menu = gtk::Popover::new();
+    let copy_button = gtk::Button::with_label(tr!("Copy"));
+    copy_button.set_halign(gtk::Align::Fill);
+    let cut_button = gtk::Button::with_label(tr!("Cut"));
+    cut_button.set_halign(gtk::Align::Fill);
+    let paste_button = gtk::Button::with_label(tr!("Paste"));
+    paste_button.set_halign(gtk::Align::Fill);
     let rename_button = gtk::Button::with_label(tr!("Rename…"));
     rename_button.set_halign(gtk::Align::Fill);
-    let delete_button = gtk::Button::with_label(tr!("Delete notebook"));
-    delete_button.set_halign(gtk::Align::Fill);
-    delete_button.add_css_class("destructive-action");
+    let trash_button = gtk::Button::with_label(tr!("Move to trash"));
+    trash_button.set_halign(gtk::Align::Fill);
+    trash_button.add_css_class("destructive-action");
+    {
+        let sender = sender.clone();
+        let pending = pending.clone();
+        let menu = menu.clone();
+        copy_button.connect_clicked(move |_| {
+            let _ = sender.send(AppMsg::CopyNotebook(NotebookId(pending.get())));
+            menu.popdown();
+        });
+    }
+    {
+        let sender = sender.clone();
+        let pending = pending.clone();
+        let menu = menu.clone();
+        cut_button.connect_clicked(move |_| {
+            let _ = sender.send(AppMsg::CutNotebook(NotebookId(pending.get())));
+            menu.popdown();
+        });
+    }
+    {
+        let sender = sender.clone();
+        let pending = pending.clone();
+        let menu = menu.clone();
+        paste_button.connect_clicked(move |_| {
+            // Paste lands in the row under the cursor; when the menu was
+            // opened on empty space `pending` holds -1 (see the gesture
+            // below) and the paste targets the top level.
+            let target = {
+                let id = pending.get();
+                (id >= 0).then_some(NotebookId(id))
+            };
+            let _ = sender.send(AppMsg::PasteToNotebook(target));
+            menu.popdown();
+        });
+    }
     {
         let window = window.clone();
         let pending = pending.clone();
@@ -122,22 +168,34 @@ pub(crate) fn build_tree_pane(
     {
         let sender = sender.clone();
         let pending = pending.clone();
-        delete_button.connect_clicked(move |_| {
-            let _ = sender.send(AppMsg::DeleteNotebook(NotebookId(pending.get())));
+        let menu = menu.clone();
+        trash_button.connect_clicked(move |_| {
+            let _ = sender.send(AppMsg::TrashNotebook(NotebookId(pending.get())));
+            menu.popdown();
         });
     }
     let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
     menu_box.set_margin_all(8);
+    menu_box.append(&copy_button);
+    menu_box.append(&cut_button);
+    menu_box.append(&paste_button);
     menu_box.append(&rename_button);
-    menu_box.append(&delete_button);
+    menu_box.append(&trash_button);
     menu.set_child(Some(&menu_box));
+    // Parent once to the (stable) tree: re-parenting on every click trips
+    // `gtk_widget_set_parent` (the popover already has a parent), and the
+    // cursor position still comes from `set_pointing_to` per click.
+    menu.set_parent(&notebook_tree);
     {
         let tree = notebook_tree.clone();
         let menu = menu;
         let pending = pending.clone();
+        let clipboard = clipboard.clone();
         let gesture = gtk::GestureClick::new();
         gesture.set_button(3);
-        gesture.connect_pressed(move |_gesture, _n, x, y| {
+        gesture.connect_pressed(move |gesture, _n, x, y| {
+            let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+            menu.set_pointing_to(Some(&rect));
             if let Some((path, _column, _x, _y)) = tree.path_at_pos(x as i32, y as i32)
                 && let Some(path) = path
                 && let Some(model) = tree.model()
@@ -145,9 +203,24 @@ pub(crate) fn build_tree_pane(
             {
                 let id: i64 = model.get_value(&iter, 0).get().unwrap_or(0);
                 pending.set(id);
-                menu.set_parent(&tree);
-                menu.present();
+                // Row menu: everything visible; paste needs a buffered entry.
+                for btn in [&copy_button, &cut_button, &rename_button, &trash_button] {
+                    btn.set_visible(true);
+                }
+                paste_button.set_visible(true);
+                paste_button.set_sensitive(clipboard.borrow().is_some());
+                menu.popup();
+            } else {
+                // Empty-area menu: paste-only, targeting the top level.
+                pending.set(-1);
+                for btn in [&copy_button, &cut_button, &rename_button, &trash_button] {
+                    btn.set_visible(false);
+                }
+                paste_button.set_visible(true);
+                paste_button.set_sensitive(clipboard.borrow().is_some());
+                menu.popup();
             }
+            gesture.set_state(gtk::EventSequenceState::Claimed);
         });
         notebook_tree.add_controller(gesture);
     }
@@ -229,6 +302,7 @@ mod tests {
             id: NotebookId(id),
             parent_id: parent_id.map(NotebookId),
             name: format!("nb{id}"),
+            is_trashed: false,
             created_at: String::new(),
             updated_at: String::new(),
         }

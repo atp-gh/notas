@@ -191,6 +191,7 @@ mod tests {
             id: NotebookId(id),
             parent_id: parent.map(NotebookId),
             name: name.into(),
+            is_trashed: false,
             created_at: "2026-01-01 00:00:00".into(),
             updated_at: "2026-01-01 00:00:00".into(),
         }

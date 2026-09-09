@@ -24,9 +24,10 @@ pub(crate) async fn ensure_note_uuids(pool: &SqlitePool) -> Result<usize> {
 /// Build the full local index the planner needs: every note (trashed
 /// included) with an assigned uuid, notebook path and tag names.
 pub(crate) async fn local_index(pool: &SqlitePool) -> Result<Vec<LocalNote>> {
-    // Notebook hierarchy: id -> (name, parent_id).
+    // Notebook hierarchy: id -> (name, parent_id). Trashed notebooks are
+    // excluded so remote paths never resolve into the trash.
     let notebooks = sqlx::query_as::<_, (i64, Option<i64>, String)>(
-        "SELECT id, parent_id, name FROM notebooks",
+        "SELECT id, parent_id, name FROM notebooks WHERE is_trashed = 0",
     )
     .fetch_all(pool)
     .await?;
@@ -147,12 +148,13 @@ pub(crate) async fn find_or_create_notebook_path(
         if segment.is_empty() {
             continue;
         }
-        let id: Option<crate::core::model::NotebookId> =
-            sqlx::query_scalar("SELECT id FROM notebooks WHERE parent_id IS ? AND name = ?")
-                .bind(parent_id)
-                .bind(segment)
-                .fetch_optional(&mut *executor)
-                .await?;
+        let id: Option<crate::core::model::NotebookId> = sqlx::query_scalar(
+            "SELECT id FROM notebooks WHERE parent_id IS ? AND name = ? AND is_trashed = 0",
+        )
+        .bind(parent_id)
+        .bind(segment)
+        .fetch_optional(&mut *executor)
+        .await?;
         parent_id = Some(match id {
             Some(id) => id,
             None => {

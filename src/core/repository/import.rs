@@ -498,12 +498,13 @@ async fn resolve_notebook_path(
             parent = Some(*id);
             continue;
         }
-        let found: Option<NotebookId> =
-            sqlx::query_scalar("SELECT id FROM notebooks WHERE parent_id IS ? AND name = ?")
-                .bind(parent)
-                .bind(segment)
-                .fetch_optional(&mut *tx)
-                .await?;
+        let found: Option<NotebookId> = sqlx::query_scalar(
+            "SELECT id FROM notebooks WHERE parent_id IS ? AND name = ? AND is_trashed = 0",
+        )
+        .bind(parent)
+        .bind(segment)
+        .fetch_optional(&mut *tx)
+        .await?;
         let id = match found {
             Some(id) => {
                 stats.notebooks_found += 1;

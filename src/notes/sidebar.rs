@@ -2,7 +2,7 @@
 //! section lives in [`crate::notes::notebook`] and is composed into the
 //! sidebar here.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -10,6 +10,7 @@ use libadwaita as adw;
 use relm4::RelmWidgetExt;
 
 use crate::application::ViewId;
+use crate::notes::Clipboard;
 use crate::tr;
 use crate::ui::dialogs;
 use crate::ui::protocol::AppMsg;
@@ -40,6 +41,7 @@ pub(crate) fn build(
     sender: &relm4::Sender<AppMsg>,
     pending_notebook: &Rc<Cell<i64>>,
     pending_tag: &Rc<Cell<i64>>,
+    clipboard: &Rc<RefCell<Option<Clipboard>>>,
 ) -> Sidebar {
     let search_entry = gtk::SearchEntry::new();
     search_entry.set_placeholder_text(Some(tr!("Search notes…")));
@@ -83,7 +85,8 @@ pub(crate) fn build(
         });
     }
 
-    let notebook_pane = crate::notes::notebook::build_tree_pane(window, sender, pending_notebook);
+    let notebook_pane =
+        crate::notes::notebook::build_tree_pane(window, sender, pending_notebook, clipboard);
 
     let tags_label = gtk::Label::new(Some(tr!("Tags")));
     tags_label.set_halign(gtk::Align::Start);

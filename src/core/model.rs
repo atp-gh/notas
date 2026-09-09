@@ -61,6 +61,8 @@ pub struct Notebook {
     pub parent_id: Option<NotebookId>,
     /// Display name.
     pub name: String,
+    /// Whether the notebook sits in the trash (hidden from normal lists).
+    pub is_trashed: bool,
     /// Creation time, as stored by SQLite (`YYYY-MM-DD HH:MM:SS`, UTC).
     pub created_at: String,
     /// Last modification time, in the same format as `created_at`.

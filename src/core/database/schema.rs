@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS notebooks (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     parent_id  INTEGER REFERENCES notebooks(id) ON DELETE CASCADE,
     name       TEXT NOT NULL,
+    is_trashed INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -70,12 +71,17 @@ CREATE TABLE IF NOT EXISTS sync_tombstones (
     deleted_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- A notebook is unique among its siblings: concurrent syncs resolving the
--- same path must not create duplicate "Parent/Child" rows. NULL parents
+-- A notebook is unique among its non-trashed siblings: concurrent
+-- syncs resolving the same path must not create duplicate "Parent/Child"
+-- rows. Trashed notebooks are excluded (partial index) so a trashed name
+-- never blocks creating or restoring a live sibling; NULL parents
 -- (top-level notebooks) are distinct in SQLite unique indexes, which is
 -- what we want: each NULL is a separate top-level slot keyed by name.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_notebooks_parent_name
-    ON notebooks(COALESCE(parent_id, -1), name);
+-- NOTE: the two notebook-trash indexes are NOT created here: legacy
+-- databases reach this DDL without the `is_trashed` column (added by
+-- migration v2), and indexing a missing column would fail. They are
+-- ensured after migrations run (see `migrations::ensure_indexes`), just
+-- like `idx_notes_uuid`.
 
 -- Version bookkeeping for the ordered migrations (see `migrations.rs`).
 -- A database that has this table with no rows was created by an older
@@ -87,9 +93,9 @@ CREATE TABLE IF NOT EXISTS schema_version (
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 INSERT INTO schema_version (version)
-SELECT 1
+SELECT 2
 WHERE NOT EXISTS (SELECT 1 FROM schema_version)
-  AND EXISTS (SELECT 1 FROM pragma_table_info('notes') WHERE name = 'uuid');
+  AND EXISTS (SELECT 1 FROM pragma_table_info('notebooks') WHERE name = 'is_trashed');
 
 -- Full-text search over title + content, external content keeps the index
 -- in sync with the notes table via triggers.

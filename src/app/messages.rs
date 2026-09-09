@@ -15,6 +15,7 @@ use sourceview5::prelude::*;
 use super::{App, AppSender};
 use crate::application::config::SyncType;
 use crate::application::{DbEvent, DbMsg};
+use crate::notes::{Clipboard, ClipboardKind};
 use crate::tr;
 use crate::ui::dialogs;
 use crate::ui::settings::build_settings_window;
@@ -78,6 +79,7 @@ impl App {
                     self.worker.emit(DbMsg::Search(query));
                 }
                 self.update_view_title();
+                self.update_trash_buttons();
             }
             AppMsg::NewNote => {
                 if self.dirty && self.current_note.is_some() {
@@ -102,6 +104,87 @@ impl App {
             }
             AppMsg::DeleteNotebook(id) => {
                 self.worker.emit(DbMsg::DeleteNotebook(id));
+            }
+            AppMsg::CopyNote(id) => {
+                *self.clipboard.borrow_mut() = Some(Clipboard {
+                    kind: ClipboardKind::Note,
+                    id: id.0,
+                    cut: false,
+                });
+                self.refresh_cut_dim();
+            }
+            AppMsg::CutNote(id) => {
+                // Save first so a pending edit is not lost to the move;
+                // the worker handles the save before the move.
+                if self.dirty && self.current_note == Some(id) {
+                    self.save_note();
+                }
+                *self.clipboard.borrow_mut() = Some(Clipboard {
+                    kind: ClipboardKind::Note,
+                    id: id.0,
+                    cut: true,
+                });
+                self.refresh_cut_dim();
+            }
+            AppMsg::CopyNotebook(id) => {
+                *self.clipboard.borrow_mut() = Some(Clipboard {
+                    kind: ClipboardKind::Notebook,
+                    id: id.0,
+                    cut: false,
+                });
+            }
+            AppMsg::CutNotebook(id) => {
+                if self.dirty {
+                    self.save_note();
+                }
+                *self.clipboard.borrow_mut() = Some(Clipboard {
+                    kind: ClipboardKind::Notebook,
+                    id: id.0,
+                    cut: true,
+                });
+            }
+            AppMsg::PasteToNotebook(target) => self.paste_clipboard(target),
+            AppMsg::PasteToNote(note) => {
+                // Trash has no paste target; the menu hides paste there,
+                // and this guard keeps stray messages from creating notes.
+                if matches!(self.mode, ViewMode::Trash) {
+                    return;
+                }
+                let parent = self
+                    .notes
+                    .iter()
+                    .find(|n| n.id == note)
+                    .and_then(|n| n.notebook_id);
+                self.paste_clipboard(parent);
+            }
+            AppMsg::TrashNoteById(id) => {
+                if self.dirty && self.current_note == Some(id) {
+                    self.save_note();
+                }
+                self.worker.emit(DbMsg::TrashNote(id));
+            }
+            AppMsg::TrashNotebook(id) => {
+                if self.dirty {
+                    self.save_note();
+                }
+                // Optimistically clear the editor when the open note lives
+                // inside the trashed subtree; the DataChanged refresh below
+                // confirms it from the database.
+                if let Some(current) = self.current_note
+                    && self.note_in_subtree(current, id)
+                {
+                    self.current_note = None;
+                    self.widgets.title_entry.set_text("");
+                    self.loading.set(true);
+                    self.widgets.editor.source_buffer.set_text("");
+                    self.loading.set(false);
+                    self.widgets.save_btn.set_sensitive(false);
+                    self.set_dirty(false);
+                }
+                self.worker.emit(DbMsg::TrashNotebook(id));
+            }
+            AppMsg::RestoreNotebook(id) => {
+                self.worker.emit(DbMsg::RestoreNotebook(id));
             }
             AppMsg::RenameTag { id, name } => {
                 let name = name.trim().to_string();

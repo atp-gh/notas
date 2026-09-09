@@ -72,6 +72,14 @@ async fn handle(repo: Repository, msg: DbMsg) -> DbEvent {
             .delete_note_forever(id)
             .await
             .map(|_| DbEvent::NoteDeletedForever { id }),
+        DbMsg::DuplicateNote { id, target } => repo
+            .duplicate_note(id, target)
+            .await
+            .map(DbEvent::NoteCreated),
+        DbMsg::MoveNote { id, target } => repo
+            .move_note(id, target)
+            .await
+            .map(|_| DbEvent::DataChanged),
         DbMsg::CreateNotebook { parent, name } => repo
             .create_notebook(parent, &name)
             .await
@@ -81,6 +89,19 @@ async fn handle(repo: Repository, msg: DbMsg) -> DbEvent {
             .await
             .map(|_| DbEvent::DataChanged),
         DbMsg::DeleteNotebook(id) => repo.delete_notebook(id).await.map(|_| DbEvent::DataChanged),
+        DbMsg::TrashNotebook(id) => repo.trash_notebook(id).await.map(|_| DbEvent::DataChanged),
+        DbMsg::RestoreNotebook(id) => repo
+            .restore_notebook(id)
+            .await
+            .map(|_| DbEvent::DataChanged),
+        DbMsg::MoveNotebook { id, target } => repo
+            .move_notebook(id, target)
+            .await
+            .map(|_| DbEvent::DataChanged),
+        DbMsg::DuplicateNotebook { id, target } => repo
+            .duplicate_notebook(id, target)
+            .await
+            .map(|_| DbEvent::DataChanged),
         DbMsg::RenameTag { id, name } => repo
             .rename_tag(id, &name)
             .await

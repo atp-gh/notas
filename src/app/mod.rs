@@ -30,6 +30,7 @@ use crate::app::db_worker::DbWorker;
 use crate::application::DbMsg;
 use crate::application::config::Settings;
 use crate::editor::{Editor, build_editor};
+use crate::notes::Clipboard;
 use crate::tr;
 use crate::ui::settings::build_settings_window;
 use crate::ui::status::sync_indicator_text;
@@ -69,6 +70,9 @@ pub struct App {
     suppress_selection: Rc<Cell<bool>>,
     suppress_tag_toggle: Rc<Cell<bool>>,
     pending_tag: Rc<Cell<i64>>,
+    /// In-app copy/cut buffer for right-click paste (shared with the menu
+    /// gesture closures so Paste can grey out while empty).
+    clipboard: Rc<RefCell<Option<Clipboard>>>,
 }
 
 /// Widget handles the message handlers touch. Widgets that are created and
@@ -97,6 +101,11 @@ pub struct Widgets {
     notes_empty: gtk::Label,
     restore_btn: gtk::Button,
     delete_btn: gtk::Button,
+    // The right-click menu boxes (kept so `update_trash_buttons` can swap
+    // the live/trash sets on mode change; the popover itself lives in the
+    // gesture closures that own a clone each).
+    note_normal_box: gtk::Box,
+    note_trash_box: gtk::Box,
     // editor
     title_entry: gtk::Entry,
     editor: Editor,
@@ -149,6 +158,8 @@ impl SimpleComponent for App {
         let tag_ids: Rc<RefCell<Vec<i64>>> = Rc::new(RefCell::new(Vec::new()));
         let pending_nb = Rc::new(Cell::new(0));
         let pending_tag = Rc::new(Cell::new(0));
+        let pending_note = Rc::new(Cell::new(0));
+        let clipboard: Rc<RefCell<Option<Clipboard>>> = Rc::new(RefCell::new(None));
 
         let worker: Controller<DbWorker> = relm4::ComponentBuilder::<DbWorker>::default()
             .launch(pool)
@@ -162,8 +173,13 @@ impl SimpleComponent for App {
         };
 
         // ------------------------------------------------------------- sidebar
-        let sidebar_parts =
-            crate::notes::sidebar::build(&window, &app_sender, &pending_nb, &pending_tag);
+        let sidebar_parts = crate::notes::sidebar::build(
+            &window,
+            &app_sender,
+            &pending_nb,
+            &pending_tag,
+            &clipboard,
+        );
         let sidebar = sidebar_parts.root;
         let search_entry = sidebar_parts.search_entry;
         let notebook_store = sidebar_parts.notebook_store;
@@ -225,6 +241,116 @@ impl SimpleComponent for App {
         let notes_empty = gtk::Label::new(Some(tr!("No notes yet")));
         notes_empty.add_css_class("dim-label");
         notes_empty.set_margin_top(24);
+
+        // Note right-click menu: copy/cut/paste/trash in normal views,
+        // restore/delete-forever in the trash view (boxes toggled by
+        // `update_trash_buttons`). The gesture selects the row first so
+        // paste targets the note under the cursor; paste needs a buffered
+        // entry and greys out while the clipboard is empty.
+        let note_menu = gtk::Popover::new();
+        let note_normal_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        note_normal_box.set_margin_all(8);
+        let note_copy_btn = gtk::Button::with_label(tr!("Copy"));
+        let note_cut_btn = gtk::Button::with_label(tr!("Cut"));
+        let note_paste_btn = gtk::Button::with_label(tr!("Paste"));
+        let note_trash_btn = gtk::Button::with_label(tr!("Move to trash"));
+        note_trash_btn.add_css_class("destructive-action");
+        note_normal_box.append(&note_copy_btn);
+        note_normal_box.append(&note_cut_btn);
+        note_normal_box.append(&note_paste_btn);
+        note_normal_box.append(&note_trash_btn);
+        let note_trash_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        note_trash_box.set_margin_all(8);
+        note_trash_box.set_visible(false);
+        let note_restore_btn = gtk::Button::with_label(tr!("Restore"));
+        let note_delete_btn = gtk::Button::with_label(tr!("Delete forever"));
+        note_delete_btn.add_css_class("destructive-action");
+        note_trash_box.append(&note_restore_btn);
+        note_trash_box.append(&note_delete_btn);
+        let note_menu_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        note_menu_box.append(&note_normal_box);
+        note_menu_box.append(&note_trash_box);
+        note_menu.set_child(Some(&note_menu_box));
+        // Parent once to the (stable) list: parenting to the clicked row
+        // destroys the popover with the row on the next list rebuild
+        // ("Finalizing GtkListBoxRow, but it still has children"), and
+        // re-parenting per click trips `gtk_widget_set_parent`. The cursor
+        // position still comes from `set_pointing_to` per click.
+        note_menu.set_parent(&notes_list);
+        {
+            let s = app_sender.clone();
+            let pending = pending_note.clone();
+            let menu = note_menu.clone();
+            note_copy_btn.connect_clicked(move |_| {
+                let _ = s.send(AppMsg::CopyNote(NoteId(pending.get())));
+                menu.popdown();
+            });
+            let s = app_sender.clone();
+            let pending = pending_note.clone();
+            let menu = note_menu.clone();
+            note_cut_btn.connect_clicked(move |_| {
+                let _ = s.send(AppMsg::CutNote(NoteId(pending.get())));
+                menu.popdown();
+            });
+            let s = app_sender.clone();
+            let pending = pending_note.clone();
+            let menu = note_menu.clone();
+            note_paste_btn.connect_clicked(move |_| {
+                let _ = s.send(AppMsg::PasteToNote(NoteId(pending.get())));
+                menu.popdown();
+            });
+            let s = app_sender.clone();
+            let pending = pending_note.clone();
+            let menu = note_menu.clone();
+            note_trash_btn.connect_clicked(move |_| {
+                let _ = s.send(AppMsg::TrashNoteById(NoteId(pending.get())));
+                menu.popdown();
+            });
+            let s = app_sender.clone();
+            let menu = note_menu.clone();
+            note_restore_btn.connect_clicked(move |_| {
+                let _ = s.send(AppMsg::RestoreNote);
+                menu.popdown();
+            });
+            let s = app_sender.clone();
+            let menu = note_menu.clone();
+            note_delete_btn.connect_clicked(move |_| {
+                let _ = s.send(AppMsg::DeleteForever);
+                menu.popdown();
+            });
+        }
+        {
+            let list = notes_list.clone();
+            let ids = row_ids.clone();
+            let board = clipboard.clone();
+            let suppress = suppress_selection.clone();
+            let s = app_sender.clone();
+            let gesture = gtk::GestureClick::new();
+            gesture.set_button(3);
+            gesture.connect_pressed(move |gesture, _n, x, y| {
+                let Some(row) = list.row_at_y(y as i32) else {
+                    return;
+                };
+                let idx = row.index() as usize;
+                let Some(&id) = ids.borrow().get(idx) else {
+                    return;
+                };
+                pending_note.set(id);
+                // Highlight without loading: the menu actions carry the
+                // id explicitly, except in the trash view where
+                // restore/delete act on the list selection.
+                suppress.set(true);
+                list.select_row(Some(&row));
+                suppress.set(false);
+                let _ = s.send(AppMsg::SelectNote(NoteId(id)));
+                note_paste_btn.set_sensitive(board.borrow().is_some());
+                let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+                note_menu.set_pointing_to(Some(&rect));
+                note_menu.popup();
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+            });
+            notes_list.add_controller(gesture);
+        }
 
         let notes_scroll = gtk::ScrolledWindow::new();
         notes_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
@@ -496,6 +622,8 @@ impl SimpleComponent for App {
             notes_empty,
             restore_btn,
             delete_btn,
+            note_normal_box,
+            note_trash_box,
             title_entry,
             editor,
             preview_btn,
@@ -533,6 +661,7 @@ impl SimpleComponent for App {
             suppress_selection,
             suppress_tag_toggle,
             pending_tag,
+            clipboard,
         };
 
         // Initial data load.

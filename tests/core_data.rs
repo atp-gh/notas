@@ -8,12 +8,14 @@ use notas::core::database;
 use sqlx::{Row, SqlitePool};
 
 /// A v0.1-era database: the schema *before* the sync feature added
-/// `notes.uuid` and before the `schema_version` table existed.
+/// `notes.uuid` and before notebook trash added `notebooks.is_trashed`,
+/// and before the `schema_version` table existed.
 async fn create_legacy_v0_pool(path: &std::path::Path) -> SqlitePool {
     let pool = database::connect(path).await.unwrap();
     // Roll the freshly created database back to the legacy shape: drop the
-    // version table and rebuild `notes` without the uuid column (works on
-    // every SQLite build, unlike DROP COLUMN).
+    // version table and rebuild `notes` without the uuid column and
+    // `notebooks` without the is_trashed column (works on every SQLite
+    // build, unlike DROP COLUMN).
     sqlx::query("DROP TABLE schema_version")
         .execute(&pool)
         .await
@@ -43,6 +45,33 @@ async fn create_legacy_v0_pool(path: &std::path::Path) -> SqlitePool {
     .execute(&pool)
     .await
     .unwrap();
+    sqlx::query("DROP INDEX IF EXISTS idx_notebooks_parent_name")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP INDEX IF EXISTS idx_notebooks_trashed")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(
+        "PRAGMA foreign_keys=OFF;\
+         CREATE TABLE notebooks_legacy (\
+             id         INTEGER PRIMARY KEY AUTOINCREMENT,\
+             parent_id  INTEGER REFERENCES notebooks(id) ON DELETE CASCADE,\
+             name       TEXT NOT NULL,\
+             created_at TEXT NOT NULL DEFAULT (datetime('now')),\
+             updated_at TEXT NOT NULL DEFAULT (datetime('now'))\
+         );\
+         INSERT INTO notebooks_legacy SELECT id, parent_id, name, created_at, updated_at FROM notebooks;\
+         DROP TABLE notebooks;\
+         ALTER TABLE notebooks_legacy RENAME TO notebooks;\
+         CREATE UNIQUE INDEX idx_notebooks_parent_name \
+         ON notebooks(COALESCE(parent_id, -1), name);\
+         PRAGMA foreign_keys=ON;",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     pool
 }
 
@@ -61,14 +90,14 @@ async fn legacy_database_without_uuid_column_is_upgraded() {
         pool.close().await;
     }
 
-    // Re-open with the current code: the upgrade must add uuid, index and
-    // the version row without losing data.
+    // Re-open with the current code: the upgrade must add uuid, notebook
+    // trash and the version rows without losing data.
     let pool = database::connect(&path).await.unwrap();
     let version: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_version")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 1, "legacy database must be upgraded to v1");
+    assert_eq!(version, 2, "legacy database must be upgraded to v2");
 
     let has_uuid = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM pragma_table_info('notes') WHERE name = 'uuid'",
@@ -77,6 +106,14 @@ async fn legacy_database_without_uuid_column_is_upgraded() {
     .await
     .unwrap();
     assert_eq!(has_uuid, 1, "uuid column must be added");
+
+    let has_trash = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM pragma_table_info('notebooks') WHERE name = 'is_trashed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(has_trash, 1, "notebooks.is_trashed column must be added");
 
     let title: String = sqlx::query_scalar("SELECT title FROM notes")
         .fetch_one(&pool)

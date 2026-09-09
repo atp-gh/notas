@@ -171,6 +171,106 @@ pub(crate) async fn list_trashed(pool: &SqlitePool) -> Result<Vec<Note>> {
     Ok(rows)
 }
 
+/// Duplicate a note into `target` (or its current notebook when `None`).
+/// The copy keeps title (with a `(copy)` suffix), content and tags, but
+/// gets fresh ids, timestamps and `is_trashed = 0` so sync uploads it as
+/// a new note instead of conflicting with the source.
+pub(crate) async fn duplicate(
+    pool: &SqlitePool,
+    id: NoteId,
+    target: Option<NotebookId>,
+) -> Result<Note> {
+    let mut tx = pool.begin().await?;
+    let source: Option<Note> = sqlx::query_as::<_, Note>(
+        "SELECT id, notebook_id, title, content, is_trashed, created_at, updated_at \
+         FROM notes WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(source) = source else {
+        return Err(crate::core::error::Error::NoteNotFound(id));
+    };
+    let dest = target.or(source.notebook_id);
+    if let Some(nb) = dest {
+        let exists: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM notebooks WHERE id = ? AND is_trashed = 0")
+                .bind(nb)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if exists.is_none() {
+            return Err(crate::core::error::Error::NotebookNotFound(nb));
+        }
+    }
+    let titles: Vec<String> = if let Some(nb) = dest {
+        sqlx::query_scalar("SELECT title FROM notes WHERE notebook_id IS ? AND is_trashed = 0")
+            .bind(nb)
+            .fetch_all(&mut *tx)
+            .await?
+    } else {
+        sqlx::query_scalar("SELECT title FROM notes WHERE notebook_id IS NULL AND is_trashed = 0")
+            .fetch_all(&mut *tx)
+            .await?
+    };
+    // Titles are not unique, but numbering repeated pastes keeps the list
+    // readable (`X (copy)`, `X (copy 2)`…).
+    let existing: std::collections::HashSet<String> = titles.into_iter().collect();
+    let title = crate::core::repository::notebooks::unique_copy_name(&source.title, &existing);
+    let new_id: NoteId = sqlx::query_scalar(
+        "INSERT INTO notes (notebook_id, title, content, is_trashed) \
+         VALUES (?, ?, ?, 0) RETURNING id",
+    )
+    .bind(dest)
+    .bind(&title)
+    .bind(&source.content)
+    .fetch_one(&mut *tx)
+    .await?;
+    let tag_names: Vec<String> = sqlx::query_scalar(
+        "SELECT t.name FROM tags t JOIN note_tags nt ON nt.tag_id = t.id \
+         WHERE nt.note_id = ? ORDER BY t.name",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    crate::core::repository::tags::replace_note_tags(&mut tx, new_id, &tag_names).await?;
+    tx.commit().await?;
+    let created = sqlx::query_as::<_, Note>(
+        "SELECT id, notebook_id, title, content, is_trashed, created_at, updated_at \
+         FROM notes WHERE id = ?",
+    )
+    .bind(new_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(created)
+}
+
+/// Move a note into `target` (`None` = unfiled). Moving within the same
+/// notebook is a no-op.
+pub(crate) async fn move_to(
+    pool: &SqlitePool,
+    id: NoteId,
+    target: Option<NotebookId>,
+) -> Result<()> {
+    if let Some(nb) = target {
+        let exists: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM notebooks WHERE id = ? AND is_trashed = 0")
+                .bind(nb)
+                .fetch_optional(pool)
+                .await?;
+        if exists.is_none() {
+            return Err(crate::core::error::Error::NotebookNotFound(nb));
+        }
+    }
+    let result =
+        sqlx::query("UPDATE notes SET notebook_id = ?, updated_at = datetime('now') WHERE id = ?")
+            .bind(target)
+            .bind(id)
+            .execute(pool)
+            .await?;
+    ensure_affected(result.rows_affected(), || {
+        crate::core::error::Error::NoteNotFound(id)
+    })
+}
 /// Turn a zero `rows_affected` into the caller-supplied typed NotFound.
 pub(crate) fn ensure_affected(
     rows_affected: u64,

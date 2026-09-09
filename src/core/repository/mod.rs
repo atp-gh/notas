@@ -93,6 +93,69 @@ impl Repository {
         notebooks::list(&self.pool).await
     }
 
+    /// All trashed notebooks, sorted by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
+    pub async fn list_trashed_notebooks(&self) -> Result<Vec<Notebook>> {
+        notebooks::list_trashed(&self.pool).await
+    }
+
+    /// Move a notebook subtree under another parent (`None` = top level).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::NotebookNotFound`] when either
+    /// notebook does not exist,
+    /// [`crate::core::error::Error::InvalidInput`] when the move would
+    /// cycle the tree, or [`crate::core::error::Error::Database`] on failure.
+    pub async fn move_notebook(&self, id: NotebookId, target: Option<NotebookId>) -> Result<()> {
+        notebooks::move_to(&self.pool, id, target).await
+    }
+
+    /// Deep-copy a notebook subtree under another parent, duplicating every
+    /// contained note (title + content + tags, fresh ids).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::NotebookNotFound`] when either
+    /// notebook does not exist,
+    /// [`crate::core::error::Error::InvalidInput`] when the copy would land
+    /// inside its own subtree, or [`crate::core::error::Error::Database`] on
+    /// failure.
+    pub async fn duplicate_notebook(
+        &self,
+        id: NotebookId,
+        target: Option<NotebookId>,
+    ) -> Result<Notebook> {
+        notebooks::duplicate_subtree(&self.pool, id, target).await
+    }
+
+    /// Recursively move a notebook subtree to the trash (notebooks plus
+    /// every contained note).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::NotebookNotFound`] when the
+    /// notebook does not exist, or [`crate::core::error::Error::Database`]
+    /// on failure.
+    pub async fn trash_notebook(&self, id: NotebookId) -> Result<()> {
+        notebooks::trash_subtree(&self.pool, id).await
+    }
+
+    /// Recursively restore a trashed notebook subtree (ancestors first so
+    /// the tree never dangles).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::NotebookNotFound`] when the
+    /// notebook does not exist, or [`crate::core::error::Error::Database`]
+    /// on failure.
+    pub async fn restore_notebook(&self, id: NotebookId) -> Result<()> {
+        notebooks::restore_subtree(&self.pool, id).await
+    }
+
     // -------------------------------------------------------------- notes
 
     /// Insert a note (with the given title) and return the created row.
@@ -204,6 +267,30 @@ impl Repository {
     /// Returns [`crate::core::error::Error::Database`] when the query fails.
     pub async fn list_trashed(&self) -> Result<Vec<Note>> {
         notes::list_trashed(&self.pool).await
+    }
+
+    /// Duplicate a note into another notebook (fresh ids, `(copy)` title).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::NoteNotFound`] when the note
+    /// does not exist, [`crate::core::error::Error::NotebookNotFound`] when
+    /// the target does not exist, or [`crate::core::error::Error::Database`]
+    /// on failure.
+    pub async fn duplicate_note(&self, id: NoteId, target: Option<NotebookId>) -> Result<Note> {
+        notes::duplicate(&self.pool, id, target).await
+    }
+
+    /// Move a note into another notebook (`None` = unfiled).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::NoteNotFound`] when the note
+    /// does not exist, [`crate::core::error::Error::NotebookNotFound`] when
+    /// the target does not exist, or [`crate::core::error::Error::Database`]
+    /// on failure.
+    pub async fn move_note(&self, id: NoteId, target: Option<NotebookId>) -> Result<()> {
+        notes::move_to(&self.pool, id, target).await
     }
 
     // --------------------------------------------------------------- tags

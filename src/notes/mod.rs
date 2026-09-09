@@ -9,13 +9,50 @@ pub(crate) mod notebook;
 pub(crate) mod sidebar;
 pub(crate) mod tag_editor;
 
+/// What the in-app copy/cut buffer holds: one notebook or one note.
+///
+/// Kept in memory only (never touches the system clipboard): `Copy`
+/// duplicates on paste and stays armed for repeated pastes, `Cut` moves
+/// once and disarms. Small enough (`Copy`) to pass by value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClipboardKind {
+    /// A single note.
+    Note,
+    /// A notebook subtree.
+    Notebook,
+}
+
+/// One buffered copy/cut entry for right-click paste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Clipboard {
+    /// Whether the buffered row is a note or a notebook.
+    pub kind: ClipboardKind,
+    /// Raw row id (`NoteId.0` / `NotebookId.0`; raw so menus stay GTK-plain).
+    pub id: i64,
+    /// `true` = cut (move once, then disarm), `false` = copy (repeatable).
+    pub cut: bool,
+}
+
 use gtk::prelude::*;
 use relm4::RelmWidgetExt;
 
-/// Remove every child row from a note list.
+/// Remove every note row from a note list.
+///
+/// Only `ListBoxRow`s are removed: the right-click popover is parented to
+/// the list itself (it outlives rebuilds), and `remove()` on it would fail
+/// with "Tried to remove non-child" while `first_child()` keeps returning
+/// it — an infinite loop on every refresh.
 pub(crate) fn clear_list(list: &gtk::ListBox) {
-    while let Some(child) = list.first_child() {
-        list.remove(&child);
+    let mut rows = Vec::new();
+    let mut child = list.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if widget.downcast_ref::<gtk::ListBoxRow>().is_some() {
+            rows.push(widget);
+        }
+    }
+    for row in rows {
+        list.remove(&row);
     }
 }
 

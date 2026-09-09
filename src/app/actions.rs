@@ -11,11 +11,11 @@
 use gtk::prelude::*;
 use relm4::ComponentController;
 
-use notas::core::model::{NoteId, SearchHit};
+use notas::core::model::{NoteId, NotebookId, SearchHit};
 
 use super::App;
 use crate::application::DbMsg;
-use crate::notes::{clear_flow, row as note_row};
+use crate::notes::{ClipboardKind, clear_flow, row as note_row};
 use crate::tr;
 use crate::ui::{AppMsg, ViewMode};
 
@@ -124,6 +124,108 @@ impl App {
         self.widgets
             .delete_btn
             .set_sensitive(self.selected_trashed.is_some());
+        // The note right-click menu mirrors the header: trash rows offer
+        // restore/delete-forever, live rows offer copy/cut/paste/trash.
+        self.widgets.note_normal_box.set_visible(!trash);
+        self.widgets.note_trash_box.set_visible(trash);
+    }
+
+    /// Execute the pending copy/cut buffer against `target` (`None` = top
+    /// level / unfiled). Copies stay armed for repeated pastes; cuts move
+    /// once and then disarm.
+    pub(super) fn paste_clipboard(&mut self, target: Option<NotebookId>) {
+        let Some(entry) = *self.clipboard.borrow() else {
+            return;
+        };
+        match (entry.kind, entry.cut) {
+            (ClipboardKind::Note, false) => {
+                self.worker.emit(DbMsg::DuplicateNote {
+                    id: NoteId(entry.id),
+                    target,
+                });
+            }
+            (ClipboardKind::Note, true) => {
+                if self.dirty && self.current_note == Some(NoteId(entry.id)) {
+                    self.save_note();
+                }
+                self.worker.emit(DbMsg::MoveNote {
+                    id: NoteId(entry.id),
+                    target,
+                });
+                self.clipboard.borrow_mut().take();
+                self.refresh_cut_dim();
+            }
+            (ClipboardKind::Notebook, false) => {
+                self.worker.emit(DbMsg::DuplicateNotebook {
+                    id: NotebookId(entry.id),
+                    target,
+                });
+            }
+            (ClipboardKind::Notebook, true) => {
+                if self.dirty {
+                    self.save_note();
+                }
+                self.worker.emit(DbMsg::MoveNotebook {
+                    id: NotebookId(entry.id),
+                    target,
+                });
+                self.clipboard.borrow_mut().take();
+            }
+        }
+    }
+
+    /// Whether `note` currently lives inside the `root` notebook subtree
+    /// (used to clear the editor optimistically on subtree trash).
+    pub(super) fn note_in_subtree(&self, note: NoteId, root: NotebookId) -> bool {
+        let Some(notebook) = self
+            .notes
+            .iter()
+            .find(|n| n.id == note)
+            .and_then(|n| n.notebook_id)
+        else {
+            return false;
+        };
+        let mut current = Some(notebook);
+        // Depth guard against a corrupt parent cycle.
+        for _ in 0..64 {
+            let Some(id) = current else {
+                return false;
+            };
+            if id == root {
+                return true;
+            }
+            current = self
+                .notebooks
+                .iter()
+                .find(|n| n.id == id)
+                .and_then(|n| n.parent_id);
+        }
+        false
+    }
+
+    /// Dim the cut note row (if any) so the pending move is visible.
+    /// Notebook-tree dimming would need a per-row opacity model column on
+    /// the shared `CellRendererText`; the tree keeps its current renderer
+    /// and only the note list dims in V1.
+    pub(super) fn refresh_cut_dim(&self) {
+        let cut = match *self.clipboard.borrow() {
+            Some(entry) if entry.cut && entry.kind == ClipboardKind::Note => Some(entry.id),
+            _ => None,
+        };
+        let ids = self.row_ids.borrow();
+        let mut child = self.widgets.notes_list.first_child();
+        let mut index = 0_usize;
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            // Count rows only: the context popover is parented to the list
+            // itself and must not shift the row_ids mapping.
+            let Some(row) = widget.downcast_ref::<gtk::ListBoxRow>() else {
+                continue;
+            };
+            let dimmed = cut.is_some_and(|cut| ids.get(index).is_some_and(|&row| row == cut));
+            row.set_opacity(if dimmed { 0.5 } else { 1.0 });
+            index += 1;
+        }
     }
 
     // ------------------------------------------------------------ rebuilds
@@ -169,6 +271,9 @@ impl App {
                 gesture.set_button(3);
                 gesture.connect_pressed(move |_g, _n, _x, _y| {
                     pending.set(tag_id.0);
+                    // Unparent first: without this the second right-click
+                    // trips `gtk_widget_set_parent` (already has a parent).
+                    menu.unparent();
                     menu.set_parent(&chip_widget);
                     menu.present();
                 });
@@ -196,6 +301,7 @@ impl App {
         if let Some(id) = self.current_note {
             self.select_note_row(id);
         }
+        self.refresh_cut_dim();
     }
 
     pub(super) fn render_search_results(&self, hits: Vec<SearchHit>) {

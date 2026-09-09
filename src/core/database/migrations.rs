@@ -40,6 +40,18 @@ const MIGRATIONS: &[Migration] = &[
         sql: "ALTER TABLE notes ADD COLUMN uuid TEXT;\n\
               CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_uuid ON notes(uuid);",
     },
+    // v1 -> v2: notebook trash. The old sibling-uniqueness index covered
+    // trashed rows too, so it is rebuilt as a partial index; existing
+    // databases cannot have trashed notebooks yet, so the rebuild is safe.
+    Migration {
+        version: 2,
+        description: "add notebooks.is_trashed soft-delete for recursive trash",
+        sql: "ALTER TABLE notebooks ADD COLUMN is_trashed INTEGER NOT NULL DEFAULT 0;\n\
+              DROP INDEX IF EXISTS idx_notebooks_parent_name;\n\
+              CREATE UNIQUE INDEX IF NOT EXISTS idx_notebooks_parent_name \
+              ON notebooks(COALESCE(parent_id, -1), name) WHERE is_trashed = 0;\n\
+              CREATE INDEX IF NOT EXISTS idx_notebooks_trashed ON notebooks(is_trashed);",
+    },
 ];
 
 /// Read the recorded schema version; databases without the version table
@@ -101,6 +113,15 @@ async fn ensure_indexes(conn: &mut SqliteConnection) -> Result<()> {
     sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_uuid ON notes(uuid)")
         .execute(&mut *conn)
         .await?;
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_notebooks_parent_name \
+         ON notebooks(COALESCE(parent_id, -1), name) WHERE is_trashed = 0",
+    )
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_notebooks_trashed ON notebooks(is_trashed)")
+        .execute(&mut *conn)
+        .await?;
     Ok(())
 }
 
@@ -110,7 +131,7 @@ mod tests {
 
     /// Current schema version. Bump when adding a migration and append
     /// the matching step to [`MIGRATIONS`].
-    const SCHEMA_VERSION: i64 = 1;
+    const SCHEMA_VERSION: i64 = 2;
 
     #[test]
     fn migrations_are_ordered_and_versioned() {
