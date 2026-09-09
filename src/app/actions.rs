@@ -304,12 +304,12 @@ impl App {
         self.refresh_cut_dim();
     }
 
-    pub(super) fn render_search_results(&self, hits: Vec<SearchHit>) {
+    pub(super) fn render_search_results(&self, hits: &[SearchHit]) {
         crate::notes::list::render_search(
             &self.widgets.notes_list,
             &self.widgets.notes_empty,
             &self.row_ids,
-            &hits,
+            hits,
             note_row,
         );
     }

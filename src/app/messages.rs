@@ -585,7 +585,7 @@ impl App {
                 self.rebuild_tag_editor();
             }
             DbEvent::SearchResults(hits) => {
-                self.render_search_results(hits);
+                self.render_search_results(&hits);
             }
             DbEvent::ExportDone(result) => match result {
                 Ok(n) => {
