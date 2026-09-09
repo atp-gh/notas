@@ -2,8 +2,8 @@
 //!
 //! The query builder is a pure function: user input in, safe MATCH
 //! expression out. The database query lives in
-//! [`crate::core::repository::search`], which keeps this module free of
-//! I/O and easy to test exhaustively.
+//! [`crate::core::repository::Repository::search`], which keeps this module
+//! free of I/O and easy to test exhaustively.
 
 /// Escape free-form user input into a safe FTS5 MATCH expression: each
 /// whitespace-separated token becomes a quoted phrase, and embedded double
