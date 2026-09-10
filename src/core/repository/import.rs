@@ -114,7 +114,7 @@ pub fn parse_front_matter(content: &str) -> Option<(FrontMatter, &str)> {
     let mut cursor = 0usize;
     for line in first.split_inclusive('\n') {
         let text = line.trim_end_matches(['\n', '\r']);
-        if text == "---" {
+        if text.trim() == "---" {
             return Some((fm, &first[cursor + line.len()..]));
         }
         if tags_block {
@@ -241,10 +241,17 @@ fn flow_list(value: &str) -> Vec<String> {
 /// Notas timestamp.
 ///
 /// Accepts what Joplin and Notas emit: the plain `YYYY-MM-DD HH:MM:SS`
-/// form (passed through, any timezone offset applied) and ISO 8601
-/// `YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH:MM]` (normalized to UTC, fractional
-/// seconds dropped). Returns `None` for anything else; the caller falls
-/// back to the current time.
+/// form, Joplin's latest variant with a `Z` suffix (`YYYY-MM-DD HH:MM:SSZ`),
+/// ISO 8601 `YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH:MM]`, the short clock form
+/// without seconds (`YYYY-MM-DD HH:MM`, e.g. Joplin's `2019-05-01 16:54`,
+/// seconds default to `00`), and a bare date (`YYYY-MM-DD`, midnight).
+/// Fractional seconds are dropped and any zone offset is normalized to UTC.
+/// Returns `None` for anything else; the caller falls back to the current
+/// time.
+///
+/// Naive timestamps (no zone suffix) are treated as UTC. Joplin treats them
+/// as local time, but Notas stores everything in UTC and has no local-time
+/// concept, so UTC is the deterministic choice.
 ///
 /// The conversion is deliberate and local (no SQL `datetime()`): relying
 /// on `datetime(?)` inside the note INSERT silently stored the raw value
@@ -254,7 +261,15 @@ fn flow_list(value: &str) -> Vec<String> {
 #[must_use]
 pub fn to_sqlite_datetime(value: &str) -> Option<String> {
     let value = value.trim();
-    if value.len() < 19 {
+    if value.len() == 10 {
+        // Bare date: midnight UTC.
+        let (year, month, day) = parse_ymd(value)?;
+        if !is_valid_day(year, month, day) {
+            return None;
+        }
+        return Some(format!("{year:04}-{month:02}-{day:02} 00:00:00"));
+    }
+    if value.len() < 16 {
         return None;
     }
     if !matches!(value.as_bytes().get(10), Some(b' ' | b'T')) {
@@ -301,27 +316,36 @@ fn parse_ymd(value: &str) -> Option<(u32, u32, u32)> {
     ((1..=12).contains(&month) && (1..=31).contains(&day)).then_some((year, month, day))
 }
 
-/// Parse `HH:MM:SS[.fff][Z|±HH:MM]` into the clock time and the timezone
-/// offset in seconds east of UTC (0 when absent). A `:60` second (leap
+/// Parse `HH:MM[:SS][.fff][Z|±HH:MM]` into the clock time and the timezone
+/// offset in seconds east of UTC (0 when absent). The seconds component is
+/// optional (Joplin exports like `2019-05-01 16:54`); a `:60` second (leap
 /// second) is tolerated, mirroring the sync planner.
 fn parse_time_with_zone(value: &str) -> Option<(u32, u32, u32, i64)> {
     let bytes = value.as_bytes();
-    if bytes.len() < 8
+    if bytes.len() < 5
         || bytes[2] != b':'
-        || bytes[5] != b':'
         || !bytes[..2].iter().all(u8::is_ascii_digit)
         || !bytes[3..5].iter().all(u8::is_ascii_digit)
-        || !bytes[6..8].iter().all(u8::is_ascii_digit)
     {
         return None;
     }
     let hour: u32 = value[..2].parse().ok()?;
     let minute: u32 = value[3..5].parse().ok()?;
-    let second: u32 = value[6..8].parse().ok()?;
-    if hour > 23 || minute > 59 || second > 60 {
+    if hour > 23 || minute > 59 {
         return None;
     }
-    let mut rest = &value[8..];
+    let (second, mut rest) = if bytes.len() >= 8 && bytes[5] == b':' {
+        if !bytes[6..8].iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let second: u32 = value[6..8].parse().ok()?;
+        if second > 60 {
+            return None;
+        }
+        (second, &value[8..])
+    } else {
+        (0, &value[5..])
+    };
     if let Some(after_dot) = rest.strip_prefix('.') {
         let digits = after_dot.bytes().take_while(u8::is_ascii_digit).count();
         if digits == 0 {
@@ -761,6 +785,26 @@ mod tests {
     }
 
     #[test]
+    fn joplin_latest_full_fields_parse_and_ignore_extras() {
+        let (fm, body) = parse(
+            "---\ntitle: All Fields\nupdated: 2019-05-01 16:54:00Z\ncreated: 2019-05-01 16:54\nsource: https://joplinapp.org\nauthor: Joplin\nlatitude: 37.084021\nlongitude: -94.51350100\naltitude: 0.0000\ncompleted?: no\ndue: 2021-08-22 00:00:00Z\ntags:\n  - joplin\n  - note\n--- \n\nAll of this metadata is available to be imported/exported.",
+        );
+        assert_eq!(fm.title.as_deref(), Some("All Fields"));
+        assert_eq!(fm.created.as_deref(), Some("2019-05-01 16:54"));
+        assert_eq!(fm.updated.as_deref(), Some("2019-05-01 16:54:00Z"));
+        assert_eq!(fm.tags, vec!["joplin", "note"]);
+        assert_eq!(
+            to_sqlite_datetime(&fm.created.unwrap()),
+            Some("2019-05-01 16:54:00".to_string())
+        );
+        assert_eq!(
+            to_sqlite_datetime(&fm.updated.unwrap()),
+            Some("2019-05-01 16:54:00".to_string())
+        );
+        assert!(body.contains("All of this metadata"));
+    }
+
+    #[test]
     fn notas_export_front_matter_round_trips() {
         let (fm, body) = parse(
             "---\ntitle: \"Deep note\"\ncreated: \"2026-01-01 00:00:00\"\nupdated: \"2026-01-02 03:04:05\"\n---\n\ncontent",
@@ -845,16 +889,43 @@ mod tests {
     }
 
     #[test]
+    fn to_sqlite_datetime_accepts_joplin_short_forms() {
+        // Joplin's latest variant: space separator with Z, no seconds.
+        assert_eq!(
+            to_sqlite_datetime("2019-05-01 16:54"),
+            Some("2019-05-01 16:54:00".to_string())
+        );
+        assert_eq!(
+            to_sqlite_datetime("1970-01-01 00:00Z"),
+            Some("1970-01-01 00:00:00".to_string())
+        );
+        assert_eq!(
+            to_sqlite_datetime("2025-09-22 03:27:26Z"),
+            Some("2025-09-22 03:27:26".to_string())
+        );
+        // Bare date means midnight.
+        assert_eq!(
+            to_sqlite_datetime("2024-01-01"),
+            Some("2024-01-01 00:00:00".to_string())
+        );
+        // Short form with T separator and offset.
+        assert_eq!(
+            to_sqlite_datetime("2024-01-01T10:00+08:00"),
+            Some("2024-01-01 02:00:00".to_string())
+        );
+    }
+
+    #[test]
     fn to_sqlite_datetime_rejects_invalid_input() {
         for bad in [
             "",
             "garbage",
-            "2024-01-01",
-            "2024-01-01T10:00",
             "2024-13-01T10:00:00Z",
             "2024-01-01T25:00:00Z",
             "2024-02-30T10:00:00Z",
             "2024-01-01T10:00:00+8:00",
+            "2024-01-01 25:00",
+            "2024-02-30",
         ] {
             assert_eq!(to_sqlite_datetime(bad), None, "{bad}");
         }

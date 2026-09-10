@@ -72,17 +72,63 @@ pub fn yaml_scalar(value: &str) -> String {
     out
 }
 
-/// Build the frontmatter block for one note. Titles are YAML-encoded; the
-/// timestamps come from SQLite's fixed `YYYY-MM-DD HH:MM:SS` format and
-/// need no quoting, but are quoted anyway for uniformity.
+/// Convert a SQLite `YYYY-MM-DD HH:MM:SS` (UTC) timestamp to the Joplin
+/// front-matter variant `YYYY-MM-DD HH:MM:SSZ` (space-separated, `Z`
+/// suffix, no fractional seconds).
+///
+/// The database keeps the bare space-separated form (lexicographically
+/// sortable, `datetime('now')`-native); only the export boundary appends
+/// the `Z`. Inputs already in Joplin shapes (`T` or space separator, with
+/// or without fractional seconds/`Z`) are normalized to the same variant
+/// so the function is idempotent; anything else is returned as-is and the
+/// importer falls back to `now`.
 #[must_use]
-pub fn frontmatter(note: &Note) -> String {
-    format!(
-        "---\ntitle: {}\ncreated: {}\nupdated: {}\n---\n\n",
+pub fn to_joplin_datetime(sqlite: &str) -> String {
+    let s = sqlite.trim();
+    let b = s.as_bytes();
+    if b.len() >= 19 && (b[10] == b' ' || b[10] == b'T') {
+        let mut prefix = s[..19].to_string();
+        prefix.replace_range(10..11, " ");
+        return format!("{prefix}Z");
+    }
+    s.to_string()
+}
+
+/// Format a tag list as a Joplin-compatible YAML flow list (`[a, b]`),
+/// quoting each name so commas/quotes inside a tag survive the round-trip.
+/// Empty input yields `[]`.
+#[must_use]
+pub fn format_tags(tags: &[String]) -> String {
+    if tags.is_empty() {
+        return "[]".to_string();
+    }
+    let mut sorted = tags.to_vec();
+    sorted.sort();
+    let inner: Vec<String> = sorted.iter().map(|t| yaml_scalar(t)).collect();
+    format!("[{}]", inner.join(", "))
+}
+
+/// Build the frontmatter block for one note in Joplin's
+/// "Markdown + Front Matter" shape: `title`, Joplin-variant `created`/
+/// `updated` (`YYYY-MM-DD HH:MM:SSZ`, plain/unquoted like Joplin emits),
+/// `tags` flow list and stable `id` (the sync uuid). Titles and tag names
+/// are YAML-encoded; timestamps and `uuid` are fixed-shape and emitted
+/// plain. A `None` uuid omits the `id` line so notes created before the
+/// first sync still export (re-import treats them as new notes, as before).
+#[must_use]
+pub fn frontmatter(note: &Note, tags: &[String], uuid: Option<&str>) -> String {
+    let mut out = format!(
+        "---\ntitle: {}\ncreated: {}\nupdated: {}\ntags: {}",
         yaml_scalar(&note.title),
-        yaml_scalar(&note.created_at),
-        yaml_scalar(&note.updated_at),
-    )
+        to_joplin_datetime(&note.created_at),
+        to_joplin_datetime(&note.updated_at),
+        format_tags(tags),
+    );
+    if let Some(id) = uuid {
+        out.push_str(&format!("\nid: {id}"));
+    }
+    out.push_str("\n---\n\n");
+    out
 }
 
 /// Compute the export plan for a set of notebooks and notes.
@@ -92,7 +138,15 @@ pub fn frontmatter(note: &Note) -> String {
 /// collisions are counted **per directory**, so two notes named "Todo" in
 /// different notebooks both keep their name, while a third "Todo" in the
 /// same notebook becomes `Todo-1.md`.
-pub fn plan(notebooks: &[Notebook], notes: &[Note]) -> Vec<PlannedFile> {
+///
+/// `tags_by_note`/`uuid_by_note` are keyed by the raw note row id; missing
+/// entries mean "no tags" / "no stable id" (pre-sync notes).
+pub fn plan(
+    notebooks: &[Notebook],
+    notes: &[Note],
+    tags_by_note: &HashMap<i64, Vec<String>>,
+    uuid_by_note: &HashMap<i64, String>,
+) -> Vec<PlannedFile> {
     // 1. Lookups by id; the plan must not depend on the input order, so a
     //    child can be processed before its parent.
     let parent_by_id: HashMap<i64, Option<i64>> = notebooks
@@ -150,14 +204,23 @@ pub fn plan(notebooks: &[Notebook], notes: &[Note]) -> Vec<PlannedFile> {
         planned.push(PlannedFile {
             dir,
             name,
-            content: format!("{}{}", frontmatter(note), note.content),
+            content: format!(
+                "{}{}",
+                frontmatter(
+                    note,
+                    tags_by_note.get(&note.id.0).map_or(&[], Vec::as_slice),
+                    uuid_by_note.get(&note.id.0).map(String::as_str),
+                ),
+                note.content
+            ),
         });
     }
     planned
 }
 
 /// Query the database and write every non-trashed note as `.md` files
-/// under `out_dir`. Returns the number of notes written.
+/// under `out_dir` in Joplin's "Markdown + Front Matter" shape. Returns
+/// the number of notes written.
 pub(crate) async fn run(pool: &SqlitePool, out_dir: &Path) -> Result<usize> {
     let notebooks = notebooks::list(pool).await?;
     let notes = sqlx::query_as::<_, Note>(
@@ -167,7 +230,34 @@ pub(crate) async fn run(pool: &SqlitePool, out_dir: &Path) -> Result<usize> {
     .fetch_all(pool)
     .await?;
 
-    let planned = plan(&notebooks, &notes);
+    // Stable ids (NULL until the first sync assigns one) for the `id:` line.
+    let uuid_rows: Vec<(i64, Option<String>)> =
+        sqlx::query_as("SELECT id, uuid FROM notes WHERE is_trashed = 0")
+            .fetch_all(pool)
+            .await?;
+    let mut uuid_by_note: HashMap<i64, String> = HashMap::new();
+    for (id, uuid) in uuid_rows {
+        if let Some(uuid) = uuid
+            && !uuid.is_empty()
+        {
+            uuid_by_note.insert(id, uuid);
+        }
+    }
+    // Tag names per note, sorted for deterministic output.
+    let tag_rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT nt.note_id, t.name FROM note_tags nt \
+         JOIN tags t ON t.id = nt.tag_id \
+         JOIN notes n ON n.id = nt.note_id \
+         WHERE n.is_trashed = 0 ORDER BY t.name",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut tags_by_note: HashMap<i64, Vec<String>> = HashMap::new();
+    for (note_id, name) in tag_rows {
+        tags_by_note.entry(note_id).or_default().push(name);
+    }
+
+    let planned = plan(&notebooks, &notes, &tags_by_note, &uuid_by_note);
     tokio::fs::create_dir_all(out_dir).await?;
     for file in &planned {
         let mut path = out_dir.to_path_buf();
@@ -229,7 +319,7 @@ mod tests {
     fn nested_notebooks_map_to_nested_directories() {
         let notebooks = vec![nb(1, None, "Work"), nb(2, Some(1), "2026")];
         let notes = vec![note(10, Some(2), "Deep", "body")];
-        let plan = plan(&notebooks, &notes);
+        let plan = plan(&notebooks, &notes, &HashMap::new(), &HashMap::new());
         assert_eq!(plan[0].dir, vec!["Work", "2026"]);
         assert_eq!(plan[0].name, "Deep.md");
     }
@@ -241,7 +331,7 @@ mod tests {
             note(10, Some(1), "Todo", "a"),
             note(11, Some(2), "Todo", "b"),
         ];
-        let plan = plan(&notebooks, &notes);
+        let plan = plan(&notebooks, &notes, &HashMap::new(), &HashMap::new());
         assert_eq!(plan[0].name, "Todo.md");
         assert_eq!(plan[1].name, "Todo.md");
         assert_eq!(plan[0].dir, vec!["A"]);
@@ -255,7 +345,7 @@ mod tests {
             note(10, None, "Todo", "first"),
             note(11, None, "Todo", "second"),
         ];
-        let plan = plan(&notebooks, &notes);
+        let plan = plan(&notebooks, &notes, &HashMap::new(), &HashMap::new());
         assert_eq!(plan[0].name, "Todo.md");
         assert_eq!(plan[1].name, "Todo-1.md");
     }
@@ -263,7 +353,62 @@ mod tests {
     #[test]
     fn unfiled_notes_export_to_the_root() {
         let notes = vec![note(10, None, "Loose", "body")];
-        let plan = plan(&[], &notes);
+        let plan = plan(&[], &notes, &HashMap::new(), &HashMap::new());
         assert!(plan[0].dir.is_empty());
+    }
+
+    #[test]
+    fn sqlite_datetime_converts_to_joplin_iso() {
+        assert_eq!(
+            to_joplin_datetime("2024-06-15 08:30:00"),
+            "2024-06-15 08:30:00Z"
+        );
+        assert_eq!(
+            to_joplin_datetime("2026-01-01 00:00:00"),
+            "2026-01-01 00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn joplin_datetime_passthrough_is_idempotent() {
+        assert_eq!(
+            to_joplin_datetime("2024-06-15T08:30:00.000Z"),
+            "2024-06-15 08:30:00Z"
+        );
+        assert_eq!(
+            to_joplin_datetime("2025-09-22 03:27:26Z"),
+            "2025-09-22 03:27:26Z"
+        );
+    }
+
+    #[test]
+    fn frontmatter_matches_joplin_shape_with_tags_and_id() {
+        let n = note(10, None, "Deep", "body");
+        let tags = vec!["work".to_string(), "future".to_string()];
+        let fm = frontmatter(&n, &tags, Some("a1b2c3"));
+        assert!(fm.starts_with("---\n"), "frontmatter opens: {fm:?}");
+        assert!(fm.contains("title: \"Deep\"\n"), "title: {fm:?}");
+        assert!(
+            fm.contains("created: 2026-01-01 00:00:00Z\n"),
+            "created Joplin time: {fm:?}"
+        );
+        assert!(
+            fm.contains("updated: 2026-01-01 00:00:00Z\n"),
+            "updated Joplin time: {fm:?}"
+        );
+        assert!(
+            fm.contains("tags: [\"future\", \"work\"]\n"),
+            "sorted quoted flow list: {fm:?}"
+        );
+        assert!(fm.contains("\nid: a1b2c3\n"), "id: {fm:?}");
+        assert!(fm.ends_with("---\n\n"), "frontmatter closes: {fm:?}");
+    }
+
+    #[test]
+    fn frontmatter_omits_id_and_empties_tags_when_missing() {
+        let n = note(10, None, "Loose", "body");
+        let fm = frontmatter(&n, &[], None);
+        assert!(fm.contains("tags: []\n"), "empty tags: {fm:?}");
+        assert!(!fm.contains("\nid:"), "no id line: {fm:?}");
     }
 }
