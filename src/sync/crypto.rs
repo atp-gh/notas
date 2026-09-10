@@ -42,7 +42,7 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
-use rand::RngCore;
+use rand::TryRngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
@@ -190,7 +190,9 @@ impl Cipher {
     /// Same as [`Cipher::derive`].
     pub fn generate(password: &str) -> Result<Self, CryptoError> {
         let mut salt = [0u8; SALT_LEN];
-        OsRng.fill_bytes(&mut salt);
+        OsRng
+            .try_fill_bytes(&mut salt)
+            .expect("OS RNG must be available to generate an encryption salt");
         Self::derive(password, salt)
     }
 
@@ -212,7 +214,9 @@ impl Cipher {
         // nonce collisions are astronomically unlikely (and, unlike GCM,
         // not catastrophic to the key even if they happened).
         let mut nonce = [0u8; NONCE_LEN];
-        OsRng.fill_bytes(&mut nonce);
+        OsRng
+            .try_fill_bytes(&mut nonce)
+            .expect("OS RNG must be available to generate an encryption nonce");
         let cipher = XChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(&self.key));
         let sealed = cipher
             .encrypt(XNonce::from_slice(&nonce), plaintext)
