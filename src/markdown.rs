@@ -469,22 +469,25 @@ impl Renderer {
             .max(table.rows.iter().map(Vec::len).max().unwrap_or(0));
         let mut widths = vec![0usize; columns];
         for row in &table.rows {
-            for (index, cell) in row.iter().enumerate() {
-                widths[index] = widths[index].max(cell.width());
+            for (width, cell) in widths.iter_mut().zip(row.iter()) {
+                *width = (*width).max(cell.width());
             }
         }
 
         let mut lines: Vec<(String, Vec<Style>)> = Vec::with_capacity(table.rows.len() + 1);
         for (row_index, row) in table.rows.iter().enumerate() {
-            let cells: Vec<String> = (0..columns)
-                .map(|index| {
+            let cells: Vec<String> = widths
+                .iter()
+                .enumerate()
+                .map(|(index, width)| {
                     pad_cell(
                         row.get(index).map_or("", String::as_str),
-                        widths[index],
-                        *table
+                        *width,
+                        table
                             .alignments
                             .get(index)
-                            .unwrap_or(&pulldown_cmark::Alignment::None),
+                            .copied()
+                            .unwrap_or(pulldown_cmark::Alignment::None),
                     )
                 })
                 .collect();
@@ -500,10 +503,12 @@ impl Renderer {
                 lines.push((cells.join(" │ "), vec![Style::Table]));
             }
         }
-        for (index, (text, styles)) in lines.into_iter().enumerate() {
-            if index > 0 {
+        let mut first = true;
+        for (text, styles) in lines {
+            if !first {
                 self.sep(1);
             }
+            first = false;
             self.emit(&text, styles);
         }
     }
