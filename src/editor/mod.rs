@@ -23,6 +23,49 @@ mod preview;
 /// Debounce for live preview keystrokes: typing only reschedules this.
 const LIVE_DEBOUNCE: Duration = Duration::from_millis(150);
 
+/// Scroll position of `adj` as a fraction of its scrollable range.
+///
+/// Returns `0.0` when nothing is scrollable. Pure so scroll sync and
+/// position memory stay testable without GTK.
+fn scroll_frac(adj: &gtk::Adjustment) -> f64 {
+    scroll_frac_of(adj.value(), adj.upper(), adj.page_size())
+}
+
+/// Scroll position as a fraction of `value` within its scrollable range.
+fn scroll_frac_of(value: f64, upper: f64, page: f64) -> f64 {
+    let max = upper - page;
+    if max > 0.0 {
+        (value / max).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Absolute adjustment value for `frac` of the scrollable range.
+fn scroll_value_of(frac: f64, upper: f64, page: f64) -> f64 {
+    (frac.clamp(0.0, 1.0) * (upper - page).max(0.0)).max(0.0)
+}
+
+/// Fraction a newly shown side should restore.
+///
+/// A side that was hidden holds a stale fraction (recorded long ago, possibly
+/// for different content); a side that was visible was just snapshotted
+/// fresh. So a newly shown side adopts the visible side's fraction, falling
+/// back to its own when the other side never recorded one. Pure so the
+/// inheritance rule stays testable without GTK.
+fn inherit_frac(
+    newly_shown: bool,
+    from_visible: bool,
+    from: Option<f64>,
+    own: Option<f64>,
+) -> Option<f64> {
+    if newly_shown && from_visible {
+        from.or(own)
+    } else {
+        own
+    }
+}
+
 pub struct Editor {
     pub source_view: sourceview5::View,
     pub source_buffer: sourceview5::Buffer,
@@ -39,6 +82,19 @@ pub struct Editor {
     live_rev: Rc<Cell<u64>>,
     live_tx: std::sync::mpsc::Sender<(u64, crate::markdown::RenderedMarkdown)>,
     live_debounce: Rc<RefCell<Option<glib::SourceId>>>,
+    /// Re-entrancy guard for scroll sync: programmatic `set_value` calls fire
+    /// `value-changed` synchronously, so the follower must not drive back.
+    sync_guard: Rc<Cell<bool>>,
+    /// Remembered scroll fractions per side (`None` = never visited).
+    source_frac: Rc<Cell<Option<f64>>>,
+    preview_frac: Rc<Cell<Option<f64>>>,
+    /// Fraction to re-apply when the preview layout settles (`None` = none
+    /// pending). `set_text` resets to the top and the new `upper` only lands
+    /// asynchronously — longer with diagram anchors — so a synchronous
+    /// restore right after render uses stale bounds and drifts once layout
+    /// completes. The adjustment's `changed` handler below performs the
+    /// restore against final bounds instead.
+    preview_pending: Rc<Cell<Option<f64>>>,
 }
 
 /// Render `source_buffer` on a background thread, delivering the result to
@@ -79,8 +135,12 @@ impl Editor {
 
     /// Switch the split layout. Modes carrying a preview trigger an
     /// immediate async render; collapsing to source-only cancels pending
-    /// live work.
+    /// live work. Visible sides keep their scroll fractions across switches;
+    /// a side visited for the first time inherits the other side's fraction.
     pub fn set_editor_mode(&self, mode: EditorMode) {
+        let source_was = self.source_scroll.is_visible();
+        let preview_was = self.preview_scroll.is_visible();
+        self.remember_visible_scroll();
         match mode {
             EditorMode::Source => {
                 self.source_scroll.set_visible(true);
@@ -100,6 +160,85 @@ impl Editor {
                 self.request_preview_immediate();
             }
         }
+        self.inherit_newly_shown(source_was, preview_was);
+        self.restore_visible_scroll();
+    }
+
+    /// Snapshot the scroll fractions of the currently visible sides.
+    fn remember_visible_scroll(&self) {
+        if self.source_scroll.is_visible() {
+            self.source_frac
+                .set(Some(scroll_frac(&self.source_scroll.vadjustment())));
+        }
+        if self.preview_scroll.is_visible() {
+            self.preview_frac
+                .set(Some(scroll_frac(&self.preview_scroll.vadjustment())));
+        }
+    }
+
+    /// Inherit fractions for sides newly shown by a mode switch.
+    ///
+    /// A side that was hidden holds a stale fraction; the side that was
+    /// visible was just snapshotted fresh. Without this, Source→Preview
+    /// restores the preview's stale Split-era `0.0` instead of carrying the
+    /// reading position across.
+    fn inherit_newly_shown(&self, source_was: bool, preview_was: bool) {
+        if self.source_scroll.is_visible() {
+            self.source_frac.set(inherit_frac(
+                !source_was,
+                preview_was,
+                self.preview_frac.get(),
+                self.source_frac.get(),
+            ));
+        }
+        if self.preview_scroll.is_visible() {
+            self.preview_frac.set(inherit_frac(
+                !preview_was,
+                source_was,
+                self.source_frac.get(),
+                self.preview_frac.get(),
+            ));
+        }
+    }
+
+    /// Forget remembered scroll fractions, e.g. when a different note loads.
+    /// Call before the new content lands so neither side restores the old
+    /// note's position (the source reset happens on its own via the buffer
+    /// change; the preview re-render would otherwise jump to stale state).
+    pub fn reset_scroll_memory(&self) {
+        self.source_frac.set(None);
+        self.preview_frac.set(None);
+        self.preview_pending.set(None);
+    }
+
+    /// Re-apply remembered fractions to the currently visible sides.
+    /// The preview re-render (`set_text`) resets its adjustment to the top,
+    /// so the async drain re-applies this again when fresh content lands.
+    fn restore_visible_scroll(&self) {
+        if self.source_scroll.is_visible() {
+            Self::restore_scroll(
+                &self.source_scroll,
+                self.source_frac.get(),
+                &self.sync_guard,
+            );
+        }
+        if self.preview_scroll.is_visible() {
+            Self::restore_scroll(
+                &self.preview_scroll,
+                self.preview_frac.get(),
+                &self.sync_guard,
+            );
+        }
+    }
+
+    /// Move `scroll` to `frac` without triggering scroll sync or position
+    /// memory writes. No-op when `frac` was never recorded.
+    fn restore_scroll(scroll: &gtk::ScrolledWindow, frac: Option<f64>, guard: &Rc<Cell<bool>>) {
+        let Some(frac) = frac else { return };
+        let adj = scroll.vadjustment();
+        guard.set(true);
+        adj.set_value(scroll_value_of(frac, adj.upper(), adj.page_size()));
+        guard.set(false);
     }
 
     /// Current layout derived from child visibility (the single source of
@@ -219,30 +358,17 @@ where
     preview_view.set_bottom_margin(8);
 
     // Async live pipeline: background threads `send` rendered documents
-    // over std mpsc; a persistent UI-thread idle source drains the queue
-    // and `apply`s the latest revision only. Workers `wakeup` the main
-    // context so the drain runs promptly even when the loop is idle.
+    // over std mpsc; the drain is installed after `split` exists so it can
+    // also restore the remembered preview scroll (see below).
     let live_rev = Rc::new(Cell::new(0u64));
     let live_debounce: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
     let (live_tx, live_rx) = std::sync::mpsc::channel::<(u64, crate::markdown::RenderedMarkdown)>();
-    {
-        let rev = live_rev.clone();
-        let view = preview_view.clone();
-        let buf = preview_buffer;
-        let tags = preview_tags.clone();
-        glib::idle_add_local(move || {
-            let mut latest = None;
-            while let Ok(item) = live_rx.try_recv() {
-                latest = Some(item);
-            }
-            if let Some((msg_rev, rendered)) = latest
-                && rev.get() == msg_rev
-            {
-                apply_rendered(&view, &buf, &tags, &rendered);
-            }
-            glib::ControlFlow::Continue
-        });
-    }
+    // Scroll sync + position memory. Fractions, not pixels: the two sides
+    // have different content heights, so only percentages transfer.
+    let sync_guard = Rc::new(Cell::new(false));
+    let source_frac: Rc<Cell<Option<f64>>> = Rc::new(Cell::new(None));
+    let preview_frac: Rc<Cell<Option<f64>>> = Rc::new(Cell::new(None));
+    let preview_pending: Rc<Cell<Option<f64>>> = Rc::new(Cell::new(None));
 
     // Keep the preview colors and the syntax highlighting scheme in sync
     // with the libadwaita theme. GtkSourceView defaults to a light scheme
@@ -295,7 +421,7 @@ where
         });
         preview_view.add_controller(gesture);
 
-        let tags = preview_tags;
+        let tags = preview_tags.clone();
         let view = preview_view.clone();
         let motion = gtk::EventControllerMotion::new();
         motion.connect_motion(move |_m, x, y| {
@@ -338,6 +464,120 @@ where
     split.set_resize_start_child(true);
     split.set_resize_end_child(true);
     split.set_wide_handle(true);
+
+    // Bidirectional scroll sync, active only while both sides are visible
+    // (split mode). Each side records its own fraction on every move so mode
+    // switches can restore it. Programmatic moves hold the guard: `set_value`
+    // fires `value-changed` synchronously, and the follower must neither
+    // record nor drive back.
+    {
+        let guard = sync_guard.clone();
+        let own = source_frac.clone();
+        let other_adj = preview_scroll.vadjustment();
+        let own_scroll = source_scroll.clone();
+        let other_scroll = preview_scroll.clone();
+        let own_adj = source_scroll.vadjustment();
+        own_adj.connect_value_changed(move |adj| {
+            if guard.get() {
+                return;
+            }
+            let frac = scroll_frac(adj);
+            own.set(Some(frac));
+            if !own_scroll.is_visible() || !other_scroll.is_visible() {
+                return;
+            }
+            guard.set(true);
+            other_adj.set_value(scroll_value_of(
+                frac,
+                other_adj.upper(),
+                other_adj.page_size(),
+            ));
+            guard.set(false);
+        });
+        let guard = sync_guard.clone();
+        let own = preview_frac.clone();
+        let pending = preview_pending.clone();
+        let other_adj = source_scroll.vadjustment();
+        let own_scroll = preview_scroll.clone();
+        let other_scroll = source_scroll.clone();
+        let own_adj = preview_scroll.vadjustment();
+        own_adj.connect_value_changed(move |adj| {
+            if guard.get() {
+                return;
+            }
+            // A real user move supersedes any layout restore queued by the
+            // last render; without this a later validation pass would yank
+            // the view back.
+            pending.set(None);
+            let frac = scroll_frac(adj);
+            own.set(Some(frac));
+            if !own_scroll.is_visible() || !other_scroll.is_visible() {
+                return;
+            }
+            guard.set(true);
+            other_adj.set_value(scroll_value_of(
+                frac,
+                other_adj.upper(),
+                other_adj.page_size(),
+            ));
+            guard.set(false);
+        });
+        // Layout-completion restore: `set_text` queues a relayout and the new
+        // `upper` lands asynchronously (`changed` fires per validation pass),
+        // so re-apply the pending fraction against final bounds. `pending` is
+        // only `Some` right after a render with no user scroll since, hence a
+        // later window resize restoring the same fraction is a no-op in
+        // effect. `set_value` emits `value-changed`, never `changed`, so this
+        // cannot recurse.
+        {
+            let guard = sync_guard.clone();
+            let pending = preview_pending.clone();
+            preview_scroll.vadjustment().connect_changed(move |adj| {
+                if guard.get() {
+                    return;
+                }
+                if let Some(frac) = pending.get() {
+                    guard.set(true);
+                    adj.set_value(scroll_value_of(frac, adj.upper(), adj.page_size()));
+                    guard.set(false);
+                }
+            });
+        }
+    }
+
+    // Drain for the async live pipeline: applies the latest revision only.
+    // Workers `wakeup` the main context so this runs promptly even when the
+    // loop is idle. `apply_rendered` resets the preview to the top via
+    // `set_text`, so the remembered fraction is re-applied under the guard
+    // (which also keeps the reset itself from overwriting the memory); the
+    // same fraction is queued as pending for the layout-completion restore
+    // above, which corrects the drift once final bounds land.
+    {
+        let rev = live_rev.clone();
+        let view = preview_view;
+        let buf = preview_buffer;
+        let tags = preview_tags;
+        let guard = sync_guard.clone();
+        let frac = preview_frac.clone();
+        let pending = preview_pending.clone();
+        let scroll = preview_scroll.clone();
+        glib::idle_add_local(move || {
+            let mut latest = None;
+            while let Ok(item) = live_rx.try_recv() {
+                latest = Some(item);
+            }
+            if let Some((msg_rev, rendered)) = latest
+                && rev.get() == msg_rev
+            {
+                guard.set(true);
+                apply_rendered(&view, &buf, &tags, &rendered);
+                guard.set(false);
+                pending.set(frac.get());
+                Editor::restore_scroll(&scroll, frac.get(), &guard);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     // Debounced live preview, wired after `preview_scroll` exists so the
     // fire-time visibility check is truthful. Programmatic loads set
@@ -439,12 +679,68 @@ where
         live_rev,
         live_tx,
         live_debounce,
+        sync_guard,
+        source_frac,
+        preview_frac,
+        preview_pending,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scroll_frac_of_mid_range() {
+        assert_eq!(scroll_frac_of(50.0, 110.0, 10.0), 0.5);
+    }
+
+    #[test]
+    fn scroll_frac_of_clamps_to_unit_interval() {
+        assert_eq!(scroll_frac_of(-5.0, 110.0, 10.0), 0.0);
+        assert_eq!(scroll_frac_of(999.0, 110.0, 10.0), 1.0);
+    }
+
+    #[test]
+    fn scroll_frac_of_empty_range_is_zero() {
+        assert_eq!(scroll_frac_of(0.0, 100.0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn scroll_value_of_mid_fraction() {
+        assert_eq!(scroll_value_of(0.5, 110.0, 10.0), 50.0);
+    }
+
+    #[test]
+    fn scroll_value_of_clamps_fraction() {
+        assert_eq!(scroll_value_of(2.0, 110.0, 10.0), 100.0);
+    }
+
+    #[test]
+    fn scroll_frac_and_value_roundtrip() {
+        let frac = scroll_frac_of(30.0, 130.0, 30.0);
+        assert!((scroll_value_of(frac, 130.0, 30.0) - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn inherit_adopts_fresh_side_when_newly_shown() {
+        assert_eq!(inherit_frac(true, true, Some(0.6), Some(0.0)), Some(0.6));
+    }
+
+    #[test]
+    fn inherit_keeps_own_when_already_visible() {
+        assert_eq!(inherit_frac(false, true, Some(0.6), Some(0.2)), Some(0.2));
+    }
+
+    #[test]
+    fn inherit_keeps_own_when_other_side_hidden() {
+        assert_eq!(inherit_frac(true, false, Some(0.6), Some(0.0)), Some(0.0));
+    }
+
+    #[test]
+    fn inherit_keeps_own_when_other_never_recorded() {
+        assert_eq!(inherit_frac(true, true, None, Some(0.0)), Some(0.0));
+    }
 
     /// Manual scrollability probe (run with `--ignored --nocapture`): prints
     /// the source view's vertical adjustment range inside a constrained

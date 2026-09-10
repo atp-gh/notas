@@ -534,6 +534,7 @@ impl App {
                 self.dirty = false;
                 self.widgets.title_entry.set_text(&note.title);
                 self.loading.set(true);
+                self.widgets.editor.reset_scroll_memory();
                 self.widgets.editor.source_buffer.set_text(&note.content);
                 self.loading.set(false);
                 if self.editor_mode != EditorMode::Source {
@@ -577,6 +578,7 @@ impl App {
                     self.current_note = None;
                     self.widgets.title_entry.set_text("");
                     self.loading.set(true);
+                    self.widgets.editor.reset_scroll_memory();
                     self.widgets.editor.source_buffer.set_text("");
                     self.loading.set(false);
                     self.widgets.save_btn.set_sensitive(false);
