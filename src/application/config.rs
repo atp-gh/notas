@@ -321,7 +321,7 @@ impl Settings {
     /// the same file.
     #[must_use]
     pub fn load_from(path: PathBuf) -> Self {
-        let display = path.display().to_string();
+        let path_display = path.display().to_string();
         match fs::read_to_string(&path) {
             Ok(contents) => match serde_json::from_str::<Self>(&contents) {
                 Ok(mut settings) => {
@@ -329,33 +329,42 @@ impl Settings {
                     settings
                 }
                 Err(err) => {
-                    eprintln!("notas: settings file {display} is invalid, using defaults: {err}");
+                    tracing::warn!(
+                        path = tracing::field::display(&path_display),
+                        err = tracing::field::display(&err),
+                        "settings file is invalid, using defaults"
+                    );
                     Self::default()
                 }
             },
             Err(err) if err.kind() == io::ErrorKind::NotFound => Self::default(),
             Err(err) => {
-                eprintln!("notas: cannot read settings file {display}: {err}");
+                tracing::warn!(
+                    path = tracing::field::display(&path_display),
+                    err = tracing::field::display(&err),
+                    "cannot read settings file, using defaults"
+                );
                 Self::default()
             }
         }
     }
 
     /// Write the settings atomically (temp file + rename) to the path this
-    /// instance was loaded from, logging failures.
+    /// instance was loaded from, emitting a `tracing` event on failure.
     ///
     /// Settings whose location is unknown (never loaded from a file) are
     /// not persisted: resolving the file is the platform adapter's job,
     /// and this module deliberately has no opinion on where that is.
     pub fn save(&self) {
         let Some(path) = self.path.as_deref() else {
-            eprintln!("notas: cannot save settings: no file path was set at load time");
+            tracing::warn!("cannot save settings: no file path was set at load time");
             return;
         };
         if let Err(err) = self.save_to(path) {
-            eprintln!(
-                "notas: failed to save settings to {}: {err}",
-                path.display()
+            tracing::warn!(
+                path = tracing::field::display(path.display()),
+                err = tracing::field::display(&err),
+                "failed to save settings"
             );
         }
     }

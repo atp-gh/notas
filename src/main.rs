@@ -21,6 +21,17 @@ use crate::app::{App, AppInit};
 use crate::application::config::Settings;
 
 fn main() -> ExitCode {
+    // The library layers emit `tracing` events and never install a
+    // subscriber; the binary owns that choice. Default to `warn` so the
+    // skip-and-continue sync branches stay visible on stderr, honoring
+    // `RUST_LOG` when set (e.g. `RUST_LOG=notas=debug`).
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
+
     let platform_paths = platform::paths();
 
     // Connect to SQLite before the UI starts. The dedicated tokio runtime

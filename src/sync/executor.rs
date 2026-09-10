@@ -172,9 +172,10 @@ async fn run_sync_with(
                     // that fails to open): skip the note instead of
                     // aborting the whole sync; the next sync retries it.
                     Err(e) => {
-                        eprintln!(
-                            "notas: skipping note {} — cannot download it: {e}",
-                            sidecar.uuid
+                        tracing::warn!(
+                            uuid = tracing::field::display(&sidecar.uuid),
+                            err = tracing::field::display(&e),
+                            "skipping note: cannot download it"
                         );
                         continue;
                     }
@@ -193,7 +194,11 @@ async fn run_sync_with(
                     // cannot be fetched/opened is skipped, keeping the
                     // local note and the rest of the sync intact.
                     Err(e) => {
-                        eprintln!("notas: skipping conflict copy for {} — {e}", sidecar.uuid);
+                        tracing::warn!(
+                            uuid = tracing::field::display(&sidecar.uuid),
+                            err = tracing::field::display(&e),
+                            "skipping conflict copy"
+                        );
                         continue;
                     }
                 };
@@ -220,9 +225,10 @@ async fn run_sync_with(
                 // cleanup failures must not fail the whole sync.
                 store.put_sidecar(cipher.as_ref(), &sidecar).await?;
                 if let Err(e) = store.delete_md(&sidecar.uuid).await {
-                    eprintln!(
-                        "notas: cannot remove stale body of deleted note {}: {e}",
-                        sidecar.uuid
+                    tracing::warn!(
+                        uuid = tracing::field::display(&sidecar.uuid),
+                        err = tracing::field::display(&e),
+                        "cannot remove stale body of deleted note"
                     );
                 }
                 stats.uploaded += 1;
@@ -516,21 +522,33 @@ async fn list_remote(
                 // Vanished between list and fetch: leave the entry without
                 // a sidecar; the planner will re-upload if a local note
                 // matches, and ignore it otherwise.
-                eprintln!("notas: cannot read sidecar for {uuid}: {e:#}");
+                tracing::warn!(
+                    uuid = tracing::field::display(&uuid),
+                    err = tracing::field::display(&e),
+                    "cannot read sidecar"
+                );
                 continue;
             }
         };
         let bytes = match output.bytes().await {
             Ok(bytes) => bytes,
             Err(e) => {
-                eprintln!("notas: cannot read sidecar for {uuid}: {e:#}");
+                tracing::warn!(
+                    uuid = tracing::field::display(&uuid),
+                    err = tracing::field::display(&e),
+                    "cannot read sidecar"
+                );
                 continue;
             }
         };
         let plain = match decrypt_body(cipher, &bytes) {
             Ok(plain) => plain,
             Err(e) => {
-                eprintln!("notas: cannot decrypt sidecar for {uuid}: {e}");
+                tracing::warn!(
+                    uuid = tracing::field::display(&uuid),
+                    err = tracing::field::display(&e),
+                    "cannot decrypt sidecar"
+                );
                 continue;
             }
         };
@@ -540,11 +558,19 @@ async fn list_remote(
                     remote.entry(uuid).or_default().sidecar = Some(valid.clone());
                 }
                 Err(e) => {
-                    eprintln!("notas: ignoring invalid sidecar for {uuid}: {e}");
+                    tracing::warn!(
+                        uuid = tracing::field::display(&uuid),
+                        err = tracing::field::display(&e),
+                        "ignoring invalid sidecar"
+                    );
                 }
             },
             Err(e) => {
-                eprintln!("notas: ignoring unparseable sidecar for {uuid}: {e}");
+                tracing::warn!(
+                    uuid = tracing::field::display(&uuid),
+                    err = tracing::field::display(&e),
+                    "ignoring unparseable sidecar"
+                );
             }
         }
     }
@@ -812,14 +838,22 @@ impl WebDavStore {
         let plain = match decrypt_body(cipher, &bytes) {
             Ok(plain) => plain,
             Err(e) => {
-                eprintln!("notas: cannot decrypt sidecar for {uuid}: {e}");
+                tracing::warn!(
+                    uuid = tracing::field::display(&uuid),
+                    err = tracing::field::display(&e),
+                    "cannot decrypt sidecar"
+                );
                 return Ok(None);
             }
         };
         match serde_json::from_slice::<Sidecar>(&plain) {
             Ok(sidecar) => Ok(sidecar.validated().cloned().ok()),
             Err(e) => {
-                eprintln!("notas: ignoring unparseable sidecar for {uuid}: {e}");
+                tracing::warn!(
+                    uuid = tracing::field::display(&uuid),
+                    err = tracing::field::display(&e),
+                    "ignoring unparseable sidecar"
+                );
                 Ok(None)
             }
         }
@@ -946,7 +980,13 @@ impl SyncStore for WebDavStore {
                     // entry without a sidecar; the planner re-uploads if a
                     // local note matches, and ignores it otherwise.
                 }
-                Err(e) => eprintln!("notas: cannot read sidecar for {uuid}: {e}"),
+                Err(e) => {
+                    tracing::warn!(
+                        uuid = tracing::field::display(&uuid),
+                        err = tracing::field::display(&e),
+                        "cannot read sidecar"
+                    );
+                }
             }
         }
         Ok(remote)
