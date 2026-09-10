@@ -21,7 +21,7 @@
 //! plain strings. They have one-second resolution, which is why ties need
 //! explicit handling.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::model::{LocalNote, RemoteEntry, Sidecar, SyncAction, SyncUuid};
 
@@ -85,7 +85,7 @@ fn sidecar_meta_key(sidecar: &Sidecar) -> (&str, Option<&str>, Vec<String>, bool
 /// converges to nothing:
 ///
 /// ```
-/// use std::collections::HashMap;
+/// use std::collections::BTreeMap;
 /// use notas::core::sync::{LocalNote, RemoteEntry, Sidecar, SyncUuid, plan_sync};
 ///
 /// let local = [LocalNote {
@@ -98,7 +98,7 @@ fn sidecar_meta_key(sidecar: &Sidecar) -> (&str, Option<&str>, Vec<String>, bool
 ///     tags: Vec::new(),
 /// }];
 ///
-/// let mut remote: HashMap<SyncUuid, RemoteEntry> = HashMap::new();
+/// let mut remote: BTreeMap<SyncUuid, RemoteEntry> = BTreeMap::new();
 /// remote.insert(
 ///     SyncUuid::new("a"),
 ///     RemoteEntry { sidecar: None, has_md: false },
@@ -126,7 +126,7 @@ fn sidecar_meta_key(sidecar: &Sidecar) -> (&str, Option<&str>, Vec<String>, bool
 pub fn plan_sync(
     local: &[LocalNote],
     tombstones: &[(SyncUuid, String)],
-    remote: &HashMap<SyncUuid, RemoteEntry>,
+    remote: &BTreeMap<SyncUuid, RemoteEntry>,
 ) -> Vec<SyncAction> {
     let local_by_uuid: HashMap<&SyncUuid, &LocalNote> =
         local.iter().map(|n| (&n.uuid, n)).collect();
@@ -219,13 +219,10 @@ pub fn plan_sync(
     }
 
     // --- remote notes with no local counterpart ---------------------------
-    // The remote index is a HashMap: sort by uuid so the action order —
-    // and therefore the order the executor creates notes in — does not
-    // depend on hash iteration order.
-    let mut remote_uuids: Vec<&SyncUuid> = remote.keys().collect();
-    remote_uuids.sort_unstable();
-    for uuid in remote_uuids {
-        let entry = &remote[uuid];
+    // The remote index is a BTreeMap, so iteration is already in uuid
+    // order and the action order — and therefore the order the executor
+    // creates notes in — is deterministic.
+    for (uuid, entry) in remote {
         if local_by_uuid.contains_key(uuid) || tombstone_uuids.contains(uuid) {
             continue;
         }
@@ -271,8 +268,8 @@ mod tests {
         }
     }
 
-    fn remote_one(sidecar: Sidecar) -> HashMap<SyncUuid, RemoteEntry> {
-        let mut remote = HashMap::new();
+    fn remote_one(sidecar: Sidecar) -> BTreeMap<SyncUuid, RemoteEntry> {
+        let mut remote = BTreeMap::new();
         remote.insert(
             sidecar.uuid.clone(),
             RemoteEntry {
@@ -286,7 +283,7 @@ mod tests {
     #[test]
     fn new_local_note_uploads() {
         let local = [note("u1", "A", "hello", "2026-01-01 10:00:00")];
-        let actions = plan_sync(&local, &[], &HashMap::new());
+        let actions = plan_sync(&local, &[], &BTreeMap::new());
         assert_eq!(
             actions,
             vec![SyncAction::Upload {
@@ -502,10 +499,10 @@ mod tests {
 
     #[test]
     fn remote_only_actions_are_stable_across_hash_order() {
-        // Many remote-only notes: regardless of HashMap iteration order,
-        // downloads must be emitted in ascending uuid order.
+        // Many remote-only notes: downloads must be emitted in ascending
+        // uuid order (guaranteed structurally by the BTreeMap index).
         let uuids = ["c0", "a1", "b2", "e3", "d4"];
-        let mut remote = HashMap::new();
+        let mut remote = BTreeMap::new();
         for uuid in uuids {
             let n = note(uuid, uuid, "body", "2026-01-01 10:00:00");
             remote.insert(

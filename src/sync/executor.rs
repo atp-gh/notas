@@ -36,7 +36,7 @@
 //! recommends scoped credentials: a bucket-only S3 access key, or a
 //! Nextcloud *app password*.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use reqwest_dav::{Auth as DavAuth, Client as DavClient, ClientBuilder as DavClientBuilder, Depth};
@@ -76,7 +76,7 @@ trait SyncStore: Send + Sync {
     async fn list(
         &self,
         cipher: Option<&Cipher>,
-    ) -> Result<HashMap<SyncUuid, RemoteEntry>, SyncError>;
+    ) -> Result<BTreeMap<SyncUuid, RemoteEntry>, SyncError>;
     /// Fetch the markdown body of a note, decrypted when a cipher is active.
     async fn get_md(&self, cipher: Option<&Cipher>, uuid: &SyncUuid) -> Result<String, SyncError>;
     /// Upload a note's markdown body and sidecar (encrypted when a cipher
@@ -370,7 +370,7 @@ impl SyncStore for S3Store {
     async fn list(
         &self,
         cipher: Option<&Cipher>,
-    ) -> Result<HashMap<SyncUuid, RemoteEntry>, SyncError> {
+    ) -> Result<BTreeMap<SyncUuid, RemoteEntry>, SyncError> {
         list_remote(&self.client, &self.bucket, &self.prefix, cipher).await
     }
 
@@ -480,8 +480,8 @@ async fn list_remote(
     bucket: &str,
     prefix: &str,
     cipher: Option<&Cipher>,
-) -> Result<HashMap<SyncUuid, RemoteEntry>, SyncError> {
-    let mut remote: HashMap<SyncUuid, RemoteEntry> = HashMap::new();
+) -> Result<BTreeMap<SyncUuid, RemoteEntry>, SyncError> {
+    let mut remote: BTreeMap<SyncUuid, RemoteEntry> = BTreeMap::new();
     let mut pager = client
         .objects()
         .list_v2(bucket)
@@ -918,8 +918,8 @@ impl SyncStore for WebDavStore {
     async fn list(
         &self,
         cipher: Option<&Cipher>,
-    ) -> Result<HashMap<SyncUuid, RemoteEntry>, SyncError> {
-        let mut remote: HashMap<SyncUuid, RemoteEntry> = HashMap::new();
+    ) -> Result<BTreeMap<SyncUuid, RemoteEntry>, SyncError> {
+        let mut remote: BTreeMap<SyncUuid, RemoteEntry> = BTreeMap::new();
         // Same shape as the S3 index: the notes collection marks `has_md`,
         // the meta collection creates the entry, then sidecars are read.
         for uuid in self
