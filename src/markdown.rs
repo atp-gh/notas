@@ -599,10 +599,11 @@ const MAX_HIGHLIGHT_BYTES: usize = 128 * 1024;
 /// Maximum highlighted lines before falling back to plain `CodeBlock`.
 const MAX_HIGHLIGHT_LINES: usize = 1000;
 /// Placeholder text marking a rendered Mermaid diagram in the span stream.
-/// A single object-replacement character (conventionally invisible) plus a
-/// newline: frontends anchor the diagram widget here using the SVG in
-/// [`Span::mermaid_svg`]. No visible label — the diagram *is* the content.
-pub const MERMAID_PLACEHOLDER: &str = "\u{FFFC}\n";
+/// A lone newline: the diagram widget is anchored at this span's position via
+/// [`Span::mermaid_svg`], and the newline keeps block separation. It must not
+/// contain `U+FFFC` or any other visible glyph — the anchor itself occupies a
+/// buffer position, so any extra character renders as tofu after the picture.
+pub const MERMAID_PLACEHOLDER: &str = "\n";
 /// Maximum Mermaid source size: beyond this keep the plain code block so a
 /// pasted dump cannot blow up SVG layout on every keystroke.
 const MAX_MERMAID_BYTES: usize = 64 * 1024;
@@ -872,6 +873,7 @@ mod tests {
             .map(|s| s.text.as_str())
             .unwrap_or("");
         assert!(!placeholder.contains("mermaid diagram"), "{placeholder:?}");
+        assert!(!placeholder.contains('\u{FFFC}'), "{placeholder:?}");
     }
 
     #[test]
