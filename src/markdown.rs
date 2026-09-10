@@ -296,7 +296,9 @@ impl Renderer {
         }
         if self.item_prefix.is_some() {
             self.item_prefix = None;
-            let prefix = format!("{}{marker}", self.item_indent);
+            let mut prefix = String::with_capacity(self.item_indent.len() + marker.len());
+            prefix.push_str(&self.item_indent);
+            prefix.push_str(marker);
             self.emit(&prefix, self.separator_styles());
         } else {
             self.emit(marker, Vec::new());
@@ -353,7 +355,9 @@ impl Renderer {
                         match list.next {
                             Some(number) => {
                                 list.next = Some(number + 1);
-                                format!("{number}. ")
+                                let mut marker = number.to_string();
+                                marker.push_str(". ");
+                                marker
                             }
                             None => bullet_marker(depth),
                         }
@@ -361,7 +365,10 @@ impl Renderer {
                     None => bullet_marker(depth),
                 };
                 self.item_indent = " ".repeat(2 * depth.saturating_sub(1));
-                self.item_prefix = Some(format!("{}{}", self.item_indent, marker));
+                let mut item_prefix = String::with_capacity(self.item_indent.len() + marker.len());
+                item_prefix.push_str(&self.item_indent);
+                item_prefix.push_str(&marker);
+                self.item_prefix = Some(item_prefix);
                 self.item_blocks.push(0);
             }
             Tag::Strong => self.inline.push(Style::Bold),
@@ -548,19 +555,32 @@ pub fn bullet_marker(depth: usize) -> String {
 }
 
 /// Pad a table cell to a display width with the requested alignment.
+///
+/// The buffer is pre-sized so padding costs a single allocation per cell
+/// instead of the temporaries a `format!` chain would build.
 #[must_use]
 pub fn pad_cell(cell: &str, width: usize, align: pulldown_cmark::Alignment) -> String {
     use unicode_width::UnicodeWidthStr;
 
     let pad = width.saturating_sub(cell.width());
+    let mut out = String::with_capacity(cell.len() + pad);
     match align {
-        pulldown_cmark::Alignment::Right => format!("{}{}", " ".repeat(pad), cell),
+        pulldown_cmark::Alignment::Right => {
+            out.extend(std::iter::repeat_n(' ', pad));
+            out.push_str(cell);
+        }
         pulldown_cmark::Alignment::Center => {
             let left = pad / 2;
-            format!("{}{}{}", " ".repeat(left), cell, " ".repeat(pad - left))
+            out.extend(std::iter::repeat_n(' ', left));
+            out.push_str(cell);
+            out.extend(std::iter::repeat_n(' ', pad - left));
         }
-        _ => format!("{}{}", cell, " ".repeat(pad)),
+        _ => {
+            out.push_str(cell);
+            out.extend(std::iter::repeat_n(' ', pad));
+        }
     }
+    out
 }
 
 /// Parse Markdown into frontend-neutral styled spans.
