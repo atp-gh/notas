@@ -417,7 +417,7 @@ impl Renderer {
                         }
                         if !code.is_empty() {
                             let dark = self.dark;
-                            emit_code_spans(self, &code, language.as_deref(), styles, dark);
+                            emit_code_spans(self, &code, language.as_deref(), &styles, dark);
                         }
                     }
                 }
@@ -655,19 +655,20 @@ fn emit_code_spans(
     renderer: &mut Renderer,
     code: &str,
     language: Option<&str>,
-    base: Vec<Style>,
+    base: &[Style],
     dark: bool,
 ) {
     if code.len() > MAX_HIGHLIGHT_BYTES || code.lines().count() > MAX_HIGHLIGHT_LINES {
-        renderer.emit(code, base);
+        renderer.emit(code, base.to_vec());
         return;
     }
     let Some(tokens) = highlight_tokens(code, language, dark) else {
-        renderer.emit(code, base);
+        renderer.emit(code, base.to_vec());
         return;
     };
     for (text, syntax) in tokens {
-        let mut styles = base.clone();
+        let mut styles = Vec::with_capacity(base.len() + 1);
+        styles.extend_from_slice(base);
         styles.push(syntax);
         renderer.emit(&text, styles);
     }
