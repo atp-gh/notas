@@ -11,7 +11,7 @@ use crate::core::model::{NoteId, NotebookId, TagId};
 ///
 /// The variants are self-describing payloads (one per repository intent);
 /// per-variant docs would only restate the names.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[expect(missing_docs, reason = "variant names are self-describing")]
 pub enum DbCommand {
     LoadNotebooks,
