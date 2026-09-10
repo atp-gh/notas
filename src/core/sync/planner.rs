@@ -176,15 +176,19 @@ pub fn plan_sync(
             actions.push(SyncAction::ConflictCopy {
                 sidecar: sidecar.clone(),
             });
-        } else if sidecar_meta_key(sidecar) != local_meta_key(note) {
-            // Same second, same body, different metadata: adopt the
-            // deterministically smaller tuple on both devices.
-            if sidecar_meta_key(sidecar) < local_meta_key(note) {
-                actions.push(SyncAction::Download {
-                    sidecar: sidecar.clone(),
-                });
-            } else {
-                actions.push(SyncAction::Upload { note: note.clone() });
+        } else {
+            let local_key = local_meta_key(note);
+            let sidecar_key = sidecar_meta_key(sidecar);
+            if sidecar_key != local_key {
+                // Same second, same body, different metadata: adopt the
+                // deterministically smaller tuple on both devices.
+                if sidecar_key < local_key {
+                    actions.push(SyncAction::Download {
+                        sidecar: sidecar.clone(),
+                    });
+                } else {
+                    actions.push(SyncAction::Upload { note: note.clone() });
+                }
             }
         }
         // else: identical on both sides — nothing to do.
