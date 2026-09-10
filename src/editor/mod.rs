@@ -208,6 +208,16 @@ where
     let preview_buffer = gtk::TextBuffer::new(None);
     let preview_tags = Rc::new(PreviewTags::new(&preview_buffer));
 
+    let preview_view = gtk::TextView::new();
+    preview_view.set_buffer(Some(&preview_buffer));
+    preview_view.set_editable(false);
+    preview_view.set_cursor_visible(false);
+    preview_view.set_wrap_mode(gtk::WrapMode::WordChar);
+    preview_view.set_left_margin(8);
+    preview_view.set_right_margin(8);
+    preview_view.set_top_margin(8);
+    preview_view.set_bottom_margin(8);
+
     // Async live pipeline: background threads `send` rendered documents
     // over std mpsc; a persistent UI-thread idle source drains the queue
     // and `apply`s the latest revision only. Workers `wakeup` the main
@@ -217,7 +227,8 @@ where
     let (live_tx, live_rx) = std::sync::mpsc::channel::<(u64, crate::markdown::RenderedMarkdown)>();
     {
         let rev = live_rev.clone();
-        let buf = preview_buffer.clone();
+        let view = preview_view.clone();
+        let buf = preview_buffer;
         let tags = preview_tags.clone();
         glib::idle_add_local(move || {
             let mut latest = None;
@@ -227,7 +238,7 @@ where
             if let Some((msg_rev, rendered)) = latest
                 && rev.get() == msg_rev
             {
-                apply_rendered(&buf, &tags, &rendered);
+                apply_rendered(&view, &buf, &tags, &rendered);
             }
             glib::ControlFlow::Continue
         });
@@ -265,16 +276,6 @@ where
             tags.apply_theme(sm.is_dark(), &sm.accent_color_rgba());
         });
     }
-
-    let preview_view = gtk::TextView::new();
-    preview_view.set_buffer(Some(&preview_buffer));
-    preview_view.set_editable(false);
-    preview_view.set_cursor_visible(false);
-    preview_view.set_wrap_mode(gtk::WrapMode::WordChar);
-    preview_view.set_left_margin(8);
-    preview_view.set_right_margin(8);
-    preview_view.set_top_margin(8);
-    preview_view.set_bottom_margin(8);
 
     // Clickable links: hover shows a pointer cursor, clicking opens the
     // URL in the system browser.

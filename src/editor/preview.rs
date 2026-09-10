@@ -252,7 +252,8 @@ impl PreviewTags {
 /// The text tag that renders a given Markdown style.
 ///
 /// Returns `None` for [`Style::Syntax`], which needs a per-token tag from
-/// [`PreviewTags::syntax_tag`].
+/// [`PreviewTags::syntax_tag`], and for [`Style::Mermaid`], which is embedded
+/// as a diagram widget at its placeholder instead of styled text.
 fn style_tag(tags: &PreviewTags, style: Style) -> Option<&gtk::TextTag> {
     match style {
         Style::Bold => Some(&tags.bold),
@@ -260,7 +261,7 @@ fn style_tag(tags: &PreviewTags, style: Style) -> Option<&gtk::TextTag> {
         Style::Strike => Some(&tags.strike),
         Style::Code => Some(&tags.code),
         Style::CodeBlock => Some(&tags.code_block),
-        Style::Syntax { .. } => None,
+        Style::Syntax { .. } | Style::Mermaid => None,
         Style::Link => Some(&tags.link),
         Style::Dim => Some(&tags.dim),
         Style::Heading(1) => Some(&tags.h1),
@@ -297,13 +298,15 @@ fn rgba_to_hex(c: &gtk::gdk::RGBA) -> String {
 /// Apply an already-rendered document to `buffer` using a small set of
 /// text tags. This is a lightweight preview (no webview); it covers
 /// headings, emphasis, code (with syntax highlighting), lists, quotes,
-/// links, tables and rules.
+/// links, tables, rules and Mermaid diagrams (embedded as `gtk::Picture`
+/// widgets at their placeholders via `view`).
 ///
 /// Split out so the expensive [`markdown::render_themed`] step can run on a
 /// background thread while only this cheap bulk insert + tag pass runs on
 /// the UI thread. `rendered` is plain `String` data (`Send`), safe to move
 /// across threads.
 pub fn apply_rendered(
+    view: &gtk::TextView,
     buffer: &gtk::TextBuffer,
     tags: &PreviewTags,
     rendered: &markdown::RenderedMarkdown,
@@ -311,8 +314,16 @@ pub fn apply_rendered(
     // Single bulk insert: per-span `insert` made 300-line blocks do
     // thousands of signal emissions + layout passes (seconds of freeze).
     let full: String = rendered.spans().iter().map(|s| s.text.as_str()).collect();
+    // `set_text` drops previous child anchors (and unparents their diagram
+    // widgets), so anchors are rebuilt below on every render.
     buffer.set_text(&full);
     let mut link_ranges = Vec::new();
+    // Diagram anchors to insert after the tag pass, as pre-insertion char
+    // offsets. Inserting a child anchor mutates the buffer and shifts every
+    // `TextIter` at or after it, so anchors must not be created mid-walk:
+    // with two diagrams the second anchor landed on a stale iter and only
+    // the first diagram ever showed.
+    let mut pending_diagrams: Vec<(i32, &str)> = Vec::new();
     // Walk forward once; `forward_chars` keeps this O(n) instead of
     // O(n²) `iter_at_offset` rescans.
     let mut iter = buffer.start_iter();
@@ -337,9 +348,128 @@ pub fn apply_rendered(
                 }
             }
         }
+        if let Some(svg) = span.mermaid_svg.as_deref() {
+            pending_diagrams.push((start.offset(), svg));
+        }
         iter = end;
     }
-    tags.set_link_ranges(link_ranges);
+    // Insert back-to-front with fresh iters so earlier offsets stay valid.
+    // Diagram count per note is tiny, so one `iter_at_offset` each is fine.
+    for (offset, svg) in pending_diagrams.iter().rev() {
+        let mut anchor_iter = buffer.iter_at_offset(*offset);
+        embed_mermaid_at(view, buffer, &mut anchor_iter, svg);
+    }
+    tags.set_link_ranges(shift_ranges_for_anchors(
+        link_ranges,
+        pending_diagrams.iter().map(|(offset, _)| *offset),
+    ));
+}
+
+/// Create the diagram widget at an already-positioned anchor iter.
+fn embed_mermaid_at(
+    view: &gtk::TextView,
+    buffer: &gtk::TextBuffer,
+    anchor_iter: &mut gtk::TextIter,
+    svg: &str,
+) {
+    let bytes = glib::Bytes::from(svg.as_bytes());
+    let paintable = gtk::Svg::from_bytes(&bytes);
+    let picture = gtk::Picture::for_paintable(&paintable);
+    picture.set_content_fit(gtk::ContentFit::ScaleDown);
+    picture.set_can_shrink(true);
+    // A TextView anchor allocates the widget at its requested size; without
+    // one an SVG whose dimensions `gtk::Svg` cannot infer collapses to zero.
+    // `render_mermaid` already emits fixed dimensions, this is the backstop.
+    let (width, height) = mermaid_svg_size(svg);
+    picture.set_size_request(width, height);
+    let anchor = buffer.create_child_anchor(anchor_iter);
+    view.add_child_at_anchor(&picture, &anchor);
+}
+
+/// Shift link ranges past inserted diagram anchors.
+///
+/// Each anchor occupies one char at its insertion offset, pushing content at
+/// or after it one position forward. Pure and testable without GTK.
+fn shift_ranges_for_anchors(
+    ranges: Vec<(i32, i32, String)>,
+    anchors: impl Iterator<Item = i32>,
+) -> Vec<(i32, i32, String)> {
+    let offsets: Vec<i32> = anchors.collect();
+    ranges
+        .into_iter()
+        .map(|(start, end, url)| {
+            let shift = |pos: i32| pos + offsets.iter().filter(|o| **o <= pos).count() as i32;
+            (shift(start), shift(end), url)
+        })
+        .collect()
+}
+
+/// Natural size of an SVG document, capped to a sane preview width.
+///
+/// Parses the root `width="W" height="H"` attributes (emitted by
+/// `render_mermaid` with `responsive = false`); falls back to the `viewBox`
+/// dimensions, then to a 480x320 default. Pure and testable without GTK.
+fn mermaid_svg_size(svg: &str) -> (i32, i32) {
+    const FALLBACK: (i32, i32) = (480, 320);
+    let root = svg.split('>').next().unwrap_or("");
+    if let Some(w) = parse_svg_number(root, "width")
+        && let Some(h) = parse_svg_number(root, "height")
+    {
+        return cap_size(w, h);
+    }
+    if let Some(view_box) = parse_svg_attr_str(root, "viewBox")
+        && let Some((w, h)) = parse_view_box(&view_box)
+    {
+        return cap_size(w, h);
+    }
+    FALLBACK
+}
+
+/// Scale `(w, h)` down to [`MAX`](mermaid_svg_size#MAX_WIDTH) preview width,
+/// rounding up to at least 1px per side.
+fn cap_size(w: f64, h: f64) -> (i32, i32) {
+    const MAX_WIDTH: f64 = 720.0;
+    if !w.is_finite() || !h.is_finite() || w <= 0.0 || h <= 0.0 {
+        return (480, 320);
+    }
+    let scale = (MAX_WIDTH / w).min(1.0);
+    // `ceil` avoids a 0px side for hairline diagrams; clamp guards the cast.
+    let width = (w * scale).ceil().clamp(1.0, MAX_WIDTH) as i32;
+    let height = (h * scale).ceil().clamp(1.0, 4096.0) as i32;
+    (width, height)
+}
+
+/// Parse a numeric `name="..."` attribute from an SVG root tag.
+///
+/// Accepts a trailing `px` (ignored); rejects percentages.
+fn parse_svg_number(tag: &str, name: &str) -> Option<f64> {
+    let value = parse_svg_attr_str(tag, name)?;
+    if value.contains('%') {
+        return None;
+    }
+    value.trim().trim_end_matches("px").trim().parse().ok()
+}
+
+/// Extract the raw `name="..."` value from an SVG root tag.
+fn parse_svg_attr_str(tag: &str, name: &str) -> Option<String> {
+    let needle = format!("{name}=\"");
+    let start = tag.find(needle.as_str())? + needle.len();
+    let end = tag[start..].find('"')? + start;
+    Some(tag[start..end].to_owned())
+}
+
+/// Parse a `viewBox="minx miny w h"` value into `(w, h)`.
+fn parse_view_box(value: &str) -> Option<(f64, f64)> {
+    let parts: Vec<f64> = value
+        .split([',', ' ', '\t', '\n'])
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    if parts.len() == 4 && parts[2] > 0.0 && parts[3] > 0.0 {
+        Some((parts[2], parts[3]))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -515,6 +645,53 @@ mod tests {
         assert_eq!(rendered("- a\n  - b\n\n  para2"), "• a\n  ◦ b\npara2");
     }
 
+    #[test]
+    fn mermaid_size_prefers_fixed_dimensions() {
+        assert_eq!(
+            mermaid_svg_size(r#"<svg width="108" height="216" viewBox="0 0 108 216">"#),
+            (108, 216)
+        );
+    }
+
+    #[test]
+    fn mermaid_size_falls_back_to_view_box() {
+        assert_eq!(
+            mermaid_svg_size(r#"<svg width="100%" viewBox="0 0 108 216">"#),
+            (108, 216)
+        );
+    }
+
+    #[test]
+    fn mermaid_size_caps_wide_diagrams() {
+        assert_eq!(
+            mermaid_svg_size(r#"<svg width="1440" height="100" viewBox="0 0 1440 100">"#),
+            (720, 50)
+        );
+    }
+
+    #[test]
+    fn mermaid_size_rejects_garbage() {
+        assert_eq!(mermaid_svg_size("<svg>"), (480, 320));
+    }
+
+    #[test]
+    fn anchor_shifts_a_range_after_it() {
+        let shifted = shift_ranges_for_anchors(vec![(10, 14, "u".into())], [4].into_iter());
+        assert_eq!(shifted, vec![(11, 15, "u".into())]);
+    }
+
+    #[test]
+    fn anchor_leaves_a_range_before_it() {
+        let shifted = shift_ranges_for_anchors(vec![(2, 4, "u".into())], [10].into_iter());
+        assert_eq!(shifted, vec![(2, 4, "u".into())]);
+    }
+
+    #[test]
+    fn two_anchors_shift_a_later_range_twice() {
+        let shifted = shift_ranges_for_anchors(vec![(20, 24, "u".into())], [4, 12].into_iter());
+        assert_eq!(shifted, vec![(22, 26, "u".into())]);
+    }
+
     /// Manual visual check: `cargo test --bin notas preview_screenshot -- --ignored --nocapture`
     /// then screenshot the window from outside.
     #[test]
@@ -575,7 +752,7 @@ fn main() {
 | b    |    22 |
 "#;
         let rendered = markdown::render_themed(md, false);
-        apply_rendered(&buffer, &tags, &rendered);
+        apply_rendered(&view, &buffer, &tags, &rendered);
         let window = gtk::Window::new();
         window.set_default_size(720, 900);
         window.set_child(Some(&view));

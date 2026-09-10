@@ -37,6 +37,10 @@ pub enum Style {
     Quote(u32),
     /// Table cell text.
     Table,
+    /// Mermaid diagram placeholder. The span's text is
+    /// [`MERMAID_PLACEHOLDER`]; the rendered SVG bytes live in
+    /// [`Span::mermaid_svg`] so frontends can embed the diagram.
+    Mermaid,
 }
 
 /// An RGB foreground color for syntax tokens (frontend-neutral).
@@ -52,6 +56,9 @@ pub struct Span {
     pub styles: Vec<Style>,
     /// Destination URL when the span is link text.
     pub url: Option<String>,
+    /// Rendered Mermaid SVG for [`Style::Mermaid`] placeholder spans.
+    /// `None` for every other span.
+    pub mermaid_svg: Option<Box<str>>,
 }
 
 /// Platform-neutral result of rendering a Markdown document.
@@ -190,6 +197,7 @@ impl Renderer {
                 text: "\n".repeat(self.pending_sep),
                 styles: self.separator_styles(),
                 url: None,
+                mermaid_svg: None,
             });
             self.pending_sep = 0;
         }
@@ -198,6 +206,29 @@ impl Renderer {
             text: text.to_owned(),
             styles,
             url: self.link_url.clone(),
+            mermaid_svg: None,
+        });
+    }
+
+    /// Emit a Mermaid diagram placeholder carrying its rendered SVG.
+    pub fn emit_mermaid(&mut self, svg: Box<str>) {
+        if self.pending_sep > 0 {
+            self.spans.push(Span {
+                text: "\n".repeat(self.pending_sep),
+                styles: self.separator_styles(),
+                url: None,
+                mermaid_svg: None,
+            });
+            self.pending_sep = 0;
+        }
+        self.first = false;
+        let mut styles = self.separator_styles();
+        styles.push(Style::Mermaid);
+        self.spans.push(Span {
+            text: MERMAID_PLACEHOLDER.to_owned(),
+            styles,
+            url: None,
+            mermaid_svg: Some(svg),
         });
     }
 
@@ -372,7 +403,11 @@ impl Renderer {
                 if let Some(buffer) = self.code_buf.take() {
                     let code = buffer.trim_end_matches('\n').to_owned();
                     let language = self.code_lang.take();
-                    if !code.is_empty() || language.is_some() {
+                    if is_mermaid(language.as_deref())
+                        && let Some(svg) = render_mermaid(&code, self.dark)
+                    {
+                        self.emit_mermaid(svg);
+                    } else if !code.is_empty() || language.is_some() {
                         let mut styles = self.separator_styles();
                         styles.push(Style::CodeBlock);
                         if let Some(label) = language.as_deref() {
@@ -563,6 +598,48 @@ pub fn render_themed(source: &str, dark: bool) -> RenderedMarkdown {
 const MAX_HIGHLIGHT_BYTES: usize = 128 * 1024;
 /// Maximum highlighted lines before falling back to plain `CodeBlock`.
 const MAX_HIGHLIGHT_LINES: usize = 1000;
+/// Placeholder text marking a rendered Mermaid diagram in the span stream.
+/// A single object-replacement character (conventionally invisible) plus a
+/// newline: frontends anchor the diagram widget here using the SVG in
+/// [`Span::mermaid_svg`]. No visible label — the diagram *is* the content.
+pub const MERMAID_PLACEHOLDER: &str = "\u{FFFC}\n";
+/// Maximum Mermaid source size: beyond this keep the plain code block so a
+/// pasted dump cannot blow up SVG layout on every keystroke.
+const MAX_MERMAID_BYTES: usize = 64 * 1024;
+
+/// Whether a fenced code language selects the Mermaid renderer.
+#[must_use]
+pub fn is_mermaid(language: Option<&str>) -> bool {
+    language.is_some_and(|lang| lang.trim().eq_ignore_ascii_case("mermaid"))
+}
+
+/// Render Mermaid `source` to SVG for `dark` mode.
+///
+/// Returns `None` for empty/oversized input or parse/render failure so the
+/// caller can fall back to a plain code block. Pure and `Send`-safe, so the
+/// editor's background render thread can call it.
+#[must_use]
+pub fn render_mermaid(source: &str, dark: bool) -> Option<Box<str>> {
+    if source.trim().is_empty() || source.len() > MAX_MERMAID_BYTES {
+        return None;
+    }
+    let mut theme = if dark {
+        mermaid_svg::Theme::dark()
+    } else {
+        mermaid_svg::Theme::default_theme()
+    }
+    // CONTEXT: Adwaita's UI font keeps diagram labels visually consistent
+    // with the surrounding GTK preview.
+    .with_font("Cantarell, sans-serif");
+    // CONTEXT: `gtk::Svg` cannot resolve the responsive `width="100%"` output
+    // (no intrinsic height → zero-size picture in a TextView anchor), so emit
+    // fixed pixel dimensions instead.
+    theme.responsive = false;
+    mermaid_svg::render_with(source, &theme)
+        .ok()
+        .filter(|svg| svg.starts_with("<svg"))
+        .map(String::into_boxed_str)
+}
 
 /// Emit a fenced code body, syntax-highlighted when possible.
 ///
@@ -702,6 +779,7 @@ mod tests {
             text: "hello".into(),
             styles: vec![Style::Bold],
             url: None,
+            mermaid_svg: None,
         }]);
         assert_eq!(rendered.spans()[0].text, "hello");
     }
@@ -759,5 +837,89 @@ mod tests {
             .spans()
             .to_vec();
         assert!(has_syntax(&spans), "{spans:?}");
+    }
+
+    #[test]
+    fn mermaid_flowchart_emits_diagram_span() {
+        let spans = render("```mermaid\ngraph TD\nA --> B\n```")
+            .spans()
+            .to_vec();
+        assert!(
+            spans.iter().any(|s| s.styles.contains(&Style::Mermaid)),
+            "{spans:?}"
+        );
+    }
+
+    #[test]
+    fn mermaid_dark_mode_renders_svg() {
+        let spans = render_themed("```mermaid\ngraph TD\nA --> B\n```", true)
+            .spans()
+            .to_vec();
+        assert!(
+            spans.iter().any(|s| s.styles.contains(&Style::Mermaid)),
+            "{spans:?}"
+        );
+    }
+
+    #[test]
+    fn mermaid_placeholder_carries_no_visible_label() {
+        let spans = render("```mermaid\ngraph TD\nA --> B\n```")
+            .spans()
+            .to_vec();
+        let placeholder = spans
+            .iter()
+            .find(|s| s.styles.contains(&Style::Mermaid))
+            .map(|s| s.text.as_str())
+            .unwrap_or("");
+        assert!(!placeholder.contains("mermaid diagram"), "{placeholder:?}");
+    }
+
+    #[test]
+    fn mermaid_svg_emits_fixed_dimensions_for_gtk() {
+        let svg = render_mermaid("graph TD\nA --> B", false).expect("svg");
+        assert!(svg.contains("height="), "{svg:.120}");
+    }
+
+    #[test]
+    fn multiple_mermaid_blocks_each_emit_a_diagram_span() {
+        let md = "```mermaid\ngraph TD\nA --> B\n```\n\ntext\n\n```mermaid\npie\n\"A\" : 1\n```";
+        let spans = render(md).spans().to_vec();
+        let count = spans
+            .iter()
+            .filter(|s| s.styles.contains(&Style::Mermaid))
+            .count();
+        assert_eq!(count, 2, "{spans:?}");
+    }
+
+    #[test]
+    fn mermaid_invalid_source_falls_back_to_code_block() {
+        let spans = render("```mermaid\nnot a diagram {{{\n```")
+            .spans()
+            .to_vec();
+        assert!(
+            !spans.iter().any(|s| s.styles.contains(&Style::Mermaid)),
+            "{spans:?}"
+        );
+    }
+
+    #[test]
+    fn mermaid_invalid_source_keeps_code_block_style() {
+        let spans = render("```mermaid\nnot a diagram {{{\n```")
+            .spans()
+            .to_vec();
+        assert!(
+            spans.iter().any(|s| s.styles.contains(&Style::CodeBlock)),
+            "{spans:?}"
+        );
+    }
+
+    #[test]
+    fn mermaid_language_match_is_case_insensitive() {
+        assert!(is_mermaid(Some("Mermaid")));
+    }
+
+    #[test]
+    fn mermaid_language_match_trims_whitespace() {
+        assert!(is_mermaid(Some("  MERMAID  ")));
     }
 }

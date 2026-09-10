@@ -36,6 +36,7 @@ gtk = { package = "gtk4", version = "0.11", features = ["v4_22"], optional = tru
 libadwaita = { version = "0.9", features = ["v1_9"], optional = true }
 sourceview5 = { version = "0.11", optional = true }
 pulldown-cmark = "0.13"
+mermaid-svg = "0.7"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 glib = { version = "0.22", optional = true }
 pango = { version = "0.22", optional = true }
