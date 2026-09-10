@@ -178,12 +178,12 @@ mod tests {
         // Switching to WebDAV sticks (no reserved-backend snap-back) and
         // swaps the visible field rows.
         let _ = type_row.model();
-        type_row.set_selected(SyncType::WebDAV.index());
+        type_row.set_selected(SyncType::Webdav.index());
         pump();
-        assert_eq!(type_row.selected(), SyncType::WebDAV.index());
+        assert_eq!(type_row.selected(), SyncType::Webdav.index());
         assert!(matches!(
             pop(&messages),
-            AppMsg::SyncTypeChanged(SyncType::WebDAV)
+            AppMsg::SyncTypeChanged(SyncType::Webdav)
         ));
 
         // Per-backend fields: S3 rows edit the s3 section, WebDAV rows the

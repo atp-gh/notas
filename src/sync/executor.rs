@@ -25,7 +25,7 @@
 //!   (`https://s3.<region>.amazonaws.com`) with virtual-hosted addressing;
 //!   a custom endpoint (Cloudflare R2, Backblaze B2, MinIO, …) uses
 //!   path-style addressing.
-//! - **WebDAV** (`WebDavStore`): RFC-4918 collections via
+//! - **WebDAV** (`WebdavStore`): RFC-4918 collections via
 //!   `reqwest_dav`, Basic auth by default. The configured URL points at a
 //!   writable DAV collection; the notes live under
 //!   `notes/<uuid>.md` and `meta/<uuid>.json` inside it (or inside the
@@ -49,7 +49,7 @@ use crate::core::sync::{
 use crate::sync::crypto::{self, Cipher, CryptoError, Verifier};
 use crate::sync::error::SyncError;
 
-use crate::application::config::{S3SyncSettings, SyncSettings, SyncType, WebDavSyncSettings};
+use crate::application::config::{S3SyncSettings, SyncSettings, SyncType, WebdavSyncSettings};
 
 /// The storage primitives the planner's actions map onto. Implemented by
 /// every sync backend; the rest of [`run_sync_with`] is shared.
@@ -119,8 +119,8 @@ pub async fn run_sync(repo: &Repository, settings: &SyncSettings) -> Result<Sync
             let store = S3Store::new(&settings.s3)?;
             run_sync_with(repo, &store, settings).await
         }
-        SyncType::WebDAV => {
-            let store = WebDavStore::new(&settings.webdav)?;
+        SyncType::Webdav => {
+            let store = WebdavStore::new(&settings.webdav)?;
             run_sync_with(repo, &store, settings).await
         }
     }
@@ -732,17 +732,17 @@ async fn put_verifier(
 /// `directory`). The server decides the exact href form returned by
 /// PROPFIND — absolute path, full URL, … — so uuid extraction only looks
 /// at the last path segment.
-struct WebDavStore {
+struct WebdavStore {
     client: DavClient,
     /// Configured subfolder under the URL, trimmed of slashes (empty when
     /// the notes live directly in the URL).
     directory: String,
 }
 
-impl WebDavStore {
+impl WebdavStore {
     /// Build the store from the WebDAV settings. `url` must be https (or
     /// plain http when the user opted into insecure TLS).
-    fn new(settings: &WebDavSyncSettings) -> Result<Self, SyncError> {
+    fn new(settings: &WebdavSyncSettings) -> Result<Self, SyncError> {
         let url = webdav_base_url(settings)?;
         let agent = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
@@ -942,7 +942,7 @@ fn collection_path(dir: &str, child: &str) -> String {
     }
 }
 
-impl SyncStore for WebDavStore {
+impl SyncStore for WebdavStore {
     async fn ensure_ready(&self) -> Result<(), SyncError> {
         // Runs before the verifier is touched so a fresh backend can
         // receive the verifier object.
@@ -1043,11 +1043,11 @@ impl SyncStore for WebDavStore {
     }
 
     async fn get_verifier(&self) -> Result<Option<Vec<u8>>, SyncError> {
-        WebDavStore::get_verifier(self).await
+        WebdavStore::get_verifier(self).await
     }
 
     async fn put_verifier(&self, bytes: &[u8]) -> Result<(), SyncError> {
-        WebDavStore::put_verifier(self, bytes).await
+        WebdavStore::put_verifier(self, bytes).await
     }
 }
 
@@ -1055,7 +1055,7 @@ impl SyncStore for WebDavStore {
 ///
 /// A missing scheme defaults to `https://`; plain `http://` is only
 /// accepted when the user opted into insecure TLS.
-fn webdav_base_url(settings: &WebDavSyncSettings) -> Result<String, SyncError> {
+fn webdav_base_url(settings: &WebdavSyncSettings) -> Result<String, SyncError> {
     let raw = settings.url.trim();
     if raw.is_empty() {
         return Err(SyncError::configuration(
@@ -1176,8 +1176,8 @@ mod tests {
         assert_eq!(uuid_from_href("/notas/meta/x.json", ".md"), None);
     }
 
-    fn webdav_settings(url: &str) -> WebDavSyncSettings {
-        WebDavSyncSettings {
+    fn webdav_settings(url: &str) -> WebdavSyncSettings {
+        WebdavSyncSettings {
             url: url.into(),
             username: "alice".into(),
             password: "secret".into(),
@@ -1193,7 +1193,7 @@ mod tests {
         assert_eq!(ok, "https://nc.example/remote.php/dav/files/alice");
 
         // Plain http is refused unless the user opted into insecure TLS.
-        let mut plain = WebDavSyncSettings {
+        let mut plain = WebdavSyncSettings {
             insecure_tls: false,
             ..webdav_settings("http://192.168.1.10/webdav")
         };
@@ -1246,8 +1246,8 @@ mod webdav_tests {
 
     /// Test settings pointing at the mock server (plain http, so the
     /// insecure-TLS option is on).
-    fn webdav_settings(url: &str) -> WebDavSyncSettings {
-        WebDavSyncSettings {
+    fn webdav_settings(url: &str) -> WebdavSyncSettings {
+        WebdavSyncSettings {
             url: url.into(),
             username: "alice".into(),
             password: "secret".into(),
@@ -1349,7 +1349,7 @@ mod webdav_tests {
             .await;
 
         let settings = SyncSettings {
-            kind: SyncType::WebDAV,
+            kind: SyncType::Webdav,
             s3: S3SyncSettings::default(),
             webdav: webdav_settings(&server.uri()),
             encryption: EncryptionSettings::default(),
@@ -1417,7 +1417,7 @@ mod webdav_tests {
         let pool = database::connect(dir.join("a.db")).await.unwrap();
         let repo = Repository::new(pool.clone());
         let settings = SyncSettings {
-            kind: SyncType::WebDAV,
+            kind: SyncType::Webdav,
             s3: S3SyncSettings::default(),
             webdav: webdav_settings(&server.uri()),
             encryption: EncryptionSettings::default(),
@@ -1492,7 +1492,7 @@ mod webdav_tests {
             .unwrap();
 
         let settings = SyncSettings {
-            kind: SyncType::WebDAV,
+            kind: SyncType::Webdav,
             s3: S3SyncSettings::default(),
             webdav: webdav_settings(&server.uri()),
             encryption: EncryptionSettings::default(),
@@ -1579,7 +1579,7 @@ mod webdav_tests {
         repo.delete_note_forever(note.id).await.unwrap();
 
         let settings = SyncSettings {
-            kind: SyncType::WebDAV,
+            kind: SyncType::Webdav,
             s3: S3SyncSettings::default(),
             webdav: webdav_settings(&server.uri()),
             encryption: EncryptionSettings::default(),
@@ -1605,7 +1605,7 @@ mod webdav_tests {
         let pool = database::connect(dir.join("a.db")).await.unwrap();
         let repo = Repository::new(pool.clone());
         let settings = SyncSettings {
-            kind: SyncType::WebDAV,
+            kind: SyncType::Webdav,
             s3: S3SyncSettings::default(),
             webdav: webdav_settings(&server.uri()),
             encryption: EncryptionSettings::default(),
@@ -1624,7 +1624,7 @@ mod webdav_tests {
     /// SyncSettings with WebDAV + encryption enabled for `password`.
     fn encrypted_settings(url: &str, password: &str) -> SyncSettings {
         SyncSettings {
-            kind: SyncType::WebDAV,
+            kind: SyncType::Webdav,
             s3: S3SyncSettings::default(),
             webdav: webdav_settings(url),
             encryption: EncryptionSettings {
@@ -1951,7 +1951,7 @@ mod webdav_tests {
         // Encryption disabled: syncing would upload plaintext over the
         // encrypted remote data, so the sync must refuse instead.
         let settings = SyncSettings {
-            kind: SyncType::WebDAV,
+            kind: SyncType::Webdav,
             s3: S3SyncSettings::default(),
             webdav: webdav_settings(&server.uri()),
             encryption: EncryptionSettings::default(),
@@ -2104,7 +2104,7 @@ mod e2e_tests {
         let settings = SyncSettings {
             kind: SyncType::S3,
             s3,
-            webdav: WebDavSyncSettings::default(),
+            webdav: WebdavSyncSettings::default(),
             encryption: EncryptionSettings::default(),
             last_synced_at: String::new(),
         };
@@ -2250,7 +2250,7 @@ mod e2e_tests {
         let settings = SyncSettings {
             kind: SyncType::S3,
             s3: s3.clone(),
-            webdav: WebDavSyncSettings::default(),
+            webdav: WebdavSyncSettings::default(),
             encryption: EncryptionSettings {
                 enabled: true,
                 password: PASSWORD.into(),

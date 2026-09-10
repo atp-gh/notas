@@ -320,7 +320,7 @@ fn show_backend_rows(kind: SyncType, s3_rows: &[gtk::Widget], webdav_rows: &[gtk
         row.set_visible(kind == SyncType::S3);
     }
     for row in webdav_rows {
-        row.set_visible(kind == SyncType::WebDAV);
+        row.set_visible(kind == SyncType::Webdav);
     }
 }
 

@@ -121,11 +121,9 @@ pub enum SyncType {
     /// MinIO, …).
     #[default]
     S3,
-    /// WebDAV (Nextcloud, ownCloud, …). Serde needs the explicit name:
-    /// `rename_all = "kebab-case"` would split the acronym into
-    /// `web-d-a-v`.
-    #[serde(rename = "webdav")]
-    WebDAV,
+    /// WebDAV (Nextcloud, ownCloud, …). The wire name stays `"webdav"`
+    /// through `rename_all = "kebab-case"`.
+    Webdav,
 }
 
 impl SyncType {
@@ -134,7 +132,7 @@ impl SyncType {
     pub fn index(self) -> u32 {
         match self {
             Self::S3 => 0,
-            Self::WebDAV => 1,
+            Self::Webdav => 1,
         }
     }
 
@@ -142,7 +140,7 @@ impl SyncType {
     #[must_use]
     pub fn from_index(index: u32) -> Self {
         match index {
-            1 => Self::WebDAV,
+            1 => Self::Webdav,
             _ => Self::S3,
         }
     }
@@ -223,7 +221,7 @@ pub struct EncryptionSettings {
 /// README recommends a Nextcloud *app password*.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct WebDavSyncSettings {
+pub struct WebdavSyncSettings {
     /// DAV collection URL (https), or http when `insecure_tls` is set.
     pub url: String,
     /// Username for Basic auth.
@@ -239,7 +237,7 @@ pub struct WebDavSyncSettings {
     pub insecure_tls: bool,
 }
 
-impl Default for WebDavSyncSettings {
+impl Default for WebdavSyncSettings {
     fn default() -> Self {
         Self {
             url: String::new(),
@@ -251,7 +249,7 @@ impl Default for WebDavSyncSettings {
     }
 }
 
-impl WebDavSyncSettings {
+impl WebdavSyncSettings {
     /// Whether a sync can even be attempted: a URL and both credentials
     /// must be present.
     #[must_use]
@@ -280,7 +278,7 @@ pub struct SyncSettings {
     /// S3 target (kept even while `kind` is WebDAV).
     pub s3: S3SyncSettings,
     /// WebDAV target (kept even while `kind` is S3).
-    pub webdav: WebDavSyncSettings,
+    pub webdav: WebdavSyncSettings,
     /// End-to-end encryption, shared by both backends.
     pub encryption: EncryptionSettings,
     /// Time of the last successful sync (`YYYY-MM-DD HH:MM:SS`, device
@@ -293,7 +291,7 @@ impl Default for SyncSettings {
         Self {
             kind: SyncType::S3,
             s3: S3SyncSettings::default(),
-            webdav: WebDavSyncSettings::default(),
+            webdav: WebdavSyncSettings::default(),
             encryption: EncryptionSettings::default(),
             last_synced_at: String::new(),
         }
@@ -307,7 +305,7 @@ impl SyncSettings {
     pub fn is_configured(&self) -> bool {
         match self.kind {
             SyncType::S3 => self.s3.is_configured(),
-            SyncType::WebDAV => self.webdav.is_configured(),
+            SyncType::Webdav => self.webdav.is_configured(),
         }
     }
 }
@@ -510,7 +508,7 @@ mod tests {
         settings.theme.mode = ThemeMode::Dark;
         settings.editor.show_line_numbers = true;
         settings.interface.show_status_bar = false;
-        settings.sync.kind = SyncType::WebDAV;
+        settings.sync.kind = SyncType::Webdav;
         settings.sync.s3.bucket = "my-notes".into();
         settings.sync.s3.endpoint = "https://s3.example.com".into();
         settings.sync.s3.access_key_id = "AK".into();
@@ -556,7 +554,7 @@ mod tests {
 
     #[test]
     fn sync_type_serde_uses_kebab_case() {
-        for (kind, name) in [(SyncType::S3, "s3"), (SyncType::WebDAV, "webdav")] {
+        for (kind, name) in [(SyncType::S3, "s3"), (SyncType::Webdav, "webdav")] {
             assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{name}\""));
             assert_eq!(
                 serde_json::from_str::<SyncType>(&format!("\"{name}\"")).unwrap(),
@@ -567,7 +565,7 @@ mod tests {
 
     #[test]
     fn sync_type_indices_roundtrip() {
-        for kind in [SyncType::S3, SyncType::WebDAV] {
+        for kind in [SyncType::S3, SyncType::Webdav] {
             assert_eq!(SyncType::from_index(kind.index()), kind);
         }
     }
@@ -585,7 +583,7 @@ mod tests {
 
         // Switching to WebDAV checks the WebDAV section instead, which is
         // still empty.
-        settings.sync.kind = SyncType::WebDAV;
+        settings.sync.kind = SyncType::Webdav;
         assert!(!settings.sync.is_configured());
 
         // WebDAV needs url + username + password.

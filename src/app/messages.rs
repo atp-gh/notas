@@ -397,7 +397,7 @@ impl App {
                         SyncType::S3 => {
                             tr!("Sync: configure a bucket and keys in Settings")
                         }
-                        SyncType::WebDAV => {
+                        SyncType::Webdav => {
                             tr!("Sync: configure the server URL and password in Settings")
                         }
                     };
