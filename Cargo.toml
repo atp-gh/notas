@@ -2,6 +2,8 @@
 name = "notas"
 version = "0.1.0"
 edition = "2024"
+# Floor set by relm4 (1.93); edition 2024 alone would allow 1.85.
+rust-version = "1.93"
 description = "Notas — a fast local-first note-taking app"
 
 [features]
@@ -59,9 +61,19 @@ required-features = ["gui"]
 # so IDE builds and partial `cargo check`s are held to the same standard.
 [lints.clippy]
 all = { level = "deny", priority = 10 }
+suspicious = { level = "deny", priority = 9 }
+style = { level = "deny", priority = 9 }
+complexity = { level = "deny", priority = 9 }
+perf = { level = "deny", priority = 9 }
 redundant_clone = { level = "deny", priority = 9 }
 
+[lints.rust]
+unsafe_code = { level = "deny", priority = 10 }
+missing_debug_implementations = { level = "deny", priority = 9 }
+
 [profile.release]
+opt-level = 3
 lto = true
 codegen-units = 1
+panic = "abort"
 strip = "symbols"

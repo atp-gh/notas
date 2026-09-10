@@ -96,6 +96,7 @@ pub struct TableState {
 /// [`Span`] output accumulates in [`Renderer::spans`]. The fields below are
 /// public so adapters and tests can inspect or seed the state machine, but
 /// typical use only needs [`Renderer::new`] plus the event methods.
+#[derive(Debug)]
 pub struct Renderer {
     /// Ordered rendered spans (the final output).
     pub spans: Vec<Span>,
