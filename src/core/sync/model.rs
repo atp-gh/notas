@@ -178,14 +178,14 @@ impl Sidecar {
 /// Canonical tag-list form: trim, drop empties, sort, de-duplicate.
 #[must_use]
 pub fn normalize_tags(tags: &[String]) -> Vec<String> {
-    let mut seen: Vec<String> = Vec::with_capacity(tags.len());
-    for tag in tags {
-        let tag = tag.trim();
-        if !tag.is_empty() && !seen.iter().any(|s| s == tag) {
-            seen.push(tag.to_owned());
-        }
-    }
+    let mut seen: Vec<String> = tags
+        .iter()
+        .map(|tag| tag.trim())
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_owned)
+        .collect();
     seen.sort();
+    seen.dedup();
     seen
 }
 
