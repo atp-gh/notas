@@ -129,10 +129,21 @@ pub enum CryptoError {
 ///
 /// One instance is created per sync run (see the sync engine) and used for
 /// every object of that run, so Argon2id runs exactly once per sync.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is redacted on purpose: the key must never appear in logs or
+/// panic output (see `obs-no-sensitive-data`).
+#[derive(Clone)]
 pub struct Cipher {
     key: [u8; 32],
     salt: [u8; SALT_LEN],
+}
+
+impl std::fmt::Debug for Cipher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cipher")
+            .field("salt", &hex::encode(self.salt))
+            .finish_non_exhaustive()
+    }
 }
 
 /// Plaintext metadata object stored on the backend as
