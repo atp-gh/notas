@@ -90,36 +90,42 @@ pub struct TableState {
 }
 
 /// Stateful Markdown event renderer shared by frontend adapters.
+///
+/// Feed pulldown-cmark events through [`Renderer::start_tag`],
+/// [`Renderer::text`], [`Renderer::end_tag`] and friends; the ordered
+/// [`Span`] output accumulates in [`Renderer::spans`]. The fields below are
+/// public so adapters and tests can inspect or seed the state machine, but
+/// typical use only needs [`Renderer::new`] plus the event methods.
 pub struct Renderer {
-    /// Ordered rendered spans.
+    /// Ordered rendered spans (the final output).
     pub spans: Vec<Span>,
-    /// Whether any content has been emitted.
+    /// Whether any content has been emitted yet (suppresses leading separators).
     pub first: bool,
-    /// Pending block separator length.
+    /// Newlines owed before the next content span.
     pub pending_sep: usize,
-    /// Active inline styles.
+    /// Inline styles currently open (`Strong`/`Emphasis`/`Strikethrough`/`Link`).
     pub inline: Vec<Style>,
-    /// Active link destination.
+    /// Destination URL of the link currently open, if any.
     pub link_url: Option<String>,
-    /// Active heading level.
+    /// Level of the heading currently open (`0` when outside one).
     pub heading: u32,
-    /// Active block quote depth.
+    /// Depth of the block quote currently open (`0` when outside one).
     pub quote_depth: u32,
-    /// Open list states.
+    /// State of every open list, innermost last.
     pub lists: Vec<ListState>,
-    /// Pending list item prefix.
+    /// Bullet or number prefix waiting for the current item's first content.
     pub item_prefix: Option<String>,
-    /// Current list item indentation.
+    /// Indentation carried by the current list item's continuation lines.
     pub item_indent: String,
-    /// Number of blocks seen in each open item.
+    /// Block count seen inside each open list item, innermost last.
     pub item_blocks: Vec<u32>,
-    /// Active table state.
+    /// Table under construction, if the parser is inside one.
     pub table: Option<TableState>,
-    /// Active fenced code buffer.
+    /// Fenced code body under construction, if the parser is inside one.
     pub code_buf: Option<String>,
-    /// Optional fenced code language.
+    /// Language tag of the fenced code block under construction, if any.
     pub code_lang: Option<String>,
-    /// Whether to use the dark syntax theme for code blocks.
+    /// Whether fenced code blocks highlight with the dark syntax theme.
     pub dark: bool,
 }
 
