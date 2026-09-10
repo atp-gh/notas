@@ -24,11 +24,22 @@
 /// ```
 #[must_use]
 pub fn fts_query(user_input: &str) -> String {
-    user_input
-        .split_whitespace()
-        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut out = String::with_capacity(user_input.len() + 2);
+    for token in user_input.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push('"');
+        for ch in token.chars() {
+            if ch == '"' {
+                out.push_str("\"\"");
+            } else {
+                out.push(ch);
+            }
+        }
+        out.push('"');
+    }
+    out
 }
 
 #[cfg(test)]
