@@ -220,9 +220,17 @@ impl PreviewTags {
     /// Re-apply theme-dependent colors (dark/light palette + accent).
     /// Called once at build time and again whenever the libadwaita theme
     /// or the accent color changes.
-    pub fn apply_theme(&self, dark: bool, accent: &gtk::gdk::RGBA) {
+    ///
+    /// Muted text (`dim`/`strike`/quotes) is sampled from the current GTK
+    /// theme (`view_fg_color` + `dim` style class) so any system theme
+    /// (including Stylix-generated ones) is honored. When sampling fails
+    /// (e.g. widget not rooted yet) it falls back to the previous
+    /// dark/light constants. Code/quote backgrounds stay translucent
+    /// overlays so they tint whatever `view_bg_color` the theme provides.
+    pub fn apply_theme(&self, view: &gtk::TextView, dark: bool, accent: &gtk::gdk::RGBA) {
         let accent_hex = rgba_to_hex(accent);
-        let text_hex = if dark { "#c8c8c8" } else { "#8f8f8f" };
+        let text_hex = theme_muted_fg(view)
+            .unwrap_or_else(|| (if dark { "#c8c8c8" } else { "#8f8f8f" }).to_string());
         let quote_bg = if dark {
             "rgba(255,255,255,0.06)"
         } else {
@@ -239,11 +247,11 @@ impl PreviewTags {
         }
         self.link.set_property("foreground", accent_hex.as_str());
         for q in [&self.quote_1, &self.quote_2, &self.quote_3] {
-            q.set_property("foreground", text_hex);
+            q.set_property("foreground", text_hex.as_str());
             q.set_property("background", quote_bg);
         }
-        self.dim.set_property("foreground", text_hex);
-        self.strike.set_property("foreground", text_hex);
+        self.dim.set_property("foreground", text_hex.as_str());
+        self.strike.set_property("foreground", text_hex.as_str());
         self.code.set_property("background", code_bg);
         self.code_block.set_property("background", code_bg);
     }
@@ -285,6 +293,31 @@ pub fn apply_scheme(
     if let Some(scheme) = manager.scheme(id) {
         buffer.set_style_scheme(Some(&scheme));
     }
+}
+
+/// Sample a muted foreground from the current GTK theme.
+///
+/// Blends `view_fg_color` toward `view_bg_color` so quotes/`dim`/strike
+/// stay readable on any system theme. Returns `None` when the widget has
+/// no theme resolved yet (caller falls back to dark/light constants).
+fn theme_muted_fg(view: &gtk::TextView) -> Option<String> {
+    #[allow(deprecated)]
+    let fg = view.style_context().lookup_color("view_fg_color")?;
+    #[allow(deprecated)]
+    let bg = view
+        .style_context()
+        .lookup_color("view_bg_color")
+        .unwrap_or(gtk::gdk::RGBA::WHITE);
+    // 65% fg + 35% bg approximates the old #8f8f8f/#c8c8c8 dimming
+    // while tracking any theme palette.
+    let mix = |f: f32, b: f32| f * 0.65 + b * 0.35;
+    let muted = gtk::gdk::RGBA::new(
+        mix(fg.red(), bg.red()),
+        mix(fg.green(), bg.green()),
+        mix(fg.blue(), bg.blue()),
+        1.0,
+    );
+    Some(rgba_to_hex(&muted))
 }
 
 /// Convert a `gdk::RGBA` to a `#rrggbb` hex string for tag properties.

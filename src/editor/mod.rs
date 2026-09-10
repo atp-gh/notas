@@ -66,6 +66,35 @@ fn inherit_frac(
     }
 }
 
+/// Install a display-wide CSS override so the source view's base
+/// background/foreground track the GTK theme (`view_bg_color` /
+/// `view_fg_color`). Installed once; harmless if called again.
+fn ensure_editor_theme_css() {
+    use std::sync::OnceLock;
+    static DONE: OnceLock<()> = OnceLock::new();
+    if DONE.get().is_some() {
+        return;
+    }
+    let css = gtk::CssProvider::new();
+    css.load_from_string(
+        "sourceview text, sourceview viewport, textview text, textview viewport { \
+           background-color: var(--view-bg-color); \
+           color: var(--view-fg-color); \
+         }",
+    );
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        // Leak the provider so it outlives this call; the display holds a
+        // ref, and we only need it installed once per process.
+        std::mem::forget(css);
+        DONE.set(()).ok();
+    }
+}
+
 pub struct Editor {
     pub source_view: sourceview5::View,
     pub source_buffer: sourceview5::Buffer,
@@ -343,6 +372,12 @@ where
     source_view.set_show_line_numbers(false);
     source_view.set_show_right_margin(false);
     source_view.set_wrap_mode(gtk::WrapMode::WordChar);
+    // GtkSourceView style schemes (Adwaita/Adwaita-dark below) carry their
+    // own text background, ignoring the GTK theme. Force the base
+    // background/foreground back to the theme's view colors so any system
+    // theme is honored; per-token syntax colors from the scheme still apply
+    // on top via tags.
+    ensure_editor_theme_css();
 
     let preview_buffer = gtk::TextBuffer::new(None);
     let preview_tags = Rc::new(PreviewTags::new(&preview_buffer));
@@ -373,12 +408,14 @@ where
     // Keep the preview colors and the syntax highlighting scheme in sync
     // with the libadwaita theme. GtkSourceView defaults to a light scheme
     // and does not switch it automatically, so apply it ourselves.
+    // Preview muted colors are sampled from the preview widget's theme
+    // (see PreviewTags::apply_theme) so they track any system theme.
     let scheme_manager = sourceview5::StyleSchemeManager::new();
     {
         let style_manager = adw::StyleManager::default();
         let dark = style_manager.is_dark();
         let accent = style_manager.accent_color_rgba();
-        preview_tags.apply_theme(dark, &accent);
+        preview_tags.apply_theme(&preview_view, dark, &accent);
         apply_scheme(&scheme_manager, &source_buffer, dark);
 
         let tags = preview_tags.clone();
@@ -387,9 +424,10 @@ where
         let rev = live_rev.clone();
         let tx = live_tx.clone();
         let src = source_buffer.clone();
+        let pv = preview_view.clone();
         sm.clone().connect_dark_notify(move |_| {
             let dark = sm.is_dark();
-            tags.apply_theme(dark, &sm.accent_color_rgba());
+            tags.apply_theme(&pv, dark, &sm.accent_color_rgba());
             apply_scheme(&scheme_manager, &buf, dark);
             // Syntax token colors are baked at render time, so queue an
             // async re-render to pick the matching light/dark tmTheme.
@@ -398,8 +436,9 @@ where
 
         let tags = preview_tags.clone();
         let sm = style_manager;
+        let pv = preview_view.clone();
         sm.clone().connect_accent_color_rgba_notify(move |_| {
-            tags.apply_theme(sm.is_dark(), &sm.accent_color_rgba());
+            tags.apply_theme(&pv, sm.is_dark(), &sm.accent_color_rgba());
         });
     }
 
