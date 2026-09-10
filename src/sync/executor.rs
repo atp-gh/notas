@@ -285,7 +285,15 @@ async fn resolve_cipher(
                     "cannot read the encryption verifier on the backend: {e}"
                 ))
             })?;
-            let cipher = Cipher::derive(password, verifier.salt_bytes()?)?;
+            // Argon2id is CPU-bound (hundreds of ms): offload it so the
+            // async runtime worker is never blocked (see `async-spawn-blocking`).
+            let salt = verifier.salt_bytes()?;
+            let password_owned = password.to_owned();
+            let cipher = tokio::task::spawn_blocking(move || Cipher::derive(&password_owned, salt))
+                .await
+                .map_err(|e| {
+                    SyncError::configuration(format!("key derivation task failed: {e}"))
+                })??;
             if !cipher.verify(&verifier) {
                 return Err(SyncError::configuration(
                     "the encryption password is wrong — enter the password that encrypted \
@@ -295,7 +303,13 @@ async fn resolve_cipher(
             Ok(Some(cipher))
         }
         None => {
-            let cipher = Cipher::generate(password)?;
+            // Same offload as above: `generate` also runs Argon2id.
+            let password_owned = password.to_owned();
+            let cipher = tokio::task::spawn_blocking(move || Cipher::generate(&password_owned))
+                .await
+                .map_err(|e| {
+                    SyncError::configuration(format!("key derivation task failed: {e}"))
+                })??;
             let verifier = cipher.verifier()?;
             let bytes = serde_json::to_vec(&verifier)
                 .map_err(|e| SyncError::configuration(format!("cannot build the verifier: {e}")))?;
