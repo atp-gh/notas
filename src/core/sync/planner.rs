@@ -131,7 +131,9 @@ pub fn plan_sync(
     let local_by_uuid: HashMap<&SyncUuid, &LocalNote> =
         local.iter().map(|n| (&n.uuid, n)).collect();
     let tombstone_uuids: HashSet<&SyncUuid> = tombstones.iter().map(|(uuid, _)| uuid).collect();
-    let mut actions = Vec::new();
+    // Upper bound: at most one action per local note, tombstone and remote
+    // entry; the plan usually stays well below it.
+    let mut actions = Vec::with_capacity(local.len() + tombstones.len() + remote.len());
 
     // --- local notes ------------------------------------------------------
     for note in local {
