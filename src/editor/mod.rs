@@ -109,7 +109,7 @@ pub struct Editor {
     pub search_context: sourceview5::SearchContext,
     search_settings: sourceview5::SearchSettings,
     live_rev: Rc<Cell<u64>>,
-    live_tx: std::sync::mpsc::Sender<(u64, crate::markdown::RenderedMarkdown)>,
+    live_tx: tokio::sync::mpsc::UnboundedSender<(u64, crate::markdown::RenderedMarkdown)>,
     live_debounce: Rc<RefCell<Option<glib::SourceId>>>,
     /// Re-entrancy guard for scroll sync: programmatic `set_value` calls fire
     /// `value-changed` synchronously, so the follower must not drive back.
@@ -130,7 +130,7 @@ pub struct Editor {
 /// the preview buffer on the UI thread. Stale revisions are dropped.
 fn spawn_preview_render(
     rev_counter: &Rc<Cell<u64>>,
-    tx: &std::sync::mpsc::Sender<(u64, crate::markdown::RenderedMarkdown)>,
+    tx: &tokio::sync::mpsc::UnboundedSender<(u64, crate::markdown::RenderedMarkdown)>,
     source_buffer: &sourceview5::Buffer,
     dark: bool,
 ) {
@@ -142,8 +142,9 @@ fn spawn_preview_render(
     let tx = tx.clone();
     std::thread::spawn(move || {
         let rendered = crate::markdown::render_themed(&md, dark);
+        // Wakes the `spawn_local` drain below via the channel waker — no
+        // polling, so the main loop can sleep when idle.
         let _ = tx.send((rev, rendered));
-        glib::MainContext::default().wakeup();
     });
 }
 
@@ -392,12 +393,16 @@ where
     preview_view.set_top_margin(8);
     preview_view.set_bottom_margin(8);
 
-    // Async live pipeline: background threads `send` rendered documents
-    // over std mpsc; the drain is installed after `split` exists so it can
-    // also restore the remembered preview scroll (see below).
+    // Async live pipeline: background threads `send` rendered documents;
+    // the `spawn_local` drain below awaits them, so delivery is
+    // event-driven — it runs only when a render lands, and the main loop
+    // can sleep otherwise. (A permanent `idle_add_local` returning
+    // `Continue` here would keep the loop awake polling an empty queue and
+    // pin a CPU core even when idle.)
     let live_rev = Rc::new(Cell::new(0u64));
     let live_debounce: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
-    let (live_tx, live_rx) = std::sync::mpsc::channel::<(u64, crate::markdown::RenderedMarkdown)>();
+    let (live_tx, live_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, crate::markdown::RenderedMarkdown)>();
     // Scroll sync + position memory. Fractions, not pixels: the two sides
     // have different content heights, so only percentages transfer.
     let sync_guard = Rc::new(Cell::new(false));
@@ -585,8 +590,10 @@ where
     }
 
     // Drain for the async live pipeline: applies the latest revision only.
-    // Workers `wakeup` the main context so this runs promptly even when the
-    // loop is idle. `apply_rendered` resets the preview to the top via
+    // Stale revisions are dropped by the `rev` check. This task sleeps
+    // inside `recv()` until a render arrives — unlike an `idle_add_local`
+    // poll loop, it costs nothing when idle.
+    // `apply_rendered` resets the preview to the top via
     // `set_text`, so the remembered fraction is re-applied under the guard
     // (which also keeps the reset itself from overwriting the memory); the
     // same fraction is queued as pending for the layout-completion restore
@@ -600,21 +607,19 @@ where
         let frac = preview_frac.clone();
         let pending = preview_pending.clone();
         let scroll = preview_scroll.clone();
-        glib::idle_add_local(move || {
-            let mut latest = None;
-            while let Ok(item) = live_rx.try_recv() {
-                latest = Some(item);
+        let mut live_rx = live_rx;
+        // Dropping the handle does not cancel the task: the source stays
+        // attached to the main context for the life of the editor.
+        let _live_drain = glib::MainContext::default().spawn_local(async move {
+            while let Some((msg_rev, rendered)) = live_rx.recv().await {
+                if rev.get() == msg_rev {
+                    guard.set(true);
+                    apply_rendered(&view, &buf, &tags, &rendered);
+                    guard.set(false);
+                    pending.set(frac.get());
+                    Editor::restore_scroll(&scroll, frac.get(), &guard);
+                }
             }
-            if let Some((msg_rev, rendered)) = latest
-                && rev.get() == msg_rev
-            {
-                guard.set(true);
-                apply_rendered(&view, &buf, &tags, &rendered);
-                guard.set(false);
-                pending.set(frac.get());
-                Editor::restore_scroll(&scroll, frac.get(), &guard);
-            }
-            glib::ControlFlow::Continue
         });
     }
 
@@ -623,7 +628,6 @@ where
     // `suppress` and therefore skip this; they call
     // `request_preview_immediate` explicitly instead.
     {
-        let emit = emit.clone();
         let suppress_live = suppress;
         let rev = live_rev.clone();
         let tx = live_tx.clone();
@@ -631,7 +635,10 @@ where
         let preview_scroll_for_live = preview_scroll.clone();
         source_buffer.connect_changed(move |buffer| {
             if !suppress_live.get() {
-                emit(AppMsg::ContentChanged);
+                // No `ContentChanged` emit here: the handler above already
+                // sends one per change (which drives the dirty check, an
+                // O(n) full-text compare). Emitting again would double that
+                // cost on every keystroke.
                 if let Some(id) = debounce.borrow_mut().take() {
                     id.remove();
                 }
