@@ -138,19 +138,22 @@ impl Sidecar {
     /// ```
     /// use notas::core::sync::{Sidecar, SidecarError};
     ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let sidecar: Sidecar = serde_json::from_str(r#"
     ///     {"uuid": "a1", "title": "t", "tags": [], "trashed": false,
     ///      "deleted": false, "updated_at": "2026-01-01 10:00:00",
     ///      "content_hash": "00"}
-    /// "#).unwrap();
-    /// assert!(sidecar.validated().is_ok());
+    /// "#)?;
+    /// sidecar.validated()?;
     ///
     /// let bad: Sidecar = serde_json::from_str(r#"
     ///     {"uuid": "", "title": "t", "tags": [], "trashed": false,
     ///      "deleted": false, "updated_at": "2026-01-01 10:00:00",
     ///      "content_hash": "00"}
-    /// "#).unwrap();
+    /// "#)?;
     /// assert_eq!(bad.validated().unwrap_err(), SidecarError::EmptyUuid);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn validated(&self) -> Result<&Self, SidecarError> {
         let uuid = self.uuid.as_str();

@@ -31,9 +31,12 @@
 //! ```
 //! use notas::sync::crypto::Cipher;
 //!
-//! let cipher = Cipher::derive("correct horse battery staple", [0; 16]).unwrap();
-//! let blob = cipher.encrypt(b"secret").unwrap();
-//! assert_eq!(cipher.decrypt(&blob).unwrap(), b"secret");
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let cipher = Cipher::derive("correct horse battery staple", [0; 16])?;
+//! let blob = cipher.encrypt(b"secret")?;
+//! assert_eq!(cipher.decrypt(&blob)?, b"secret");
+//! # Ok(())
+//! # }
 //! ```
 
 use argon2::{Algorithm, Argon2, Params, Version};
