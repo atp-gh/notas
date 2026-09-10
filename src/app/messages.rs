@@ -21,9 +21,29 @@ use crate::ui::dialogs;
 use crate::ui::settings::build_settings_window;
 use crate::ui::status::sync_indicator_text;
 use crate::ui::theme;
-use crate::ui::{AppMsg, ViewMode};
+use crate::ui::{AppMsg, EditorMode, ViewMode};
 
 impl App {
+    /// Mirror `mode` into the model, the editor split and the three header
+    /// buttons. Early-returns when unchanged so button `toggled` signals
+    /// can never recurse.
+    fn set_editor_mode(&mut self, mode: EditorMode) {
+        if self.editor_mode == mode && self.widgets.editor.editor_mode() == mode {
+            return;
+        }
+        self.editor_mode = mode;
+        self.widgets.editor.set_editor_mode(mode);
+        // Deactivate first so only the target fires `toggled(active)`.
+        for (btn, active) in [
+            (&self.widgets.mode_source_btn, mode == EditorMode::Source),
+            (&self.widgets.mode_split_btn, mode == EditorMode::Split),
+            (&self.widgets.mode_preview_btn, mode == EditorMode::Preview),
+        ] {
+            if btn.is_active() != active {
+                btn.set_active(active);
+            }
+        }
+    }
     pub(super) fn handle(&mut self, msg: AppMsg, app_sender: &AppSender) {
         match msg {
             AppMsg::Db(event) => self.handle_db_event(event, app_sender),
@@ -240,14 +260,12 @@ impl App {
                 );
                 self.set_dirty(dirty);
             }
-            AppMsg::TogglePreview => {
-                self.preview = !self.preview;
-                self.widgets.preview_btn.set_active(self.preview);
-                if self.preview {
-                    self.widgets.editor.render_preview();
-                }
-                let name = if self.preview { "preview" } else { "source" };
-                self.widgets.editor.stack.set_visible_child_name(name);
+            AppMsg::SetEditorMode(mode) => {
+                self.set_editor_mode(mode);
+            }
+            AppMsg::CycleEditorMode => {
+                let next = self.editor_mode.next();
+                self.set_editor_mode(next);
             }
             AppMsg::FocusSearch => {
                 self.widgets.search_entry.grab_focus();
@@ -518,8 +536,8 @@ impl App {
                 self.loading.set(true);
                 self.widgets.editor.source_buffer.set_text(&note.content);
                 self.loading.set(false);
-                if self.preview {
-                    self.widgets.editor.render_preview();
+                if self.editor_mode != EditorMode::Source {
+                    self.widgets.editor.request_preview_immediate();
                 }
                 self.widgets.save_btn.set_sensitive(true);
                 self.widgets.status_label.set_text("");

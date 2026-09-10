@@ -15,7 +15,7 @@ pub mod events;
 pub mod navigation;
 pub mod state;
 
-pub use commands::{AppCommand, DbCommand};
+pub use commands::{AppCommand, DbCommand, EditorMode};
 pub use events::DbEvent;
 pub use navigation::{ViewId, ViewMode};
 

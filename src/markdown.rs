@@ -16,6 +16,17 @@ pub enum Style {
     Code,
     /// Fenced code block.
     CodeBlock,
+    /// Syntax-highlighted token inside a code block. The base
+    /// [`Style::CodeBlock`] (monospace + background) is always applied
+    /// first; this only carries the per-token foreground + emphasis.
+    Syntax {
+        /// Token foreground color.
+        fg: Rgb,
+        /// Whether the token is bold.
+        bold: bool,
+        /// Whether the token is italic.
+        italic: bool,
+    },
     /// Link text.
     Link,
     /// Muted metadata or separator.
@@ -27,6 +38,10 @@ pub enum Style {
     /// Table cell text.
     Table,
 }
+
+/// An RGB foreground color for syntax tokens (frontend-neutral).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Rgb(pub u8, pub u8, pub u8);
 
 /// A text run carrying the styles active at that position.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -97,6 +112,8 @@ pub struct Renderer {
     pub code_buf: Option<String>,
     /// Optional fenced code language.
     pub code_lang: Option<String>,
+    /// Whether to use the dark syntax theme for code blocks.
+    pub dark: bool,
 }
 
 impl Renderer {
@@ -118,7 +135,16 @@ impl Renderer {
             table: None,
             code_buf: None,
             code_lang: None,
+            dark: false,
         }
+    }
+
+    /// Create a renderer that highlights code blocks for `dark` mode.
+    #[must_use]
+    pub fn with_dark(dark: bool) -> Self {
+        let mut renderer = Self::new();
+        renderer.dark = dark;
+        renderer
     }
 
     /// Declare separation before the next block.
@@ -344,18 +370,19 @@ impl Renderer {
             TagEnd::BlockQuote(_) => self.quote_depth = self.quote_depth.saturating_sub(1),
             TagEnd::CodeBlock => {
                 if let Some(buffer) = self.code_buf.take() {
-                    let code = buffer.trim_end_matches('\n');
+                    let code = buffer.trim_end_matches('\n').to_owned();
                     let language = self.code_lang.take();
                     if !code.is_empty() || language.is_some() {
                         let mut styles = self.separator_styles();
                         styles.push(Style::CodeBlock);
-                        if let Some(language) = language {
+                        if let Some(label) = language.as_deref() {
                             let mut language_styles = styles.clone();
                             language_styles.push(Style::Dim);
-                            self.emit(&format!("{language}\n"), language_styles);
+                            self.emit(&format!("{label}\n"), language_styles);
                         }
                         if !code.is_empty() {
-                            self.emit(code, styles);
+                            let dark = self.dark;
+                            emit_code_spans(self, &code, language.as_deref(), styles, dark);
                         }
                     }
                 }
@@ -499,11 +526,21 @@ pub fn pad_cell(cell: &str, width: usize, align: pulldown_cmark::Alignment) -> S
 /// Parse Markdown into frontend-neutral styled spans.
 #[must_use]
 pub fn render(source: &str) -> RenderedMarkdown {
+    render_themed(source, false)
+}
+
+/// Parse Markdown, highlighting fenced code blocks for `dark` mode.
+///
+/// Light uses `InspiredGitHub`, dark uses `base16-ocean.dark`; only the
+/// token foreground + emphasis is kept so the preview background from
+/// `PreviewTags::apply_theme` shows through.
+#[must_use]
+pub fn render_themed(source: &str, dark: bool) -> RenderedMarkdown {
     let options = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_HEADING_ATTRIBUTES;
-    let mut renderer = Renderer::new();
+    let mut renderer = Renderer::with_dark(dark);
     for event in Parser::new_ext(source, options) {
         match event {
             Event::Start(tag) => renderer.start_tag(tag),
@@ -520,6 +557,125 @@ pub fn render(source: &str) -> RenderedMarkdown {
         }
     }
     RenderedMarkdown::new(renderer.spans)
+}
+
+/// Maximum highlighted code size: beyond this fall back to plain `CodeBlock`.
+const MAX_HIGHLIGHT_BYTES: usize = 128 * 1024;
+/// Maximum highlighted lines before falling back to plain `CodeBlock`.
+const MAX_HIGHLIGHT_LINES: usize = 1000;
+
+/// Emit a fenced code body, syntax-highlighted when possible.
+///
+/// Falls back to a single plain `CodeBlock` span for unknown languages,
+/// highlight errors, or oversized blocks.
+fn emit_code_spans(
+    renderer: &mut Renderer,
+    code: &str,
+    language: Option<&str>,
+    base: Vec<Style>,
+    dark: bool,
+) {
+    if code.len() > MAX_HIGHLIGHT_BYTES || code.lines().count() > MAX_HIGHLIGHT_LINES {
+        renderer.emit(code, base);
+        return;
+    }
+    let Some(tokens) = highlight_tokens(code, language, dark) else {
+        renderer.emit(code, base);
+        return;
+    };
+    for (text, syntax) in tokens {
+        let mut styles = base.clone();
+        styles.push(syntax);
+        renderer.emit(&text, styles);
+    }
+}
+
+/// Tokenize `code` into `(text, Style::Syntax)` runs.
+///
+/// Returns `None` when there is no known syntax or highlighting fails, so
+/// the caller can fall back to plain rendering.
+fn highlight_tokens(
+    code: &str,
+    language: Option<&str>,
+    dark: bool,
+) -> Option<Vec<(String, Style)>> {
+    use std::sync::OnceLock;
+    use syntect::easy::HighlightLines;
+    use syntect::highlighting::{FontStyle, ThemeSet};
+    use syntect::parsing::SyntaxSet;
+    use syntect::util::LinesWithEndings;
+
+    static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
+    static THEMES: OnceLock<ThemeSet> = OnceLock::new();
+    let syntaxes = SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines);
+    let themes = THEMES.get_or_init(ThemeSet::load_defaults);
+
+    let lang = language.unwrap_or("").trim();
+    if lang.is_empty() {
+        return None;
+    }
+    let syntax = resolve_syntax(syntaxes, lang)?;
+    let theme_name = if dark {
+        "base16-ocean.dark"
+    } else {
+        "InspiredGitHub"
+    };
+    let theme = themes
+        .themes
+        .get(theme_name)
+        .or_else(|| themes.themes.values().next())?;
+    let mut highlighter = HighlightLines::new(syntax, theme);
+    let mut out: Vec<(String, Style)> = Vec::new();
+    for line in LinesWithEndings::from(code) {
+        let ranges = highlighter.highlight_line(line, syntaxes).ok()?;
+        for (style, text) in ranges {
+            let syntax_style = Style::Syntax {
+                fg: Rgb(style.foreground.r, style.foreground.g, style.foreground.b),
+                bold: style.font_style.contains(FontStyle::BOLD),
+                italic: style.font_style.contains(FontStyle::ITALIC),
+            };
+            // Coalesce adjacent runs with the same style so a 300-line
+            // block yields hundreds (not thousands) of spans. This keeps
+            // the preview's per-span tag pass cheap.
+            if let Some((last_text, last_style)) = out.last_mut()
+                && *last_style == syntax_style
+            {
+                last_text.push_str(text);
+            } else {
+                out.push((text.to_owned(), syntax_style));
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Resolve a fence info string to a syntect syntax.
+fn resolve_syntax<'a>(
+    syntaxes: &'a syntect::parsing::SyntaxSet,
+    lang: &str,
+) -> Option<&'a syntect::parsing::SyntaxReference> {
+    let key = lang.trim().to_ascii_lowercase();
+    let normalized = match key.as_str() {
+        "js" | "javascript" => "js",
+        "ts" | "typescript" => "ts",
+        "tsx" => "tsx",
+        "jsx" => "jsx",
+        "sh" | "bash" | "zsh" | "shell" => "sh",
+        "c++" | "cpp" | "cc" | "cxx" => "cpp",
+        "c#" | "csharp" | "cs" => "cs",
+        "py" | "python" => "py",
+        "rs" | "rust" => "rs",
+        "yml" | "yaml" => "yaml",
+        "dockerfile" => "Dockerfile",
+        "md" | "markdown" => "md",
+        _ => key.as_str(),
+    };
+    syntaxes
+        .find_syntax_by_extension(normalized)
+        .or_else(|| syntaxes.find_syntax_by_token(normalized))
+        .or_else(|| syntaxes.find_syntax_by_extension(&key))
+        .or_else(|| syntaxes.find_syntax_by_token(&key))
+        .or_else(|| syntaxes.find_syntax_by_token(lang.trim()))
 }
 
 #[cfg(test)]
@@ -548,5 +704,60 @@ mod tests {
             url: None,
         }]);
         assert_eq!(rendered.spans()[0].text, "hello");
+    }
+
+    fn has_syntax(spans: &[Span]) -> bool {
+        spans.iter().any(|s| {
+            s.styles.contains(&Style::CodeBlock)
+                && s.styles.iter().any(|st| matches!(st, Style::Syntax { .. }))
+        })
+    }
+
+    #[test]
+    fn rust_code_block_is_syntax_highlighted() {
+        let spans = render("```rust\nfn main() {}\n```").spans().to_vec();
+        assert!(has_syntax(&spans), "{spans:?}");
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert!(joined.contains("fn main()"), "{joined}");
+    }
+
+    #[test]
+    fn unknown_language_falls_back_to_plain_code_block() {
+        let spans = render("```nosuchlang123\nhello\n```").spans().to_vec();
+        assert!(!has_syntax(&spans), "{spans:?}");
+        assert!(spans.iter().any(|s| s.styles.contains(&Style::CodeBlock)));
+    }
+
+    #[test]
+    fn language_alias_resolves() {
+        let spans = render("```js\nconst x = 1;\n```").spans().to_vec();
+        assert!(has_syntax(&spans), "{spans:?}");
+    }
+
+    #[test]
+    fn oversized_code_block_skips_highlighting() {
+        let big = "x".repeat(129 * 1024);
+        let md = format!("```rust\n{big}\n```");
+        let spans = render(&md).spans().to_vec();
+        assert!(!has_syntax(&spans), "oversized block must fall back");
+    }
+
+    #[test]
+    fn medium_300_line_block_is_highlighted() {
+        let body = (0..300)
+            .map(|i| format!("fn f{i}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let md = format!("```rust\n{body}\n```");
+        let spans = render(&md).spans().to_vec();
+        assert!(has_syntax(&spans), "300-line block must highlight");
+    }
+
+    #[test]
+    fn dark_theme_still_highlights() {
+        let spans = render_themed("```python\nprint(1)\n```", true)
+            .spans()
+            .to_vec();
+        assert!(has_syntax(&spans), "{spans:?}");
     }
 }

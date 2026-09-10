@@ -1,38 +1,118 @@
 //! The editor pane: GtkSourceView-based Markdown editor, a rendered
 //! preview, and a find/replace bar.
+//!
+//! Layout is a horizontal split: source on the left, live preview on the
+//! right. Preview rendering is async and debounced — keystrokes only
+//! schedule work, the expensive `markdown::render_themed` step runs on a
+//! background thread, and only the cheap bulk insert + tag pass touches the
+//! UI thread.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use gtk::prelude::*;
 use libadwaita as adw;
 use sourceview5::prelude::*;
 
-use crate::editor::preview::{PreviewTags, apply_scheme, render_markdown};
-use crate::ui::protocol::AppMsg;
+use crate::editor::preview::{PreviewTags, apply_rendered, apply_scheme};
+use crate::ui::protocol::{AppMsg, EditorMode};
 
 mod preview;
+
+/// Debounce for live preview keystrokes: typing only reschedules this.
+const LIVE_DEBOUNCE: Duration = Duration::from_millis(150);
 
 pub struct Editor {
     pub source_view: sourceview5::View,
     pub source_buffer: sourceview5::Buffer,
-    pub preview_buffer: gtk::TextBuffer,
-    pub stack: gtk::Stack,
+    /// Left = source scroll, right = preview scroll. Mode buttons show or
+    /// hide each child instead of swapping stack pages, so both stay
+    /// allocated and live.
+    pub split: gtk::Paned,
+    source_scroll: gtk::ScrolledWindow,
+    preview_scroll: gtk::ScrolledWindow,
     pub search_bar: gtk::SearchBar,
     pub search_entry: gtk::SearchEntry,
     pub search_context: sourceview5::SearchContext,
     search_settings: sourceview5::SearchSettings,
-    preview_tags: Rc<PreviewTags>,
+    live_rev: Rc<Cell<u64>>,
+    live_tx: std::sync::mpsc::Sender<(u64, crate::markdown::RenderedMarkdown)>,
+    live_debounce: Rc<RefCell<Option<glib::SourceId>>>,
+}
+
+/// Render `source_buffer` on a background thread, delivering the result to
+/// the preview buffer on the UI thread. Stale revisions are dropped.
+fn spawn_preview_render(
+    rev_counter: &Rc<Cell<u64>>,
+    tx: &std::sync::mpsc::Sender<(u64, crate::markdown::RenderedMarkdown)>,
+    source_buffer: &sourceview5::Buffer,
+    dark: bool,
+) {
+    let rev = rev_counter.get().wrapping_add(1);
+    rev_counter.set(rev);
+    let md: String = source_buffer
+        .text(&source_buffer.start_iter(), &source_buffer.end_iter(), true)
+        .into();
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        let rendered = crate::markdown::render_themed(&md, dark);
+        let _ = tx.send((rev, rendered));
+        glib::MainContext::default().wakeup();
+    });
 }
 
 impl Editor {
-    pub fn render_preview(&self) {
-        let md = self.source_buffer.text(
-            &self.source_buffer.start_iter(),
-            &self.source_buffer.end_iter(),
-            true,
+    /// Queue an async preview render now (no debounce). No-op in
+    /// [`EditorMode::Source`].
+    pub fn request_preview_immediate(&self) {
+        if self.editor_mode() == EditorMode::Source {
+            return;
+        }
+        spawn_preview_render(
+            &self.live_rev,
+            &self.live_tx,
+            &self.source_buffer,
+            adw::StyleManager::default().is_dark(),
         );
-        render_markdown(&self.preview_buffer, &self.preview_tags, &md);
+    }
+
+    /// Switch the split layout. Modes carrying a preview trigger an
+    /// immediate async render; collapsing to source-only cancels pending
+    /// live work.
+    pub fn set_editor_mode(&self, mode: EditorMode) {
+        match mode {
+            EditorMode::Source => {
+                self.source_scroll.set_visible(true);
+                self.preview_scroll.set_visible(false);
+                if let Some(id) = self.live_debounce.borrow_mut().take() {
+                    id.remove();
+                }
+            }
+            EditorMode::Split => {
+                self.source_scroll.set_visible(true);
+                self.preview_scroll.set_visible(true);
+                self.request_preview_immediate();
+            }
+            EditorMode::Preview => {
+                self.source_scroll.set_visible(false);
+                self.preview_scroll.set_visible(true);
+                self.request_preview_immediate();
+            }
+        }
+    }
+
+    /// Current layout derived from child visibility (the single source of
+    /// truth, so button state can never drift from the widgets).
+    pub fn editor_mode(&self) -> EditorMode {
+        match (
+            self.source_scroll.is_visible(),
+            self.preview_scroll.is_visible(),
+        ) {
+            (true, false) => EditorMode::Source,
+            (false, true) => EditorMode::Preview,
+            _ => EditorMode::Split,
+        }
     }
 
     pub fn set_search_text(&self, text: Option<&str>) {
@@ -110,8 +190,9 @@ where
 
     {
         let emit = emit.clone();
+        let suppress_flag = suppress.clone();
         source_buffer.connect_changed(move |_| {
-            if !suppress.get() {
+            if !suppress_flag.get() {
                 emit(AppMsg::ContentChanged);
             }
         });
@@ -127,6 +208,31 @@ where
     let preview_buffer = gtk::TextBuffer::new(None);
     let preview_tags = Rc::new(PreviewTags::new(&preview_buffer));
 
+    // Async live pipeline: background threads `send` rendered documents
+    // over std mpsc; a persistent UI-thread idle source drains the queue
+    // and `apply`s the latest revision only. Workers `wakeup` the main
+    // context so the drain runs promptly even when the loop is idle.
+    let live_rev = Rc::new(Cell::new(0u64));
+    let live_debounce: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    let (live_tx, live_rx) = std::sync::mpsc::channel::<(u64, crate::markdown::RenderedMarkdown)>();
+    {
+        let rev = live_rev.clone();
+        let buf = preview_buffer.clone();
+        let tags = preview_tags.clone();
+        glib::idle_add_local(move || {
+            let mut latest = None;
+            while let Ok(item) = live_rx.try_recv() {
+                latest = Some(item);
+            }
+            if let Some((msg_rev, rendered)) = latest
+                && rev.get() == msg_rev
+            {
+                apply_rendered(&buf, &tags, &rendered);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
     // Keep the preview colors and the syntax highlighting scheme in sync
     // with the libadwaita theme. GtkSourceView defaults to a light scheme
     // and does not switch it automatically, so apply it ourselves.
@@ -141,10 +247,16 @@ where
         let tags = preview_tags.clone();
         let sm = style_manager.clone();
         let buf = source_buffer.clone();
+        let rev = live_rev.clone();
+        let tx = live_tx.clone();
+        let src = source_buffer.clone();
         sm.clone().connect_dark_notify(move |_| {
             let dark = sm.is_dark();
             tags.apply_theme(dark, &sm.accent_color_rgba());
             apply_scheme(&scheme_manager, &buf, dark);
+            // Syntax token colors are baked at render time, so queue an
+            // async re-render to pick the matching light/dark tmTheme.
+            spawn_preview_render(&rev, &tx, &src, dark);
         });
 
         let tags = preview_tags.clone();
@@ -182,7 +294,7 @@ where
         });
         preview_view.add_controller(gesture);
 
-        let tags = preview_tags.clone();
+        let tags = preview_tags;
         let view = preview_view.clone();
         let motion = gtk::EventControllerMotion::new();
         motion.connect_motion(move |_m, x, y| {
@@ -206,17 +318,64 @@ where
     source_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     source_scroll.set_child(Some(&source_view));
     source_scroll.set_vexpand(true);
+    source_scroll.set_hexpand(true);
 
     let preview_scroll = gtk::ScrolledWindow::new();
     preview_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     preview_scroll.set_child(Some(&preview_view));
     preview_scroll.set_vexpand(true);
+    preview_scroll.set_hexpand(true);
 
-    let stack = gtk::Stack::new();
-    stack.set_transition_type(gtk::StackTransitionType::Crossfade);
-    stack.add_named(&source_scroll, Some("source"));
-    stack.add_named(&preview_scroll, Some("preview"));
-    stack.set_visible_child_name("source");
+    // Live split: source left, preview right. The Preview toggle shows or
+    // hides the right child; both stay allocated so typing never reparents.
+    let split = gtk::Paned::new(gtk::Orientation::Horizontal);
+    split.set_start_child(Some(&source_scroll));
+    split.set_end_child(Some(&preview_scroll));
+    split.set_position(500);
+    split.set_shrink_start_child(false);
+    split.set_shrink_end_child(false);
+    split.set_resize_start_child(true);
+    split.set_resize_end_child(true);
+    split.set_wide_handle(true);
+
+    // Debounced live preview, wired after `preview_scroll` exists so the
+    // fire-time visibility check is truthful. Programmatic loads set
+    // `suppress` and therefore skip this; they call
+    // `request_preview_immediate` explicitly instead.
+    {
+        let emit = emit.clone();
+        let suppress_live = suppress;
+        let rev = live_rev.clone();
+        let tx = live_tx.clone();
+        let debounce = live_debounce.clone();
+        let preview_scroll_for_live = preview_scroll.clone();
+        source_buffer.connect_changed(move |buffer| {
+            if !suppress_live.get() {
+                emit(AppMsg::ContentChanged);
+                if let Some(id) = debounce.borrow_mut().take() {
+                    id.remove();
+                }
+                let rev2 = rev.clone();
+                let tx2 = tx.clone();
+                let debounce2 = debounce.clone();
+                let buffer2 = buffer.clone();
+                let visible = preview_scroll_for_live.clone();
+                let id = glib::timeout_add_local_once(LIVE_DEBOUNCE, move || {
+                    *debounce2.borrow_mut() = None;
+                    if !visible.is_visible() {
+                        return;
+                    }
+                    spawn_preview_render(
+                        &rev2,
+                        &tx2,
+                        &buffer2,
+                        adw::StyleManager::default().is_dark(),
+                    );
+                });
+                *debounce.borrow_mut() = Some(id);
+            }
+        });
+    }
 
     // --- find / replace -----------------------------------------------------
     let search_settings = sourceview5::SearchSettings::new();
@@ -269,13 +428,16 @@ where
     Editor {
         source_view,
         source_buffer,
-        preview_buffer,
-        stack,
+        split,
+        source_scroll,
+        preview_scroll,
         search_bar,
         search_entry,
         search_context,
         search_settings,
-        preview_tags,
+        live_rev,
+        live_tx,
+        live_debounce,
     }
 }
 
@@ -301,7 +463,7 @@ mod tests {
         let window = gtk::Window::new();
         window.set_default_size(600, 300);
         let pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        pane.append(&editor.stack);
+        pane.append(&editor.split);
         pane.set_vexpand(true);
         window.set_child(Some(&pane));
         window.present();
@@ -327,19 +489,36 @@ mod tests {
         adj.set_value(range);
         assert!((adj.value() - range).abs() < 1.0, "must scroll to the end");
 
-        // Same for the preview: give it content, show it, and check its range.
-        editor.render_preview();
-        editor.stack.set_visible_child_name("preview");
-        for _ in 0..50 {
-            ctx.iteration(false);
-        }
+        // Same for the preview: the live pipeline renders on a background
+        // thread, so pump until the text lands (or time out).
         let preview_view = editor
-            .stack
-            .child_by_name("preview")
+            .split
+            .end_child()
             .and_then(|w| w.downcast::<gtk::ScrolledWindow>().ok())
             .and_then(|s| s.child())
             .and_then(|w| w.downcast::<gtk::TextView>().ok())
             .expect("preview scrolled window");
+        let preview_buffer = preview_view.buffer();
+        editor.request_preview_immediate();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while preview_buffer
+            .text(
+                &preview_buffer.start_iter(),
+                &preview_buffer.end_iter(),
+                true,
+            )
+            .is_empty()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "async preview must land within 10s"
+            );
+            ctx.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for _ in 0..50 {
+            ctx.iteration(false);
+        }
         let preview_adj = preview_view.vadjustment().expect("preview vadjustment");
         let preview_range = preview_adj.upper() - preview_adj.page_size();
         println!(
@@ -373,9 +552,9 @@ mod tests {
             "source view must be sensitive"
         );
         assert_eq!(
-            editor.stack.visible_child_name().as_deref(),
-            Some("source"),
-            "stack must show the source view by default"
+            editor.editor_mode(),
+            crate::ui::protocol::EditorMode::Split,
+            "split must be the default",
         );
         // Typing inserts into the source buffer even with no note open.
         editor.source_buffer.insert_at_cursor("hello");

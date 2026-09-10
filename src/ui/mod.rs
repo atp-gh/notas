@@ -6,4 +6,4 @@ pub mod settings;
 pub mod status;
 pub mod theme;
 
-pub use protocol::{AppMsg, ViewMode};
+pub use protocol::{AppMsg, EditorMode, ViewMode};

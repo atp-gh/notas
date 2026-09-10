@@ -4,14 +4,19 @@
 //! This is the half of the editor pane that owns no widgets of its own
 //! beyond the preview buffer's text tags. The `Editor` component and the
 //! source/find UI live in `super`, which consumes `PreviewTags` and
-//! [`render_markdown`].
+//! [`apply_rendered`] (rendering itself runs on background threads via
+//! [`markdown::render_themed`]).
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use gtk::prelude::*;
 use sourceview5::prelude::*;
 
-use crate::markdown::{self, Style};
+use crate::markdown::{self, Rgb, Style};
+
+/// Cache key for syntax token tags: `(r, g, b, bold, italic)`.
+type HlKey = (u8, u8, u8, bool, bool);
 
 /// Text tags used by the Markdown preview, created once per buffer.
 pub struct PreviewTags {
@@ -31,6 +36,8 @@ pub struct PreviewTags {
     pub dim: gtk::TextTag,
     /// Monospace, so table columns line up.
     pub table: gtk::TextTag,
+    /// Cache of per-token syntax tags keyed by `(r, g, b, bold, italic)`.
+    hl_cache: RefCell<HashMap<HlKey, gtk::TextTag>>,
     /// Link ranges `(start, end, url)` in the preview buffer, rebuilt on
     /// every render so a click can resolve the URL at a position.
     link_ranges: RefCell<Vec<(i32, i32, String)>>,
@@ -154,8 +161,46 @@ impl PreviewTags {
             link,
             dim,
             table,
+            hl_cache: RefCell::new(HashMap::new()),
             link_ranges: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Fetch (creating on first use) the tag for a syntax token.
+    pub fn syntax_tag(
+        &self,
+        buffer: &gtk::TextBuffer,
+        fg: Rgb,
+        bold: bool,
+        italic: bool,
+    ) -> gtk::TextTag {
+        let key = (fg.0, fg.1, fg.2, bold, italic);
+        if let Some(tag) = self.hl_cache.borrow().get(&key) {
+            return tag.clone();
+        }
+        let hex = format!("#{:02x}{:02x}{:02x}", fg.0, fg.1, fg.2);
+        let name = format!(
+            "hl-{:02x}{:02x}{:02x}-{}-{}",
+            fg.0,
+            fg.1,
+            fg.2,
+            u8::from(bold),
+            u8::from(italic)
+        );
+        let weight = if bold { 700i32 } else { 400i32 };
+        let style = if italic {
+            pango::Style::Italic
+        } else {
+            pango::Style::Normal
+        };
+        let tag = buffer
+            .create_tag(
+                Some(&name),
+                &[("foreground", &hex), ("weight", &weight), ("style", &style)],
+            )
+            .unwrap_or_else(|| panic!("create {name} tag"));
+        self.hl_cache.borrow_mut().insert(key, tag.clone());
+        tag
     }
 
     /// Replace the link range table (called on every preview render).
@@ -205,22 +250,26 @@ impl PreviewTags {
 }
 
 /// The text tag that renders a given Markdown style.
-fn style_tag(tags: &PreviewTags, style: Style) -> &gtk::TextTag {
+///
+/// Returns `None` for [`Style::Syntax`], which needs a per-token tag from
+/// [`PreviewTags::syntax_tag`].
+fn style_tag(tags: &PreviewTags, style: Style) -> Option<&gtk::TextTag> {
     match style {
-        Style::Bold => &tags.bold,
-        Style::Italic => &tags.italic,
-        Style::Strike => &tags.strike,
-        Style::Code => &tags.code,
-        Style::CodeBlock => &tags.code_block,
-        Style::Link => &tags.link,
-        Style::Dim => &tags.dim,
-        Style::Heading(1) => &tags.h1,
-        Style::Heading(2) => &tags.h2,
-        Style::Heading(_) => &tags.h3,
-        Style::Quote(1) => &tags.quote_1,
-        Style::Quote(2) => &tags.quote_2,
-        Style::Quote(_) => &tags.quote_3,
-        Style::Table => &tags.table,
+        Style::Bold => Some(&tags.bold),
+        Style::Italic => Some(&tags.italic),
+        Style::Strike => Some(&tags.strike),
+        Style::Code => Some(&tags.code),
+        Style::CodeBlock => Some(&tags.code_block),
+        Style::Syntax { .. } => None,
+        Style::Link => Some(&tags.link),
+        Style::Dim => Some(&tags.dim),
+        Style::Heading(1) => Some(&tags.h1),
+        Style::Heading(2) => Some(&tags.h2),
+        Style::Heading(_) => Some(&tags.h3),
+        Style::Quote(1) => Some(&tags.quote_1),
+        Style::Quote(2) => Some(&tags.quote_2),
+        Style::Quote(_) => Some(&tags.quote_3),
+        Style::Table => Some(&tags.table),
     }
 }
 
@@ -245,27 +294,50 @@ fn rgba_to_hex(c: &gtk::gdk::RGBA) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
-/// Render Markdown into `buffer` using a small set of text tags. This is a
-/// lightweight, dependency-free preview (no webview); it covers headings,
-/// emphasis, code, lists, quotes, links, tables and rules.
-pub fn render_markdown(buffer: &gtk::TextBuffer, tags: &PreviewTags, md: &str) {
-    buffer.set_text("");
+/// Apply an already-rendered document to `buffer` using a small set of
+/// text tags. This is a lightweight preview (no webview); it covers
+/// headings, emphasis, code (with syntax highlighting), lists, quotes,
+/// links, tables and rules.
+///
+/// Split out so the expensive [`markdown::render_themed`] step can run on a
+/// background thread while only this cheap bulk insert + tag pass runs on
+/// the UI thread. `rendered` is plain `String` data (`Send`), safe to move
+/// across threads.
+pub fn apply_rendered(
+    buffer: &gtk::TextBuffer,
+    tags: &PreviewTags,
+    rendered: &markdown::RenderedMarkdown,
+) {
+    // Single bulk insert: per-span `insert` made 300-line blocks do
+    // thousands of signal emissions + layout passes (seconds of freeze).
+    let full: String = rendered.spans().iter().map(|s| s.text.as_str()).collect();
+    buffer.set_text(&full);
     let mut link_ranges = Vec::new();
-    let mut end = buffer.end_iter();
-    let rendered = markdown::render(md);
+    // Walk forward once; `forward_chars` keeps this O(n) instead of
+    // O(n²) `iter_at_offset` rescans.
+    let mut iter = buffer.start_iter();
     for span in rendered.spans() {
-        // `insert` invalidates `start`, so remember the offset and rebuild
-        // the iterator afterwards instead of copying it (copying produced
-        // a stale iter that made `apply_tag` fail with a Gtk-CRITICAL).
-        let start_offset = end.offset();
-        buffer.insert(&mut end, &span.text);
+        let start = iter;
+        let chars = span.text.chars().count() as i32;
+        let mut end = start;
+        end.forward_chars(chars);
         if let Some(url) = &span.url {
-            link_ranges.push((start_offset, end.offset(), url.clone()));
+            link_ranges.push((start.offset(), end.offset(), url.clone()));
         }
-        let start = buffer.iter_at_offset(start_offset);
         for style in &span.styles {
-            buffer.apply_tag(style_tag(tags, *style), &start, &end);
+            match *style {
+                Style::Syntax { fg, bold, italic } => {
+                    let tag = tags.syntax_tag(buffer, fg, bold, italic);
+                    buffer.apply_tag(&tag, &start, &end);
+                }
+                other => {
+                    if let Some(tag) = style_tag(tags, other) {
+                        buffer.apply_tag(tag, &start, &end);
+                    }
+                }
+            }
         }
+        iter = end;
     }
     tags.set_link_ranges(link_ranges);
 }
@@ -502,7 +574,8 @@ fn main() {
 | a    |     1 |
 | b    |    22 |
 "#;
-        render_markdown(&buffer, &tags, md);
+        let rendered = markdown::render_themed(md, false);
+        apply_rendered(&buffer, &tags, &rendered);
         let window = gtk::Window::new();
         window.set_default_size(720, 900);
         window.set_child(Some(&view));

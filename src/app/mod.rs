@@ -35,7 +35,7 @@ use crate::tr;
 use crate::ui::settings::build_settings_window;
 use crate::ui::status::sync_indicator_text;
 use crate::ui::theme;
-pub use crate::ui::{AppMsg, ViewMode};
+pub use crate::ui::{AppMsg, EditorMode, ViewMode};
 
 type AppSender = relm4::Sender<AppMsg>;
 
@@ -55,7 +55,7 @@ pub struct App {
     saved_title: String,
     saved_content: String,
     dirty: bool,
-    preview: bool,
+    editor_mode: EditorMode,
     active_tag: Option<TagId>,
     selected_trashed: Option<NoteId>,
     pending_open: Option<NoteId>,
@@ -109,7 +109,9 @@ pub struct Widgets {
     // editor
     title_entry: gtk::Entry,
     editor: Editor,
-    preview_btn: gtk::ToggleButton,
+    mode_source_btn: gtk::ToggleButton,
+    mode_split_btn: gtk::ToggleButton,
+    mode_preview_btn: gtk::ToggleButton,
     tag_editor_flow: gtk::FlowBox,
     // bottom bar / settings
     status_bar: gtk::Box,
@@ -380,7 +382,7 @@ impl SimpleComponent for App {
 
         let editor_stack_area = gtk::Box::new(gtk::Orientation::Vertical, 0);
         editor_stack_area.append(&editor.search_bar);
-        editor_stack_area.append(&editor.stack);
+        editor_stack_area.append(&editor.split);
 
         // Note tags: an entry to add + a flow of removable chips.
         let tag_editor_flow = gtk::FlowBox::new();
@@ -469,12 +471,43 @@ impl SimpleComponent for App {
             trash_btn.connect_clicked(move |_| emit(AppMsg::TrashNote));
         }
 
-        let preview_btn = gtk::ToggleButton::new();
-        preview_btn.set_label(tr!("Preview"));
-        preview_btn.set_tooltip_text(Some(tr!("Toggle Markdown preview (Ctrl+E)")));
+        // Joplin-style tri-state switch: editor-only | live split |
+        // preview-only. Three small icon buttons in a linked box; only
+        // activating a button emits, so the handler just mirrors state back.
+        let mode_source_btn = gtk::ToggleButton::new();
+        mode_source_btn.set_icon_name("document-edit-symbolic");
+        mode_source_btn.set_tooltip_text(Some(tr!("Editor only")));
+        let mode_split_btn = gtk::ToggleButton::new();
+        mode_split_btn.set_icon_name("view-dual-symbolic");
+        mode_split_btn.set_tooltip_text(Some(tr!("Split: editor + live preview (Ctrl+E)")));
+        mode_split_btn.set_active(true);
+        let mode_preview_btn = gtk::ToggleButton::new();
+        mode_preview_btn.set_icon_name("view-reveal-symbolic");
+        mode_preview_btn.set_tooltip_text(Some(tr!("Preview only")));
+        let mode_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        mode_box.add_css_class("linked");
+        mode_box.append(&mode_source_btn);
+        mode_box.append(&mode_split_btn);
+        mode_box.append(&mode_preview_btn);
         {
-            let emit = emit.clone();
-            preview_btn.connect_toggled(move |_| emit(AppMsg::TogglePreview));
+            let emit_source = emit.clone();
+            mode_source_btn.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    emit_source(AppMsg::SetEditorMode(EditorMode::Source));
+                }
+            });
+            let emit_split = emit.clone();
+            mode_split_btn.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    emit_split(AppMsg::SetEditorMode(EditorMode::Split));
+                }
+            });
+            let emit_preview = emit.clone();
+            mode_preview_btn.connect_toggled(move |btn| {
+                if btn.is_active() {
+                    emit_preview(AppMsg::SetEditorMode(EditorMode::Preview));
+                }
+            });
         }
 
         let import_btn = gtk::Button::with_label(tr!("Import Markdown…"));
@@ -514,7 +547,7 @@ impl SimpleComponent for App {
 
         let header = gtk::HeaderBar::new();
         header.pack_end(&menu_btn);
-        header.pack_end(&preview_btn);
+        header.pack_end(&mode_box);
         header.pack_end(&trash_btn);
 
         // ------------------------------------------------------------- layout
@@ -574,7 +607,7 @@ impl SimpleComponent for App {
                     return glib::Propagation::Stop;
                 }
                 if ctrl && !shift && key == Some('e') {
-                    emit(AppMsg::TogglePreview);
+                    emit(AppMsg::CycleEditorMode);
                     return glib::Propagation::Stop;
                 }
                 if !ctrl && keyval == Key::F3 {
@@ -626,7 +659,9 @@ impl SimpleComponent for App {
             note_trash_box,
             title_entry,
             editor,
-            preview_btn,
+            mode_source_btn,
+            mode_split_btn,
+            mode_preview_btn,
             tag_editor_flow,
             status_bar,
             settings_window,
@@ -647,7 +682,7 @@ impl SimpleComponent for App {
             saved_title: String::new(),
             saved_content: String::new(),
             dirty: false,
-            preview: false,
+            editor_mode: EditorMode::Split,
             active_tag: None,
             selected_trashed: None,
             pending_open: None,

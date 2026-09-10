@@ -76,6 +76,30 @@ pub enum DbCommand {
     SyncNow(Box<SyncSettings>),
 }
 
+/// Editor pane layout: source-only, side-by-side live split, or
+/// preview-only. Joplin-style tri-state; the preview-carrying modes render
+/// asynchronously.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorMode {
+    /// Source editor only.
+    Source,
+    /// Source on the left, live preview on the right.
+    Split,
+    /// Rendered preview only.
+    Preview,
+}
+
+impl EditorMode {
+    /// Next mode for the `Ctrl+E` cycle: Source → Split → Preview → Source.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::Source => Self::Split,
+            Self::Split => Self::Preview,
+            Self::Preview => Self::Source,
+        }
+    }
+}
 /// Semantic commands emitted by a frontend.
 ///
 /// Like [`DbCommand`], the variants are self-describing; docs would only
@@ -111,7 +135,8 @@ pub enum AppCommand {
     SaveNote,
     TitleChanged,
     ContentChanged,
-    TogglePreview,
+    SetEditorMode(EditorMode),
+    CycleEditorMode,
     FocusSearch,
     FocusFind,
     FindChanged(String),

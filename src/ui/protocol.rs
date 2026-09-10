@@ -7,3 +7,4 @@
 
 pub use crate::application::AppMsg;
 pub use crate::application::ViewMode;
+pub use crate::application::commands::EditorMode;
