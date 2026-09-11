@@ -32,6 +32,7 @@ use crate::application::config::Settings;
 use crate::editor::{Editor, build_editor};
 use crate::notes::Clipboard;
 use crate::tr;
+use crate::ui::icons;
 use crate::ui::settings::build_settings_window;
 use crate::ui::status::sync_indicator_text;
 use crate::ui::theme;
@@ -193,7 +194,7 @@ impl SimpleComponent for App {
         view_title.set_halign(gtk::Align::Start);
         view_title.add_css_class("title-2");
 
-        let new_note_btn = gtk::Button::from_icon_name("document-new-symbolic");
+        let new_note_btn = gtk::Button::from_icon_name(icons::NEW_NOTE);
         new_note_btn.set_tooltip_text(Some(tr!("New note (Ctrl+N)")));
         new_note_btn.set_valign(gtk::Align::Center);
         {
@@ -442,7 +443,7 @@ impl SimpleComponent for App {
         sync_label.set_ellipsize(pango::EllipsizeMode::End);
         sync_label.set_tooltip_text(Some(tr!("Sync status — ☰ menu → Sync now…")));
         sync_label.set_text(&sync_indicator_text(&settings.sync.last_synced_at));
-        let save_btn = gtk::Button::from_icon_name("document-save-symbolic");
+        let save_btn = gtk::Button::from_icon_name(icons::SAVE);
         save_btn.set_tooltip_text(Some(tr!("Save (Ctrl+S)")));
         save_btn.set_sensitive(false);
         {
@@ -464,7 +465,7 @@ impl SimpleComponent for App {
         editor_stack_area.set_vexpand(true);
 
         // ------------------------------------------------------------- header
-        let trash_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+        let trash_btn = gtk::Button::from_icon_name(icons::TRASH);
         trash_btn.set_tooltip_text(Some(tr!("Move note to trash")));
         {
             let emit = emit.clone();
@@ -475,14 +476,14 @@ impl SimpleComponent for App {
         // preview-only. Three small icon buttons in a linked box; only
         // activating a button emits, so the handler just mirrors state back.
         let mode_source_btn = gtk::ToggleButton::new();
-        mode_source_btn.set_icon_name("document-edit-symbolic");
+        mode_source_btn.set_icon_name(icons::MODE_SOURCE);
         mode_source_btn.set_tooltip_text(Some(tr!("Editor only")));
         let mode_split_btn = gtk::ToggleButton::new();
-        mode_split_btn.set_icon_name("view-dual-symbolic");
+        mode_split_btn.set_icon_name(icons::MODE_SPLIT);
         mode_split_btn.set_tooltip_text(Some(tr!("Split: editor + live preview (Ctrl+E)")));
         mode_split_btn.set_active(true);
         let mode_preview_btn = gtk::ToggleButton::new();
-        mode_preview_btn.set_icon_name("view-reveal-symbolic");
+        mode_preview_btn.set_icon_name(icons::MODE_PREVIEW);
         mode_preview_btn.set_tooltip_text(Some(tr!("Preview only")));
         let mode_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         mode_box.add_css_class("linked");
@@ -541,7 +542,7 @@ impl SimpleComponent for App {
         let menu_popover = gtk::Popover::new();
         menu_popover.set_child(Some(&menu_box));
         let menu_btn = gtk::MenuButton::new();
-        menu_btn.set_icon_name("open-menu-symbolic");
+        menu_btn.set_icon_name(icons::MENU);
         menu_btn.set_popover(Some(&menu_popover));
         menu_btn.set_tooltip_text(Some(tr!("Menu")));
 

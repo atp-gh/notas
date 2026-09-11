@@ -11,6 +11,7 @@ use relm4::RelmWidgetExt;
 use crate::notes::Clipboard;
 use crate::tr;
 use crate::ui::dialogs;
+use crate::ui::icons;
 use crate::ui::protocol::AppMsg;
 use notas::core::model::{Notebook, NotebookId};
 
@@ -53,7 +54,7 @@ pub(crate) fn build_tree_pane(
     notebooks_label.set_margin_bottom(4);
     notebooks_label.add_css_class("heading");
 
-    let new_notebook_button = gtk::Button::from_icon_name("folder-new-symbolic");
+    let new_notebook_button = gtk::Button::from_icon_name(icons::NEW_NOTEBOOK);
     new_notebook_button.set_tooltip_text(Some(tr!("New notebook")));
     new_notebook_button.set_halign(gtk::Align::End);
     new_notebook_button.set_valign(gtk::Align::Center);

@@ -7,6 +7,7 @@ use libadwaita::prelude::*;
 use crate::application::config::{Settings, ThemeMode};
 use crate::tr;
 use crate::ui::AppMsg;
+use crate::ui::icons;
 
 /// Build the "Appearance" page. Changing a row emits the matching `AppMsg`
 /// with **immediate effect** (no Apply button), which the app applies to
@@ -17,7 +18,7 @@ where
 {
     let page = adw::PreferencesPage::new();
     page.set_title(tr!("Appearance"));
-    page.set_icon_name(Some("applications-graphics-symbolic"));
+    page.set_icon_name(Some(icons::SETTINGS_APPEARANCE));
 
     // --- appearance: theme ------------------------------------------------
     let theme_group = adw::PreferencesGroup::new();

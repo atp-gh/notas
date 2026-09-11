@@ -11,6 +11,7 @@ use libadwaita::prelude::*;
 use crate::application::config::{Settings, SyncType};
 use crate::tr;
 use crate::ui::AppMsg;
+use crate::ui::icons;
 
 /// Build the "Sync" page. Changing a row emits the matching `AppMsg` with
 /// **immediate effect** (no Apply button), which the app applies to the
@@ -22,7 +23,7 @@ where
     // --- sync: backend + target credentials -------------------------
     let sync_page = adw::PreferencesPage::new();
     sync_page.set_title(tr!("Sync"));
-    sync_page.set_icon_name(Some("folder-remote-symbolic"));
+    sync_page.set_icon_name(Some(icons::SETTINGS_SYNC));
 
     let sync_group = adw::PreferencesGroup::new();
     sync_group.set_title(tr!("Sync target"));
