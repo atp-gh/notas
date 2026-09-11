@@ -115,7 +115,18 @@ fn ui_flows_emit_no_gtk_criticals() {
     .expect("seed diagram content");
 
     let settings = crate::application::config::Settings::default();
-    let controller = relm4::ComponentBuilder::<App>::default().launch(AppInit { pool, settings });
+    let resources_dir = std::env::temp_dir().join(format!(
+        "notas-gtk-regressions-resources-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+    ));
+    let controller = relm4::ComponentBuilder::<App>::default().launch(AppInit {
+        pool,
+        settings,
+        resources_dir,
+    });
 
     // Let the startup loads (notebooks/tags/notes) land and render.
     pump_ms(2500);

@@ -102,7 +102,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(version, 2, "fresh database starts at the current version");
+        assert_eq!(version, 3, "fresh database starts at the current version");
         pool.close().await;
     }
 

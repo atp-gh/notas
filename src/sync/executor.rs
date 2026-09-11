@@ -44,7 +44,8 @@ use s3::{AddressingStyle, Auth as S3Auth, Client as S3Client, Credentials};
 
 use crate::core::repository::Repository;
 use crate::core::sync::{
-    LocalNote, RemoteEntry, Sidecar, SyncAction, SyncStats, SyncUuid, content_hash, plan_sync,
+    LocalNote, LocalResource, RemoteEntry, RemoteResourceEntry, ResourceAction, ResourceMeta,
+    Sidecar, SyncAction, SyncStats, SyncUuid, bytes_hash, content_hash, plan_resources, plan_sync,
 };
 use crate::sync::crypto::{self, Cipher, CryptoError, Verifier};
 use crate::sync::error::SyncError;
@@ -93,6 +94,29 @@ trait SyncStore: Send + Sync {
     /// store that never held the body reports success — this call only
     /// reclaims the space of an orphaned content blob.
     async fn delete_md(&self, uuid: &SyncUuid) -> Result<(), SyncError>;
+    /// List every remote attachment: `resources/*.bin` blobs plus
+    /// `resmeta/*.json` metadata. Undecryptable/unparseable metas are
+    /// skipped (the planner re-uploads a matching local blob).
+    async fn list_resources(
+        &self,
+        cipher: Option<&Cipher>,
+    ) -> Result<BTreeMap<SyncUuid, RemoteResourceEntry>, SyncError>;
+    /// Fetch one attachment blob, decrypted when a cipher is active.
+    async fn get_resource(
+        &self,
+        cipher: Option<&Cipher>,
+        uuid: &SyncUuid,
+    ) -> Result<Vec<u8>, SyncError>;
+    /// Upload one attachment blob + metadata (encrypted when active).
+    async fn put_resource(
+        &self,
+        cipher: Option<&Cipher>,
+        meta: &ResourceMeta,
+        bytes: &[u8],
+    ) -> Result<(), SyncError>;
+    /// Remove one attachment blob + metadata. Idempotent: missing objects
+    /// still succeed (GC races rely on this).
+    async fn delete_resource(&self, uuid: &SyncUuid) -> Result<(), SyncError>;
     /// Read the encryption verifier object, or `None` when the backend has
     /// never been encrypted (or the object was deleted).
     async fn get_verifier(&self) -> Result<Option<Vec<u8>>, SyncError>;
@@ -101,6 +125,10 @@ trait SyncStore: Send + Sync {
 }
 
 /// Run one full sync against the configured backend, then return stats.
+///
+/// Attachments sync against an ephemeral empty resources dir (i.e. notes
+/// only): historical callers and unit tests keep this shape. Production
+/// uses [`run_sync_with_resources`].
 ///
 /// All local database steps go through the [`Repository`] facade — the
 /// executor never runs SQL against the underlying pool directly.
@@ -114,25 +142,42 @@ trait SyncStore: Send + Sync {
 /// [`SyncError::Database`]/[`SyncError::Repository`] when a local database
 /// step fails.
 pub async fn run_sync(repo: &Repository, settings: &SyncSettings) -> Result<SyncStats, SyncError> {
+    run_sync_with_resources(repo, settings, std::path::Path::new("")).await
+}
+
+/// Run one full sync including attachments stored under `resources_dir`
+/// (`<data_dir>/resources`; the blob filename is the resource uuid).
+///
+/// # Errors
+///
+/// Same as [`run_sync`].
+pub async fn run_sync_with_resources(
+    repo: &Repository,
+    settings: &SyncSettings,
+    resources_dir: &std::path::Path,
+) -> Result<SyncStats, SyncError> {
     match settings.kind {
         SyncType::S3 => {
             let store = S3Store::new(&settings.s3)?;
-            run_sync_with(repo, &store, settings).await
+            run_sync_with(repo, &store, settings, resources_dir).await
         }
         SyncType::Webdav => {
             let store = WebdavStore::new(&settings.webdav)?;
-            run_sync_with(repo, &store, settings).await
+            run_sync_with(repo, &store, settings, resources_dir).await
         }
     }
 }
 
 /// Plan and execute one sync against any [`SyncStore`]: build both
-/// indexes, run the pure planner, execute every action, and record the
-/// run's timestamp.
+/// indexes, run the pure planner, execute every action, then converge
+/// attachments the same way (upload referenced blobs first, download missing
+/// ones, garbage-collect orphans only after the note sync converged), and
+/// record the run's timestamp.
 async fn run_sync_with(
     repo: &Repository,
     store: &impl SyncStore,
     settings: &SyncSettings,
+    resources_dir: &std::path::Path,
 ) -> Result<SyncStats, SyncError> {
     // 0. Backend readiness + encryption state. Resolving the cipher reads
     //    (or, on a never-encrypted backend, writes) the verifier object, so
@@ -157,6 +202,9 @@ async fn run_sync_with(
         downloaded: 0,
         trashed: 0,
         conflicts: 0,
+        resources_uploaded: 0,
+        resources_downloaded: 0,
+        resources_deleted: 0,
         last_synced_at: String::new(),
     };
     for action in actions {
@@ -236,11 +284,168 @@ async fn run_sync_with(
         }
     }
 
+    // 3b. Attachments (only when a real resources dir is configured — unit
+    // tests calling `run_sync` pass an empty path and keep notes-only
+    // behavior). Notes already converged, so the local reference set is the
+    // global one and unreferenced uuids are safe to GC on both sides.
+    if !resources_dir.as_os_str().is_empty() {
+        sync_resources(repo, store, cipher.as_ref(), resources_dir, &mut stats).await?;
+    }
+
     // 4. Timestamp of this run, in the device's local time (display only;
     //    note timestamps themselves stay UTC in the database).
     stats.last_synced_at = repo.record_sync_at().await?;
 
     Ok(stats)
+}
+
+/// Converge attachments after notes: build the local blob index (hashing
+/// referenced files), list the remote blobs, plan, and execute. Failures on
+/// individual blobs are skip-and-continue (logged); only note traffic fails
+/// the whole sync.
+async fn sync_resources(
+    repo: &Repository,
+    store: &impl SyncStore,
+    cipher: Option<&Cipher>,
+    resources_dir: &std::path::Path,
+    stats: &mut SyncStats,
+) -> Result<(), SyncError> {
+    let referenced = repo.sync_referenced_resources().await?;
+    let metas = repo.sync_resource_metas().await?;
+    let mut local = Vec::with_capacity(metas.len());
+    for (uuid, filename, mime, size, updated_at) in metas {
+        // Hash referenced files; a missing blob hashes empty so the planner
+        // re-downloads it when the remote still holds a copy (the upload arm
+        // below skips unreadable files instead of failing the sync).
+        // Orphans delete without a hash (the planner needs none).
+        let hash = if referenced.contains(uuid.as_str()) {
+            let path = crate::core::resources::resource_path(resources_dir, uuid.as_str());
+            match tokio::fs::read(&path).await {
+                Ok(bytes) => bytes_hash(&bytes),
+                Err(_) => String::new(),
+            }
+        } else {
+            String::new()
+        };
+        local.push(LocalResource {
+            uuid,
+            filename,
+            mime,
+            size,
+            hash,
+            updated_at,
+        });
+    }
+    let remote = store.list_resources(cipher).await?;
+    for action in plan_resources(&local, &remote, &referenced) {
+        match action {
+            ResourceAction::Upload { resource } => {
+                let path =
+                    crate::core::resources::resource_path(resources_dir, resource.uuid.as_str());
+                let bytes = match tokio::fs::read(&path).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(
+                            uuid = tracing::field::display(&resource.uuid),
+                            err = tracing::field::display(&e),
+                            "skipping attachment upload: cannot read it"
+                        );
+                        continue;
+                    }
+                };
+                if u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+                    > crate::core::resources::MAX_ATTACHMENT_BYTES
+                {
+                    tracing::warn!(
+                        uuid = tracing::field::display(&resource.uuid),
+                        "skipping attachment upload: exceeds 100 MiB"
+                    );
+                    continue;
+                }
+                let meta = ResourceMeta {
+                    uuid: resource.uuid.clone(),
+                    filename: resource.filename.clone(),
+                    mime: resource.mime.clone(),
+                    size: i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+                    hash: bytes_hash(&bytes),
+                    updated_at: resource.updated_at.clone(),
+                };
+                if let Err(e) = store.put_resource(cipher, &meta, &bytes).await {
+                    tracing::warn!(
+                        uuid = tracing::field::display(&resource.uuid),
+                        err = tracing::field::display(&e),
+                        "skipping attachment upload"
+                    );
+                    continue;
+                }
+                stats.resources_uploaded += 1;
+            }
+            ResourceAction::Download { meta } => {
+                let bytes = match store.get_resource(cipher, &meta.uuid).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(
+                            uuid = tracing::field::display(&meta.uuid),
+                            err = tracing::field::display(&e),
+                            "skipping attachment download"
+                        );
+                        continue;
+                    }
+                };
+                if u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+                    > crate::core::resources::MAX_ATTACHMENT_BYTES
+                {
+                    tracing::warn!(
+                        uuid = tracing::field::display(&meta.uuid),
+                        "skipping attachment download: exceeds 100 MiB"
+                    );
+                    continue;
+                }
+                if let Err(e) = tokio::fs::create_dir_all(resources_dir).await {
+                    tracing::warn!(
+                        err = tracing::field::display(&e),
+                        "skipping attachment download: cannot create resources dir"
+                    );
+                    continue;
+                }
+                let path = crate::core::resources::resource_path(resources_dir, meta.uuid.as_str());
+                if tokio::fs::write(&path, &bytes).await.is_err() {
+                    continue;
+                }
+                if repo
+                    .upsert_resource_meta(
+                        meta.uuid.as_str(),
+                        &meta.filename,
+                        &meta.mime,
+                        i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+                    )
+                    .await
+                    .is_err()
+                {
+                    continue;
+                }
+                stats.resources_downloaded += 1;
+            }
+            ResourceAction::DeleteLocal { uuid } => {
+                if repo
+                    .delete_resource(resources_dir, uuid.as_str())
+                    .await
+                    .is_ok()
+                {
+                    stats.resources_deleted += 1;
+                }
+            }
+            ResourceAction::DeleteRemote { uuid } => match store.delete_resource(&uuid).await {
+                Ok(()) => stats.resources_deleted += 1,
+                Err(e) => tracing::warn!(
+                    uuid = tracing::field::display(&uuid),
+                    err = tracing::field::display(&e),
+                    "cannot remove orphaned attachment"
+                ),
+            },
+        }
+    }
+    Ok(())
 }
 
 /// Establish the encryption state for one sync run.
@@ -405,6 +610,49 @@ impl SyncStore for S3Store {
 
     async fn delete_md(&self, uuid: &SyncUuid) -> Result<(), SyncError> {
         delete_md(&self.client, &self.bucket, &self.prefix, uuid.as_str()).await
+    }
+
+    async fn list_resources(
+        &self,
+        cipher: Option<&Cipher>,
+    ) -> Result<BTreeMap<SyncUuid, RemoteResourceEntry>, SyncError> {
+        list_remote_resources(&self.client, &self.bucket, &self.prefix, cipher).await
+    }
+
+    async fn get_resource(
+        &self,
+        cipher: Option<&Cipher>,
+        uuid: &SyncUuid,
+    ) -> Result<Vec<u8>, SyncError> {
+        get_resource_blob(
+            &self.client,
+            &self.bucket,
+            &self.prefix,
+            cipher,
+            uuid.as_str(),
+        )
+        .await
+    }
+
+    async fn put_resource(
+        &self,
+        cipher: Option<&Cipher>,
+        meta: &ResourceMeta,
+        bytes: &[u8],
+    ) -> Result<(), SyncError> {
+        put_resource(
+            &self.client,
+            &self.bucket,
+            &self.prefix,
+            cipher,
+            meta,
+            bytes,
+        )
+        .await
+    }
+
+    async fn delete_resource(&self, uuid: &SyncUuid) -> Result<(), SyncError> {
+        delete_resource(&self.client, &self.bucket, &self.prefix, uuid.as_str()).await
     }
 
     async fn get_verifier(&self) -> Result<Option<Vec<u8>>, SyncError> {
@@ -681,6 +929,179 @@ async fn get_md(
         .map_err(|e| SyncError::transport(format!("note {uuid} is not valid UTF-8: {e}")))
 }
 
+fn resource_blob_key(prefix: &str, uuid: &str) -> String {
+    format!("{prefix}resources/{uuid}.bin")
+}
+
+fn resource_meta_key(prefix: &str, uuid: &str) -> String {
+    format!("{prefix}resmeta/{uuid}.json")
+}
+
+/// List remote attachments: `resources/*.bin` blobs plus `resmeta/*.json`
+/// metadata. Separate prefixes from notes (`notes/`, `meta/`) so the note
+/// listing never mistakes them for notes.
+async fn list_remote_resources(
+    client: &S3Client,
+    bucket: &str,
+    prefix: &str,
+    cipher: Option<&Cipher>,
+) -> Result<BTreeMap<SyncUuid, RemoteResourceEntry>, SyncError> {
+    let mut remote: BTreeMap<SyncUuid, RemoteResourceEntry> = BTreeMap::new();
+    let mut pager = client
+        .objects()
+        .list_v2(bucket)
+        .prefix(prefix)
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?
+        .pager();
+    while let Some(page) = pager
+        .next_page()
+        .await
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?
+    {
+        for obj in page.contents {
+            if let Some(uuid) = parse_key(prefix, &obj.key, "resources/", ".bin") {
+                remote.entry(uuid).or_default().has_blob = true;
+            } else if let Some(uuid) = parse_key(prefix, &obj.key, "resmeta/", ".json") {
+                remote.entry(uuid).or_default();
+            }
+        }
+    }
+    let uuids: Vec<SyncUuid> = remote.keys().cloned().collect();
+    for uuid in uuids {
+        let output = match client
+            .objects()
+            .get(bucket, resource_meta_key(prefix, uuid.as_str()))
+            .send()
+            .await
+        {
+            Ok(output) => output,
+            Err(e) => {
+                tracing::warn!(
+                    uuid = tracing::field::display(&uuid),
+                    err = tracing::field::display(&e),
+                    "cannot read resource metadata"
+                );
+                continue;
+            }
+        };
+        let bytes = match output.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(
+                    uuid = tracing::field::display(&uuid),
+                    err = tracing::field::display(&e),
+                    "cannot read resource metadata"
+                );
+                continue;
+            }
+        };
+        let plain = match decrypt_body(cipher, &bytes) {
+            Ok(plain) => plain,
+            Err(e) => {
+                tracing::warn!(
+                    uuid = tracing::field::display(&uuid),
+                    err = tracing::field::display(&e),
+                    "cannot decrypt resource metadata"
+                );
+                continue;
+            }
+        };
+        match serde_json::from_slice::<ResourceMeta>(&plain) {
+            Ok(meta) => match meta.validated() {
+                Ok(valid) => {
+                    remote.entry(uuid).or_default().meta = Some(valid.clone());
+                }
+                Err(e) => tracing::warn!(
+                    uuid = tracing::field::display(&uuid),
+                    err = tracing::field::display(&e),
+                    "ignoring invalid resource metadata"
+                ),
+            },
+            Err(e) => tracing::warn!(
+                uuid = tracing::field::display(&uuid),
+                err = tracing::field::display(&e),
+                "ignoring unparseable resource metadata"
+            ),
+        }
+    }
+    Ok(remote)
+}
+
+async fn get_resource_blob(
+    client: &S3Client,
+    bucket: &str,
+    prefix: &str,
+    cipher: Option<&Cipher>,
+    uuid: &str,
+) -> Result<Vec<u8>, SyncError> {
+    let output = client
+        .objects()
+        .get(bucket, resource_blob_key(prefix, uuid))
+        .send()
+        .await
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?;
+    let bytes = output
+        .bytes()
+        .await
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?;
+    Ok(decrypt_body(cipher, &bytes)?)
+}
+
+async fn put_resource(
+    client: &S3Client,
+    bucket: &str,
+    prefix: &str,
+    cipher: Option<&Cipher>,
+    meta: &ResourceMeta,
+    bytes: &[u8],
+) -> Result<(), SyncError> {
+    let body = encrypt_body(cipher, bytes)?;
+    client
+        .objects()
+        .put(bucket, resource_blob_key(prefix, meta.uuid.as_str()))
+        .content_type("application/octet-stream")
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?
+        .body_bytes(body)
+        .send()
+        .await
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?;
+    let json = serde_json::to_string(meta)
+        .map_err(|e| SyncError::transport(format!("cannot encode resource metadata: {e}")))?;
+    let meta_body = encrypt_body(cipher, json.as_bytes())?;
+    client
+        .objects()
+        .put(bucket, resource_meta_key(prefix, meta.uuid.as_str()))
+        .content_type("application/json")
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?
+        .body_bytes(meta_body)
+        .send()
+        .await
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?;
+    Ok(())
+}
+
+/// Remove one attachment blob + metadata. S3 deletion is idempotent.
+async fn delete_resource(
+    client: &S3Client,
+    bucket: &str,
+    prefix: &str,
+    uuid: &str,
+) -> Result<(), SyncError> {
+    client
+        .objects()
+        .delete(bucket, resource_blob_key(prefix, uuid))
+        .send()
+        .await
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?;
+    client
+        .objects()
+        .delete(bucket, resource_meta_key(prefix, uuid))
+        .send()
+        .await
+        .map_err(|e| SyncError::transport(format!("{e:#}")))?;
+    Ok(())
+}
+
 /// Fetch the verifier object; a 404 (never encrypted) is `None`.
 async fn get_verifier(
     client: &S3Client,
@@ -776,7 +1197,15 @@ impl WebdavStore {
         collection_path(&self.directory, "meta")
     }
 
-    /// Create the base collection and its two sub-collections if missing.
+    fn resources_collection(&self) -> String {
+        collection_path(&self.directory, "resources")
+    }
+
+    fn resmeta_collection(&self) -> String {
+        collection_path(&self.directory, "resmeta")
+    }
+
+    /// Create the base collection and its sub-collections if missing.
     /// MKCOL on an existing collection is refused (405) by most servers,
     /// so "already there" statuses count as success.
     async fn ensure_collections(&self) -> Result<(), SyncError> {
@@ -786,7 +1215,9 @@ impl WebdavStore {
             self.ensure_collection(&self.directory).await?;
         }
         self.ensure_collection(&self.notes_collection()).await?;
-        self.ensure_collection(&self.meta_collection()).await
+        self.ensure_collection(&self.meta_collection()).await?;
+        self.ensure_collection(&self.resources_collection()).await?;
+        self.ensure_collection(&self.resmeta_collection()).await
     }
 
     async fn ensure_collection(&self, path: &str) -> Result<(), SyncError> {
@@ -934,6 +1365,60 @@ impl WebdavStore {
             ))
         }
     }
+
+    /// GET one resource metadata; `None` on 404/undecryptable/unparseable.
+    async fn get_resource_meta(
+        &self,
+        cipher: Option<&Cipher>,
+        uuid: &SyncUuid,
+    ) -> Result<Option<ResourceMeta>, SyncError> {
+        let path = format!("{}/{}.json", self.resmeta_collection(), uuid);
+        let response = self.client.get_raw(&path).await.map_err(webdav_error)?;
+        let code = response.status().as_u16();
+        if code == 404 {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(webdav_status_error("read resource metadata", code));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| SyncError::transport(format!("cannot read resource metadata: {e}")))?;
+        let plain = match decrypt_body(cipher, &bytes) {
+            Ok(plain) => plain,
+            Err(e) => {
+                tracing::warn!(
+                    uuid = tracing::field::display(&uuid),
+                    err = tracing::field::display(&e),
+                    "cannot decrypt resource metadata"
+                );
+                return Ok(None);
+            }
+        };
+        match serde_json::from_slice::<ResourceMeta>(&plain) {
+            Ok(meta) => Ok(meta.validated().cloned().ok()),
+            Err(e) => {
+                tracing::warn!(
+                    uuid = tracing::field::display(&uuid),
+                    err = tracing::field::display(&e),
+                    "ignoring unparseable resource metadata"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// DELETE one path; 404 counts as success (idempotent GC).
+    async fn delete_path(&self, path: &str, what: &str) -> Result<(), SyncError> {
+        let response = self.client.delete_raw(path).await.map_err(webdav_error)?;
+        let code = response.status().as_u16();
+        if response.status().is_success() || code == 404 {
+            Ok(())
+        } else {
+            Err(webdav_status_error(what, code))
+        }
+    }
 }
 
 /// Path of one notes/meta sub-collection relative to the host.
@@ -1046,6 +1531,85 @@ impl SyncStore for WebdavStore {
 
     async fn delete_md(&self, uuid: &SyncUuid) -> Result<(), SyncError> {
         self.delete_note_md(uuid).await
+    }
+
+    async fn list_resources(
+        &self,
+        cipher: Option<&Cipher>,
+    ) -> Result<BTreeMap<SyncUuid, RemoteResourceEntry>, SyncError> {
+        let mut remote: BTreeMap<SyncUuid, RemoteResourceEntry> = BTreeMap::new();
+        for uuid in self
+            .list_collection(&self.resources_collection(), ".bin")
+            .await?
+        {
+            remote.entry(uuid).or_default().has_blob = true;
+        }
+        for uuid in self
+            .list_collection(&self.resmeta_collection(), ".json")
+            .await?
+        {
+            remote.entry(uuid).or_default();
+        }
+        let uuids: Vec<SyncUuid> = remote.keys().cloned().collect();
+        for uuid in uuids {
+            match self.get_resource_meta(cipher, &uuid).await {
+                Ok(Some(meta)) => {
+                    remote.entry(uuid).or_default().meta = Some(meta);
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    uuid = tracing::field::display(&uuid),
+                    err = tracing::field::display(&e),
+                    "cannot read resource metadata"
+                ),
+            }
+        }
+        Ok(remote)
+    }
+
+    async fn get_resource(
+        &self,
+        cipher: Option<&Cipher>,
+        uuid: &SyncUuid,
+    ) -> Result<Vec<u8>, SyncError> {
+        let path = format!("{}/{}.bin", self.resources_collection(), uuid);
+        let response = self.client.get_raw(&path).await.map_err(webdav_error)?;
+        let code = response.status().as_u16();
+        if !response.status().is_success() {
+            return Err(webdav_status_error(
+                &format!("read attachment {uuid}"),
+                code,
+            ));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| SyncError::transport(format!("cannot read attachment {uuid}: {e}")))?;
+        Ok(decrypt_body(cipher, &bytes)?)
+    }
+
+    async fn put_resource(
+        &self,
+        cipher: Option<&Cipher>,
+        meta: &ResourceMeta,
+        bytes: &[u8],
+    ) -> Result<(), SyncError> {
+        let blob_path = format!("{}/{}.bin", self.resources_collection(), meta.uuid);
+        let body = encrypt_body(cipher, bytes)?;
+        self.put(&blob_path, "application/octet-stream", body)
+            .await?;
+        let json = serde_json::to_string(meta)
+            .map_err(|e| SyncError::transport(format!("cannot encode resource metadata: {e}")))?;
+        let meta_body = encrypt_body(cipher, json.as_bytes())?;
+        let meta_path = format!("{}/{}.json", self.resmeta_collection(), meta.uuid);
+        self.put(&meta_path, "application/json", meta_body).await
+    }
+
+    async fn delete_resource(&self, uuid: &SyncUuid) -> Result<(), SyncError> {
+        let blob = format!("{}/{}.bin", self.resources_collection(), uuid);
+        self.delete_path(&blob, "delete attachment").await?;
+        let meta = format!("{}/{}.json", self.resmeta_collection(), uuid);
+        self.delete_path(&meta, "delete attachment metadata").await
     }
 
     async fn get_verifier(&self) -> Result<Option<Vec<u8>>, SyncError> {
@@ -1365,6 +1929,258 @@ mod webdav_tests {
         assert_eq!(stats.uploaded, 1);
         // The two PUTs happened exactly once, with Basic auth headers.
         server.verify().await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn webdav_executor_uploads_a_new_attachment() {
+        let server = MockServer::start().await;
+        accept_mkcol(&server).await;
+        for collection in ["notes", "meta", "resources", "resmeta"] {
+            let href = format!("/{collection}");
+            Mock::given(method("PROPFIND"))
+                .and(path(format!("/notas/{collection}")))
+                .respond_with(ResponseTemplate::new(207).set_body_string(empty_multistatus(&href)))
+                .mount(&server)
+                .await;
+        }
+
+        let dir = temp_db_dir("upload-resource");
+        let resources_dir = dir.join("resources");
+        let pool = database::connect(dir.join("a.db")).await.unwrap();
+        let repo = Repository::new(pool.clone());
+        let res = repo
+            .add_resource_bytes(&resources_dir, b"attachment-bytes", "doc.pdf")
+            .await
+            .unwrap();
+        let note = repo.create_note(None, "Hello").await.unwrap();
+        repo.update_note(note.id, "Hello", &format!("see [doc](:/{})", res.uuid))
+            .await
+            .unwrap();
+        repo.ensure_note_uuids().await.unwrap();
+        let uuid = repo.sync_local_index().await.unwrap()[0].uuid.clone();
+
+        // Note body + sidecar.
+        Mock::given(method("PUT"))
+            .and(path(format!("/notas/notes/{uuid}.md")))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/notas/meta/{uuid}.json")))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Attachment blob + metadata.
+        Mock::given(method("PUT"))
+            .and(path(format!("/notas/resources/{}.bin", res.uuid)))
+            .and(header("content-type", "application/octet-stream"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/notas/resmeta/{}.json", res.uuid)))
+            .and(header("content-type", "application/json"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let settings = SyncSettings {
+            kind: SyncType::Webdav,
+            s3: S3SyncSettings::default(),
+            webdav: webdav_settings(&server.uri()),
+            encryption: EncryptionSettings::default(),
+            last_synced_at: String::new(),
+        };
+        let stats = run_sync_with_resources(&repo, &settings, &resources_dir)
+            .await
+            .expect("webdav sync");
+        assert_eq!(stats.uploaded, 1);
+        assert_eq!(stats.resources_uploaded, 1);
+        server.verify().await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn webdav_executor_encrypts_uploaded_attachments() {
+        let server = MockServer::start().await;
+        accept_mkcol(&server).await;
+        for collection in ["notes", "meta", "resources", "resmeta"] {
+            let href = format!("/{collection}");
+            Mock::given(method("PROPFIND"))
+                .and(path(format!("/notas/{collection}")))
+                .respond_with(ResponseTemplate::new(207).set_body_string(empty_multistatus(&href)))
+                .mount(&server)
+                .await;
+        }
+        // Fresh backend: no verifier yet, so the sync establishes one.
+        Mock::given(method("GET"))
+            .and(path("/notas/meta/.encryption-verifier"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/notas/meta/.encryption-verifier"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = temp_db_dir("enc-upload-resource");
+        let resources_dir = dir.join("resources");
+        let pool = database::connect(dir.join("a.db")).await.unwrap();
+        let repo = Repository::new(pool.clone());
+        let res = repo
+            .add_resource_bytes(&resources_dir, b"secret-attachment-bytes", "doc.pdf")
+            .await
+            .unwrap();
+        let note = repo.create_note(None, "Hello").await.unwrap();
+        repo.update_note(note.id, "Hello", &format!("see [doc](:/{})", res.uuid))
+            .await
+            .unwrap();
+        repo.ensure_note_uuids().await.unwrap();
+        let uuid = repo.sync_local_index().await.unwrap()[0].uuid.clone();
+
+        Mock::given(method("PUT"))
+            .and(path(format!("/notas/notes/{uuid}.md")))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/notas/meta/{uuid}.json")))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // The blob must never go up in clear: any hit means plaintext.
+        Mock::given(method("PUT"))
+            .and(path(format!("/notas/resources/{}.bin", res.uuid)))
+            .and(wiremock::matchers::body_string_contains(
+                "secret-attachment-bytes",
+            ))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/notas/resources/{}.bin", res.uuid)))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/notas/resmeta/{}.json", res.uuid)))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let settings = encrypted_settings(&server.uri(), ENC_PASSWORD);
+        let stats = run_sync_with_resources(&repo, &settings, &resources_dir)
+            .await
+            .expect("encrypted sync");
+        assert_eq!(stats.resources_uploaded, 1);
+        server.verify().await;
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn webdav_executor_downloads_a_remote_attachment() {
+        let server = MockServer::start().await;
+        accept_mkcol(&server).await;
+        let uuid = SyncUuid::new("01234567-89ab-4cde-8f01-23456789abcd");
+        let rid = "abcdef0123456789abcdef0123456789";
+        let body = format!("see [doc](:/{rid})");
+        let sidecar = Sidecar {
+            uuid: uuid.clone(),
+            title: "Remote".into(),
+            notebook: None,
+            tags: Vec::new(),
+            trashed: false,
+            deleted: false,
+            updated_at: "2026-01-02 03:04:05".into(),
+            content_hash: content_hash(&body),
+        };
+        let meta = ResourceMeta {
+            uuid: rid.into(),
+            filename: "doc.pdf".into(),
+            mime: "application/pdf".into(),
+            size: 4,
+            hash: bytes_hash(b"blob"),
+            updated_at: "2026-01-02 03:04:05".into(),
+        };
+        for (collection, hrefs) in [
+            ("notes", vec![format!("/notas/notes/{uuid}.md")]),
+            ("meta", vec![format!("/notas/meta/{uuid}.json")]),
+            ("resources", vec![format!("/notas/resources/{rid}.bin")]),
+            ("resmeta", vec![format!("/notas/resmeta/{rid}.json")]),
+        ] {
+            Mock::given(method("PROPFIND"))
+                .and(path(format!("/notas/{collection}")))
+                .respond_with(ResponseTemplate::new(207).set_body_string(multistatus(&hrefs)))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path(format!("/notas/meta/{uuid}.json")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(serde_json::to_string(&sidecar).unwrap()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/notas/notes/{uuid}.md")))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/notas/resmeta/{rid}.json")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(serde_json::to_string(&meta).unwrap()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/notas/resources/{rid}.bin")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"blob".to_vec()))
+            .mount(&server)
+            .await;
+
+        let dir = temp_db_dir("download-resource");
+        let resources_dir = dir.join("resources");
+        let pool = database::connect(dir.join("a.db")).await.unwrap();
+        let repo = Repository::new(pool.clone());
+        let settings = SyncSettings {
+            kind: SyncType::Webdav,
+            s3: S3SyncSettings::default(),
+            webdav: webdav_settings(&server.uri()),
+            encryption: EncryptionSettings::default(),
+            last_synced_at: String::new(),
+        };
+        let stats = run_sync_with_resources(&repo, &settings, &resources_dir)
+            .await
+            .expect("webdav sync");
+        assert_eq!(stats.downloaded, 1);
+        assert_eq!(stats.resources_downloaded, 1);
+
+        let notes = repo.list_all_notes().await.unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, body);
+        let row = repo.get_resource(rid).await.unwrap().expect("row");
+        assert_eq!(row.filename, "doc.pdf");
+        assert_eq!(
+            std::fs::read(crate::core::resources::resource_path(&resources_dir, rid)).unwrap(),
+            b"blob"
+        );
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2214,6 +3030,9 @@ mod e2e_tests {
                 downloaded: 0,
                 trashed: 0,
                 conflicts: 0,
+                resources_uploaded: 0,
+                resources_downloaded: 0,
+                resources_deleted: 0,
                 last_synced_at: stats.last_synced_at.clone(),
             }
         );

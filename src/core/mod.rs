@@ -11,5 +11,6 @@ pub mod database;
 pub mod error;
 pub mod model;
 pub mod repository;
+pub mod resources;
 pub mod search;
 pub mod sync;

@@ -282,8 +282,107 @@ pub struct SyncStats {
     pub trashed: usize,
     /// Conflict copies created from remote content.
     pub conflicts: usize,
+    /// Attachment blobs uploaded.
+    pub resources_uploaded: usize,
+    /// Attachment blobs downloaded.
+    pub resources_downloaded: usize,
+    /// Orphaned attachment blobs deleted (local + remote GC).
+    pub resources_deleted: usize,
     /// Local timestamp used for display and persistence.
     pub last_synced_at: String,
+}
+
+/// One attachment as seen locally: metadata row plus content hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalResource {
+    /// Stable cross-device identity (32 hex).
+    pub uuid: SyncUuid,
+    /// Original filename for display/export.
+    pub filename: String,
+    /// MIME hint.
+    pub mime: String,
+    /// Byte size.
+    pub size: i64,
+    /// FNV-1a hash of the bytes (change detection, not cryptographic).
+    pub hash: String,
+    /// Last modification time (`YYYY-MM-DD HH:MM:SS` UTC).
+    pub updated_at: String,
+}
+
+/// Remote attachment metadata (`resmeta/<uuid>.json`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ResourceMeta {
+    /// Stable cross-device identity.
+    pub uuid: SyncUuid,
+    /// Original filename.
+    pub filename: String,
+    /// MIME hint.
+    #[serde(default)]
+    pub mime: String,
+    /// Byte size.
+    #[serde(default)]
+    pub size: i64,
+    /// FNV-1a hash of the bytes.
+    pub hash: String,
+    /// Last modification time (`YYYY-MM-DD HH:MM:SS` UTC).
+    pub updated_at: String,
+}
+
+impl ResourceMeta {
+    /// Check the invariants the planner relies on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SidecarError`] describing the violated invariant.
+    pub fn validated(&self) -> Result<&Self, SidecarError> {
+        let uuid = self.uuid.as_str();
+        if uuid.is_empty() {
+            return Err(SidecarError::EmptyUuid);
+        }
+        if uuid.contains('/') || uuid.contains('\\') {
+            return Err(SidecarError::UuidWithSeparators);
+        }
+        if !is_sqlite_datetime(&self.updated_at) {
+            return Err(SidecarError::BadTimestamp);
+        }
+        Ok(self)
+    }
+}
+
+/// What the remote store holds for one attachment uuid.
+#[derive(Debug, Clone, Default)]
+pub struct RemoteResourceEntry {
+    /// Parsed metadata, if `resmeta/<uuid>.json` exists.
+    pub meta: Option<ResourceMeta>,
+    /// Whether `resources/<uuid>.bin` exists.
+    pub has_blob: bool,
+}
+
+/// A decision about one attachment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceAction {
+    /// Upload blob + metadata (new or locally newer).
+    Upload {
+        /// The attachment to upload.
+        resource: LocalResource,
+    },
+    /// Download blob + metadata and apply locally.
+    Download {
+        /// The remote metadata to apply.
+        meta: ResourceMeta,
+    },
+    /// Delete the local row + blob (unreferenced everywhere after
+    /// convergence).
+    DeleteLocal {
+        /// The uuid to drop.
+        uuid: SyncUuid,
+    },
+    /// Delete the remote blob + metadata (unreferenced everywhere).
+    DeleteRemote {
+        /// The uuid to drop.
+        uuid: SyncUuid,
+    },
 }
 
 #[cfg(test)]

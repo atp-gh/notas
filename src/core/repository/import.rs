@@ -36,6 +36,8 @@ pub struct ImportPreview {
     pub notebooks: usize,
     /// `.md` files that will become notes.
     pub notes: usize,
+    /// Files under `_resources/` that will become attachments.
+    pub resources: usize,
 }
 
 /// Outcome of one import run, reported to the frontend.
@@ -51,6 +53,12 @@ pub struct ImportStats {
     pub notes_updated: usize,
     /// `.md` files that could not be read (permissions, invalid UTF-8).
     pub notes_skipped: usize,
+    /// Attachments inserted as new rows.
+    pub resources_imported: usize,
+    /// Existing attachments (matched by their id prefix) overwritten.
+    pub resources_updated: usize,
+    /// Resource files skipped (oversize, unreadable, or missing for a link).
+    pub resources_skipped: usize,
 }
 
 /// One planned note: everything needed to upsert it into the database.
@@ -452,10 +460,19 @@ fn notebook_name(dir_name: &str) -> String {
     }
 }
 
-/// Walk the export tree, collecting every notebook path and `.md` file.
-/// `_resources` subtrees, symlinks and non-`.md` files are ignored. An
-/// explicit stack (instead of recursion) keeps the future size bounded.
-async fn collect(root: &Path) -> Result<(Vec<Vec<String>>, Vec<FoundFile>)> {
+/// One resource file discovered under any `_resources/` directory.
+struct FoundResource {
+    /// File name as exported (possibly `<id>-<original>`).
+    name: String,
+    /// Absolute path of the file.
+    path: std::path::PathBuf,
+}
+
+/// Walk the export tree, collecting every notebook path and `.md` file plus
+/// every `_resources/` blob. `_resources` subtrees never become notebooks;
+/// their files become attachments. Symlinks are ignored. An explicit stack
+/// (instead of recursion) keeps the future size bounded.
+async fn collect(root: &Path) -> Result<(Vec<Vec<String>>, Vec<FoundFile>, Vec<FoundResource>)> {
     let meta = tokio::fs::metadata(root).await?;
     if !meta.is_dir() {
         return Err(crate::core::error::Error::InvalidInput(
@@ -464,6 +481,7 @@ async fn collect(root: &Path) -> Result<(Vec<Vec<String>>, Vec<FoundFile>)> {
     }
     let mut notebooks = Vec::new();
     let mut files = Vec::new();
+    let mut resources = Vec::new();
     let mut stack = vec![(root.to_path_buf(), Vec::new())];
     while let Some((dir, segments)) = stack.pop() {
         let mut entries = tokio::fs::read_dir(&dir).await?;
@@ -475,6 +493,25 @@ async fn collect(root: &Path) -> Result<(Vec<Vec<String>>, Vec<FoundFile>)> {
             let name = entry.file_name().to_string_lossy().into_owned();
             if file_type.is_dir() {
                 if name == "_resources" {
+                    // Collect blobs flat (no recursion into subdirs).
+                    if let Ok(mut res_entries) = tokio::fs::read_dir(entry.path()).await {
+                        while let Ok(Some(res)) = res_entries.next_entry().await {
+                            let Ok(ft) = res.file_type().await else {
+                                continue;
+                            };
+                            if ft.is_symlink() || !ft.is_file() {
+                                continue;
+                            }
+                            let res_name = res.file_name().to_string_lossy().into_owned();
+                            if res_name.is_empty() {
+                                continue;
+                            }
+                            resources.push(FoundResource {
+                                name: res_name,
+                                path: res.path(),
+                            });
+                        }
+                    }
                     continue;
                 }
                 let mut child_segments = segments.clone();
@@ -496,7 +533,7 @@ async fn collect(root: &Path) -> Result<(Vec<Vec<String>>, Vec<FoundFile>)> {
             }
         }
     }
-    Ok((notebooks, files))
+    Ok((notebooks, files, resources))
 }
 
 /// Resolve one notebook path segment-by-segment, creating missing levels
@@ -623,8 +660,8 @@ async fn upsert_note(
     Ok(())
 }
 
-/// Count what an import of `root` would touch: notebook directories and
-/// `.md` files, without reading any file contents.
+/// Count what an import of `root` would touch: notebook directories,
+/// `.md` files and `_resources/` blobs, without reading any file contents.
 ///
 /// # Errors
 ///
@@ -632,20 +669,26 @@ async fn upsert_note(
 /// walked, or [`crate::core::error::Error::InvalidInput`] when `root` is
 /// not a directory.
 pub(crate) async fn preview(root: &Path) -> Result<ImportPreview> {
-    let (notebooks, files) = collect(root).await?;
+    let (notebooks, files, resources) = collect(root).await?;
     Ok(ImportPreview {
         notebooks: notebooks.len(),
         notes: files.len(),
+        resources: resources.len(),
     })
 }
 
-/// Import every `.md` file under `root` into the database.
+/// Import every `.md` file under `root` into the database, plus every
+/// `_resources/` blob as a shared attachment.
 ///
 /// Notebook directories are recreated (existing same-name notebooks are
 /// reused and counted as found), notes are inserted — or updated in place
-/// when their Joplin `id` already exists — and the whole run is one
-/// transaction: a database error rolls everything back. Files that cannot
-/// be read are counted as skipped and do not abort the import.
+/// when their Joplin `id` already exists — and resource files whose name
+/// carries an `<id>-` prefix reuse that id (lossless Notas round-trip);
+/// plain Joplin names get a fresh id. Oversize (>100 MiB) or unreadable
+/// blobs are skipped and counted; their links keep the original relative
+/// destination so the note still imports. The whole run is one transaction:
+/// a database error rolls everything back. Files that cannot be read are
+/// counted as skipped and do not abort the import.
 ///
 /// # Errors
 ///
@@ -653,10 +696,88 @@ pub(crate) async fn preview(root: &Path) -> Result<ImportPreview> {
 /// walked or a note cannot be read (skipped instead), or
 /// [`crate::core::error::Error::Database`] when a write fails (rolling
 /// the transaction back).
-pub(crate) async fn run(pool: &SqlitePool, root: &Path) -> Result<ImportStats> {
-    let (notebooks, files) = collect(root).await?;
+pub(crate) async fn run(
+    pool: &SqlitePool,
+    root: &Path,
+    resources_dir: &Path,
+) -> Result<ImportStats> {
+    let (notebooks, files, found_resources) = collect(root).await?;
     let mut stats = ImportStats::default();
+    // Stage blobs first (outside the DB transaction — 100 MiB copies must
+    // not hold the write lock): basename → assigned uuid for link rewriting.
+    let mut id_by_basename: HashMap<String, String> = HashMap::new();
+    let mut pending_metas: Vec<(String, String, String, i64)> = Vec::new();
+    // The short `import_markdown` form passes an empty dir (predates
+    // attachments): skip blob I/O then, keeping old callers/tests stable.
+    let store_blobs = !resources_dir.as_os_str().is_empty();
+    if !found_resources.is_empty() && store_blobs {
+        tokio::fs::create_dir_all(resources_dir).await?;
+    }
+    for res in &found_resources {
+        if !store_blobs {
+            break;
+        }
+        let (uuid, original) = match crate::core::resources::split_id_prefix(&res.name) {
+            Some((id, orig)) => (id.to_string(), orig.to_string()),
+            None => (crate::core::resources::new_resource_id(), res.name.clone()),
+        };
+        let meta = match tokio::fs::metadata(&res.path).await {
+            Ok(m) => m,
+            Err(_) => {
+                stats.resources_skipped += 1;
+                continue;
+            }
+        };
+        if meta.len() > crate::core::resources::MAX_ATTACHMENT_BYTES {
+            stats.resources_skipped += 1;
+            continue;
+        }
+        let bytes = match tokio::fs::read(&res.path).await {
+            Ok(b) => b,
+            Err(_) => {
+                stats.resources_skipped += 1;
+                continue;
+            }
+        };
+        let dest = crate::core::resources::resource_path(resources_dir, &uuid);
+        if tokio::fs::write(&dest, &bytes).await.is_err() {
+            stats.resources_skipped += 1;
+            continue;
+        }
+        let mime = crate::core::resources::guess_mime(&original);
+        let size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
+        // Count imported vs updated by probing the current table (cheap:
+        // resource counts are small).
+        let exists: Option<String> =
+            sqlx::query_scalar("SELECT uuid FROM resources WHERE uuid = ?")
+                .bind(&uuid)
+                .fetch_optional(pool)
+                .await?;
+        if exists.is_some() {
+            stats.resources_updated += 1;
+        } else {
+            stats.resources_imported += 1;
+        }
+        pending_metas.push((uuid.clone(), original, mime, size));
+        // A basename collision keeps the first uuid for link rewriting —
+        // Joplin exports are flat, so this is only defensive.
+        id_by_basename.entry(res.name.clone()).or_insert(uuid);
+    }
     let mut tx = pool.begin().await?;
+    for (uuid, original, mime, size) in &pending_metas {
+        sqlx::query(
+            "INSERT INTO resources (uuid, filename, mime, size, updated_at) \
+             VALUES (?, ?, ?, ?, datetime('now')) \
+             ON CONFLICT(uuid) DO UPDATE SET filename = excluded.filename, \
+             mime = excluded.mime, size = excluded.size, updated_at = datetime('now')",
+        )
+        .bind(uuid)
+        .bind(original)
+        .bind(mime)
+        .bind(size)
+        .execute(&mut *tx)
+        .await?;
+    }
     // Import fallback timestamp, in SQLite's own format, so notes without
     // a parseable front-matter timestamp still sort consistently.
     let now: String = sqlx::query_scalar("SELECT datetime('now')")
@@ -677,6 +798,12 @@ pub(crate) async fn run(pool: &SqlitePool, root: &Path) -> Result<ImportStats> {
         let (meta, body) = parse_front_matter(&content)
             .unwrap_or_else(|| (FrontMatter::default(), content.as_str()));
         let body = strip_leading_blank_lines(body);
+        // Rewrite `_resources/` destinations to `:/<id>`; missing blobs keep
+        // their relative link and count toward `resources_skipped`.
+        let rewrite = crate::core::resources::rewrite_relative_to_ids(body, &id_by_basename);
+        if rewrite.missing > 0 {
+            stats.resources_skipped += rewrite.missing;
+        }
         let title = meta
             .title
             .filter(|title| !title.trim().is_empty())
@@ -698,7 +825,7 @@ pub(crate) async fn run(pool: &SqlitePool, root: &Path) -> Result<ImportStats> {
             notebook_id,
             &PlannedNote {
                 title,
-                content: body.to_string(),
+                content: rewrite.content,
                 tags: meta.tags,
                 created: meta.created,
                 updated: meta.updated,

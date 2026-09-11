@@ -16,13 +16,16 @@ use std::path::Path;
 use sqlx::SqlitePool;
 
 use crate::core::error::Result;
-use crate::core::model::{Note, NoteId, Notebook, NotebookId, SearchHit, Tag, TagCount, TagId};
+use crate::core::model::{
+    Note, NoteId, Notebook, NotebookId, Resource, SearchHit, Tag, TagCount, TagId,
+};
 
 pub(crate) mod backup;
 pub(crate) mod export;
 pub(crate) mod import;
 pub(crate) mod notebooks;
 pub(crate) mod notes;
+pub(crate) mod resources;
 pub(crate) mod search;
 pub(crate) mod sync_state;
 pub(crate) mod tags;
@@ -462,7 +465,22 @@ impl Repository {
     /// Returns [`crate::core::error::Error::Io`] on filesystem failures and
     /// [`crate::core::error::Error::Database`] on SQL failures.
     pub async fn export_markdown(&self, out_dir: &Path) -> Result<usize> {
-        export::run(&self.pool, out_dir).await
+        export::run(&self.pool, out_dir, &default_resources_dir()).await
+    }
+
+    /// Export with an explicit resources directory (production passes
+    /// `<data_dir>/resources`; tests pass a temp dir).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::Io`] on filesystem failures and
+    /// [`crate::core::error::Error::Database`] on SQL failures.
+    pub async fn export_markdown_with_resources(
+        &self,
+        out_dir: &Path,
+        resources_dir: &Path,
+    ) -> Result<usize> {
+        export::run(&self.pool, out_dir, resources_dir).await
     }
 
     /// Create a consistent snapshot of the database at `dest` using
@@ -506,6 +524,126 @@ impl Repository {
     /// a directory, or [`crate::core::error::Error::Database`] when a write
     /// fails (rolling everything back).
     pub async fn import_markdown(&self, dir: &Path) -> Result<import::ImportStats> {
-        import::run(&self.pool, dir).await
+        import::run(&self.pool, dir, &default_resources_dir()).await
     }
+
+    /// Import with an explicit resources directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::Io`] when the tree cannot be
+    /// walked, [`crate::core::error::Error::InvalidInput`] when `dir` is not
+    /// a directory, or [`crate::core::error::Error::Database`] when a write
+    /// fails (rolling everything back).
+    pub async fn import_markdown_with_resources(
+        &self,
+        dir: &Path,
+        resources_dir: &Path,
+    ) -> Result<import::ImportStats> {
+        import::run(&self.pool, dir, resources_dir).await
+    }
+
+    // ---------------------------------------------------------- resources
+
+    /// Fetch one attachment by uuid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
+    pub async fn get_resource(&self, uuid: &str) -> Result<Option<Resource>> {
+        resources::get(&self.pool, uuid).await
+    }
+
+    /// All attachments, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
+    pub async fn list_resources(&self) -> Result<Vec<Resource>> {
+        resources::list(&self.pool).await
+    }
+
+    /// Add an attachment from a source file into `dir`, returning its row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::InvalidInput`] when the file
+    /// exceeds 100 MiB, or [`crate::core::error::Error::Io`] /
+    /// [`crate::core::error::Error::Database`] on copy/store failures.
+    pub async fn add_resource_file(
+        &self,
+        dir: &Path,
+        source: &Path,
+        filename: &str,
+    ) -> Result<Resource> {
+        resources::add_file(&self.pool, dir, source, filename, None).await
+    }
+
+    /// Add an attachment from bytes (clipboard paste).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::InvalidInput`] when the payload
+    /// exceeds 100 MiB, or [`crate::core::error::Error::Database`] /
+    /// [`crate::core::error::Error::Io`] on store failures.
+    pub async fn add_resource_bytes(
+        &self,
+        dir: &Path,
+        bytes: &[u8],
+        filename: &str,
+    ) -> Result<Resource> {
+        resources::add_bytes(&self.pool, dir, bytes, filename, None).await
+    }
+
+    /// Delete an attachment row + blob (idempotent).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::Database`] on SQL failures.
+    pub async fn delete_resource(&self, dir: &Path, uuid: &str) -> Result<()> {
+        resources::remove(&self.pool, dir, uuid).await
+    }
+
+    /// Attachment metadata for the sync resource planner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
+    pub async fn sync_resource_metas(
+        &self,
+    ) -> Result<Vec<(crate::core::sync::SyncUuid, String, String, i64, String)>> {
+        sync_state::local_resource_metas(&self.pool).await
+    }
+
+    /// Every `:/<id>` referenced by any local note.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::Database`] when the query fails.
+    pub async fn sync_referenced_resources(&self) -> Result<std::collections::HashSet<String>> {
+        sync_state::referenced_resource_ids(&self.pool).await
+    }
+
+    /// Upsert attachment metadata (sync download path).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::core::error::Error::Database`] on SQL failures.
+    pub async fn upsert_resource_meta(
+        &self,
+        uuid: &str,
+        filename: &str,
+        mime: &str,
+        size: i64,
+    ) -> Result<()> {
+        resources::upsert_meta(&self.pool, uuid, filename, mime, size).await
+    }
+}
+
+/// Fallback resources dir for callers that predate attachments (unit tests
+/// calling the short import/export forms): a path that cannot hold blobs,
+/// so exports leave `:/<id>` links untouched and imports write blobs there
+/// only when tests pass an explicit dir.
+fn default_resources_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from("")
 }

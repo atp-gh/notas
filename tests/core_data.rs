@@ -91,13 +91,13 @@ async fn legacy_database_without_uuid_column_is_upgraded() {
     }
 
     // Re-open with the current code: the upgrade must add uuid, notebook
-    // trash and the version rows without losing data.
+    // trash, resources and the version rows without losing data.
     let pool = database::connect(&path).await.unwrap();
     let version: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_version")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 2, "legacy database must be upgraded to v2");
+    assert_eq!(version, 3, "legacy database must be upgraded to v3");
 
     let has_uuid = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM pragma_table_info('notes') WHERE name = 'uuid'",
@@ -114,6 +114,14 @@ async fn legacy_database_without_uuid_column_is_upgraded() {
     .await
     .unwrap();
     assert_eq!(has_trash, 1, "notebooks.is_trashed column must be added");
+
+    let has_resources = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'resources'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(has_resources, 1, "resources table must be added");
 
     let title: String = sqlx::query_scalar("SELECT title FROM notes")
         .fetch_one(&pool)

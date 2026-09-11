@@ -342,8 +342,13 @@ impl Editor {
 
 /// Build the whole editor pane. `emit` forwards UI events to the app
 /// component; `suppress` gates the "changed" signal so that programmatic
-/// loads don't mark the note dirty.
-pub fn build_editor<E>(emit: E, suppress: Rc<Cell<bool>>) -> Editor
+/// loads don't mark the note dirty; `resources_dir` resolves `:/<id>`
+/// attachment links to local blobs when clicked.
+pub fn build_editor<E>(
+    emit: E,
+    suppress: Rc<Cell<bool>>,
+    resources_dir: std::path::PathBuf,
+) -> Editor
 where
     E: Fn(AppMsg) + 'static + Clone,
 {
@@ -447,8 +452,9 @@ where
         });
     }
 
-    // Clickable links: hover shows a pointer cursor, clicking opens the
-    // URL in the system browser.
+    // Clickable links: `:/<id>` attachment references open the local blob,
+    // everything else opens in the system browser. Hover shows a pointer
+    // cursor.
     {
         let tags = preview_tags.clone();
         let view = preview_view.clone();
@@ -457,8 +463,24 @@ where
             if let Some(iter) = view.iter_at_location(x as i32, y as i32)
                 && let Some(url) = tags.link_url_at(iter.offset())
             {
+                // Attachment links are internal (`:/<id>`, maybe followed by
+                // a `"title"` which never reaches `link_url`).
+                let uri = match url.strip_prefix(":/") {
+                    Some(id) => {
+                        let id = id.split([' ', '"', ')']).next().unwrap_or(id).trim();
+                        if id.is_empty() || id.contains('/') || id.contains('\\') {
+                            return;
+                        }
+                        let path = resources_dir.join(id);
+                        if !path.is_file() {
+                            return;
+                        }
+                        gtk::gio::File::for_path(&path).uri()
+                    }
+                    None => url.into(),
+                };
                 let _ = gtk::gio::AppInfo::launch_default_for_uri(
-                    &url,
+                    &uri,
                     None::<&gtk::gio::AppLaunchContext>,
                 );
             }
@@ -796,7 +818,7 @@ mod tests {
     fn source_view_scroll_probe() {
         gtk::init().expect("gtk init");
         adw::init().expect("adw init");
-        let editor = build_editor(|_| {}, Rc::new(Cell::new(false)));
+        let editor = build_editor(|_| {}, Rc::new(Cell::new(false)), std::path::PathBuf::new());
         let long = (0..300)
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
@@ -885,7 +907,7 @@ mod tests {
     fn source_view_stays_editable() {
         gtk::init().expect("gtk init");
         adw::init().expect("adw init");
-        let editor = build_editor(|_| {}, Rc::new(Cell::new(false)));
+        let editor = build_editor(|_| {}, Rc::new(Cell::new(false)), std::path::PathBuf::new());
         assert!(
             editor.source_view.is_editable(),
             "source view must be editable"

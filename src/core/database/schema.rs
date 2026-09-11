@@ -71,6 +71,21 @@ CREATE TABLE IF NOT EXISTS sync_tombstones (
     deleted_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Attachments (Joplin-style resources): globally addressed by uuid, shared
+-- by any number of notes through `:/<uuid>` links. Bytes live in
+-- `<data_dir>/resources/<uuid>`; this table is display metadata + sync
+-- bookkeeping. Orphaned rows (no note references them) are garbage-collected
+-- after sync convergence, so no tombstone table is needed: every device
+-- independently drops the same unreferenced uuids.
+CREATE TABLE IF NOT EXISTS resources (
+    uuid       TEXT PRIMARY KEY,
+    filename   TEXT NOT NULL,
+    mime       TEXT NOT NULL DEFAULT '',
+    size       INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- A notebook is unique among its non-trashed siblings: concurrent
 -- syncs resolving the same path must not create duplicate "Parent/Child"
 -- rows. Trashed notebooks are excluded (partial index) so a trashed name
@@ -93,7 +108,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 INSERT INTO schema_version (version)
-SELECT 2
+SELECT 3
 WHERE NOT EXISTS (SELECT 1 FROM schema_version)
   AND EXISTS (SELECT 1 FROM pragma_table_info('notebooks') WHERE name = 'is_trashed');
 

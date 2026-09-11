@@ -219,9 +219,12 @@ pub fn plan(
 }
 
 /// Query the database and write every non-trashed note as `.md` files
-/// under `out_dir` in Joplin's "Markdown + Front Matter" shape. Returns
-/// the number of notes written.
-pub(crate) async fn run(pool: &SqlitePool, out_dir: &Path) -> Result<usize> {
+/// under `out_dir` in Joplin's "Markdown + Front Matter" shape, plus a
+/// single `_resources/` directory for attachments. Internal `:/<id>` links
+/// are rewritten to depth-relative `_resources/<id>-<name>` paths (Joplin
+/// reads them as plain relative links); the id prefix makes Notas
+/// re-imports lossless. Returns the number of notes written.
+pub(crate) async fn run(pool: &SqlitePool, out_dir: &Path, resources_dir: &Path) -> Result<usize> {
     let notebooks = notebooks::list(pool).await?;
     let notes = sqlx::query_as::<_, Note>(
         "SELECT id, notebook_id, title, content, is_trashed, created_at, updated_at \
@@ -257,7 +260,52 @@ pub(crate) async fn run(pool: &SqlitePool, out_dir: &Path) -> Result<usize> {
         tags_by_note.entry(note_id).or_default().push(name);
     }
 
-    let planned = plan(&notebooks, &notes, &tags_by_note, &uuid_by_note);
+    let mut planned = plan(&notebooks, &notes, &tags_by_note, &uuid_by_note);
+
+    // Attachments: only blobs referenced by exported notes. Filenames are
+    // `<id>-<original>` (Notas lossless, Joplin opaque); links are rewritten
+    // per-note with the correct `../` depth. Missing blobs leave the `:/id`
+    // link untouched (never silently drop a reference).
+    let needed: std::collections::HashSet<String> = notes
+        .iter()
+        .flat_map(|n| crate::core::resources::extract_resource_ids(&n.content))
+        .collect();
+    if !needed.is_empty() && !resources_dir.as_os_str().is_empty() {
+        let metas = sqlx::query_as::<_, crate::core::model::Resource>(
+            "SELECT uuid, filename, mime, size, created_at, updated_at FROM resources",
+        )
+        .fetch_all(pool)
+        .await?;
+        let mut filename_by_id: HashMap<String, String> = HashMap::new();
+        for meta in &metas {
+            if needed.contains(&meta.uuid) {
+                let name = crate::core::resources::export_filename(&meta.uuid, &meta.filename);
+                // Copy the blob when present; a missing file keeps the map
+                // entry out so the link stays as `:/id`.
+                let src = crate::core::resources::resource_path(resources_dir, &meta.uuid);
+                if tokio::fs::try_exists(&src).await.unwrap_or(false) {
+                    let dest_dir = out_dir.join("_resources");
+                    tokio::fs::create_dir_all(&dest_dir).await?;
+                    let dest = dest_dir.join(&name);
+                    // Best-effort: a copy failure must not fail the whole
+                    // export; the note keeps its `:/id` link.
+                    if tokio::fs::copy(&src, &dest).await.is_ok() {
+                        filename_by_id.insert(meta.uuid.clone(), name);
+                    }
+                }
+            }
+        }
+        if !filename_by_id.is_empty() {
+            for file in &mut planned {
+                let depth = file.dir.len();
+                // Rebuild content with rewritten links: split the frontmatter
+                // (which never contains `:/`) from the body is unnecessary —
+                // the rewriter only touches `](:/…)` destinations.
+                file.content = rewrite_export_content(&file.content, &filename_by_id, depth);
+            }
+        }
+    }
+
     tokio::fs::create_dir_all(out_dir).await?;
     for file in &planned {
         let mut path = out_dir.to_path_buf();
@@ -269,6 +317,16 @@ pub(crate) async fn run(pool: &SqlitePool, out_dir: &Path) -> Result<usize> {
         tokio::fs::write(&path, &file.content).await?;
     }
     Ok(planned.len())
+}
+
+/// Rewrite one planned file's `:/<id>` links to its depth-relative
+/// `_resources/` form.
+fn rewrite_export_content(
+    content: &str,
+    filename_by_id: &HashMap<String, String>,
+    depth: usize,
+) -> String {
+    crate::core::resources::rewrite_ids_to_relative(content, filename_by_id, depth)
 }
 
 #[cfg(test)]

@@ -12,9 +12,10 @@ Notas keeps all your notes in a single SQLite database on your machine — no ac
 - **Find & replace** — Ctrl+F, F3 for next match, Replace all
 - **Manual save** — Ctrl+S with a dirty indicator and save/discard prompts when switching notes
 - **Trash** — restore or permanently delete
-- **Import from Joplin** — import a full “Export all as Markdown” directory (with or without front matter): the notebook tree is recreated (existing same-name notebooks are merged), timestamps and tags are preserved, and re-importing updates notes by their Joplin id
-- **Export & backup** — Markdown export and one-click SQLite backup (`VACUUM INTO`)
-- **Sync (manual, optional)** — push/pull to any S3-compatible store or WebDAV server, with optional end-to-end encryption
+- **Attachments** — attach any file (toolbar 📎, drag-and-drop, paste images); images render as links that open locally, everything syncs end-to-end encrypted
+- **Import from Joplin** — import a full “Export all as Markdown” directory (with or without front matter): the notebook tree is recreated (existing same-name notebooks are merged), timestamps and tags are preserved, `_resources/` attachments are imported (id-prefixed names round-trip losslessly), and re-importing updates notes by their Joplin id
+- **Export & backup** — Joplin-compatible Markdown export (single `_resources/` dir, depth-relative links) and one-click SQLite backup (`VACUUM INTO`)
+- **Sync (manual, optional)** — push/pull to any S3-compatible store or WebDAV server, with optional end-to-end encryption (notes and attachments alike)
 - **Settings** — theme (follow system / light / dark, applied immediately), line-number gutter, status bar, sync backend & credentials
 - **Keyboard shortcuts** — Ctrl+N new note, Ctrl+S save, Ctrl+F find, Ctrl+Shift+F search notes, Ctrl+E preview, F3 next match, Ctrl+Q quit
 

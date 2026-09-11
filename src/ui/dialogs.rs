@@ -3,6 +3,7 @@
 use gtk::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
+use relm4::RelmWidgetExt;
 use relm4::Sender;
 
 use super::protocol::AppMsg;
@@ -115,4 +116,102 @@ pub(crate) fn input(
     });
     dialog.present();
     entry.grab_focus();
+}
+
+/// List one note's attachments with Open/Delete actions.
+///
+/// `items` carries `(uuid, filename, size)` triples already filtered to the
+/// ids the note references; opening resolves `resources_dir/<uuid>` to a
+/// `file://` URI and asks the desktop to open it. Deleting emits
+/// [`AppMsg::DeleteAttachment`] (row + blob go away, the editor link is
+/// cleaned by the event handler).
+#[expect(
+    deprecated,
+    reason = "gtk::Dialog is deprecated since 4.10; keep until adw::AlertDialog can host custom content"
+)]
+pub(crate) fn attachments(
+    window: &adw::ApplicationWindow,
+    sender: &AppSender,
+    resources_dir: &std::path::Path,
+    items: Vec<(String, String, i64)>,
+) {
+    let dialog = gtk::Dialog::with_buttons(
+        Some(tr!("Attachments")),
+        Some(window),
+        gtk::DialogFlags::MODAL,
+        &[(tr!("Close"), gtk::ResponseType::Close)],
+    );
+    let list = gtk::ListBox::new();
+    if items.is_empty() {
+        let row = gtk::ListBoxRow::new();
+        row.set_child(Some(&gtk::Label::new(Some(tr!(
+            "No attachments in this note"
+        )))));
+        list.append(&row);
+    }
+    for (uuid, filename, size) in items {
+        let row = gtk::ListBoxRow::new();
+        let hbox = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        hbox.set_margin_all(6);
+        let label = gtk::Label::new(None);
+        label.set_markup(&format!(
+            "<b>{}</b> <span alpha=\"55%\">({})</span>",
+            glib::markup_escape_text(&filename),
+            human_size(size)
+        ));
+        label.set_halign(gtk::Align::Start);
+        label.set_hexpand(true);
+        hbox.append(&label);
+        let open_btn = gtk::Button::with_label(tr!("Open"));
+        {
+            let dir = resources_dir.to_path_buf();
+            let uuid = uuid.clone();
+            open_btn.connect_clicked(move |_| {
+                let path = dir.join(&uuid);
+                let uri = gtk::gio::File::for_path(&path).uri();
+                let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                    &uri,
+                    None::<&gtk::gio::AppLaunchContext>,
+                );
+            });
+        }
+        hbox.append(&open_btn);
+        let del_btn = gtk::Button::with_label(tr!("Delete"));
+        {
+            let sender = sender.clone();
+            del_btn.connect_clicked(move |_| {
+                let _ = sender.send(AppMsg::DeleteAttachment(uuid.clone()));
+            });
+        }
+        hbox.append(&del_btn);
+        row.set_child(Some(&hbox));
+        list.append(&row);
+    }
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_min_content_height(200);
+    scroll.set_min_content_width(420);
+    scroll.set_child(Some(&list));
+    dialog.content_area().append(&scroll);
+    let sender = sender.clone();
+    dialog.connect_response(move |dialog, _| {
+        dialog.close();
+        let _ = &sender;
+    });
+    dialog.present();
+}
+
+/// Human-readable byte count for the attachments dialog.
+fn human_size(size: i64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
+    let mut value = size.max(0) as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", size.max(0), UNITS[0])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }

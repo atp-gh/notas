@@ -1,6 +1,6 @@
 //! Events emitted by core services.
 
-use crate::core::model::{Note, NoteId, Notebook, SearchHit, Tag, TagCount};
+use crate::core::model::{Note, NoteId, Notebook, Resource, SearchHit, Tag, TagCount};
 use crate::core::repository::import::{ImportPreview, ImportStats};
 use crate::core::sync::SyncStats;
 
@@ -32,5 +32,8 @@ pub enum DbEvent {
     BackupDone(Result<(), String>),
     SyncDone(SyncStats),
     SyncFailed(String),
+    AttachmentAdded(Result<Resource, String>),
+    AttachmentDeleted(Result<String, String>),
+    AttachmentsListed(Vec<Resource>),
     Error(String),
 }

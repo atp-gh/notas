@@ -23,7 +23,10 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::model::{LocalNote, RemoteEntry, Sidecar, SyncAction, SyncUuid};
+use super::model::{
+    LocalNote, LocalResource, RemoteEntry, RemoteResourceEntry, ResourceAction, Sidecar,
+    SyncAction, SyncUuid,
+};
 
 /// FNV-1a 64-bit hash of the markdown content, hex-encoded. Used only for
 /// change detection (equal timestamps, different body); deliberately not
@@ -42,6 +45,27 @@ use super::model::{LocalNote, RemoteEntry, Sidecar, SyncAction, SyncUuid};
 pub fn content_hash(content: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in content.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// FNV-1a 64-bit hash of raw bytes, hex-encoded. Change detection for
+/// attachment blobs; deliberately not cryptographic.
+///
+/// # Examples
+///
+/// ```
+/// use notas::core::sync::bytes_hash;
+///
+/// assert_eq!(bytes_hash(b"hello"), bytes_hash(b"hello"));
+/// assert_ne!(bytes_hash(b"a"), bytes_hash(b"b"));
+/// ```
+#[must_use]
+pub fn bytes_hash(bytes: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -241,9 +265,98 @@ pub fn plan_sync(
     actions
 }
 
+/// Compare local attachments against the remote store and decide every
+/// action needed to converge them. Call only after note sync converged: the
+/// local reference set then equals the global one, so an unreferenced uuid
+/// is truly orphaned on every device (conservative GC, no tombstones).
+///
+/// - `local` — every attachment row with its content hash.
+/// - `remote` — what the store holds, keyed by uuid.
+/// - `referenced` — uuids named by any local note body (`:/<id>`), trashed
+///   notes included.
+///
+/// Rules: unreferenced local rows delete locally (plus remotely when a copy
+/// exists); unreferenced remote-only blobs delete remotely; referenced pairs
+/// with differing hashes converge by newer `updated_at` (ties upload);
+/// referenced locals with no remote counterpart upload; referenced remotes
+/// with no local counterpart download (when the blob exists).
+#[must_use]
+pub fn plan_resources(
+    local: &[LocalResource],
+    remote: &BTreeMap<SyncUuid, RemoteResourceEntry>,
+    referenced: &std::collections::HashSet<String>,
+) -> Vec<ResourceAction> {
+    use std::collections::{HashMap, HashSet};
+    let local_by_uuid: HashMap<&SyncUuid, &LocalResource> =
+        local.iter().map(|r| (&r.uuid, r)).collect();
+    let mut actions = Vec::new();
+
+    for res in local {
+        let is_ref = referenced.contains(res.uuid.as_str());
+        let entry = remote.get(&res.uuid);
+        if !is_ref {
+            actions.push(ResourceAction::DeleteLocal {
+                uuid: res.uuid.clone(),
+            });
+            if entry.is_some_and(|e| e.meta.is_some() || e.has_blob) {
+                actions.push(ResourceAction::DeleteRemote {
+                    uuid: res.uuid.clone(),
+                });
+            }
+            continue;
+        }
+        match entry {
+            None => actions.push(ResourceAction::Upload {
+                resource: res.clone(),
+            }),
+            Some(e) => match &e.meta {
+                None => actions.push(ResourceAction::Upload {
+                    resource: res.clone(),
+                }),
+                Some(meta) => {
+                    if meta.hash != res.hash {
+                        if meta.updated_at.as_str() > res.updated_at.as_str() {
+                            if e.has_blob {
+                                actions.push(ResourceAction::Download { meta: meta.clone() });
+                            } else {
+                                // Remote newer but blob missing: keep local.
+                            }
+                        } else {
+                            actions.push(ResourceAction::Upload {
+                                resource: res.clone(),
+                            });
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    // Remote-only: download when still referenced and the blob exists,
+    // otherwise garbage-collect the orphan.
+    let local_uuids: HashSet<&SyncUuid> = local_by_uuid.keys().copied().collect();
+    for (uuid, entry) in remote {
+        if local_uuids.contains(uuid) {
+            continue;
+        }
+        if referenced.contains(uuid.as_str()) {
+            if let Some(meta) = &entry.meta
+                && entry.has_blob
+            {
+                actions.push(ResourceAction::Download { meta: meta.clone() });
+            }
+        } else if entry.meta.is_some() || entry.has_blob {
+            actions.push(ResourceAction::DeleteRemote { uuid: uuid.clone() });
+        }
+    }
+
+    actions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::sync::ResourceMeta;
 
     fn note(uuid: &str, title: &str, content: &str, updated_at: &str) -> LocalNote {
         LocalNote {
@@ -546,6 +659,126 @@ mod tests {
             vec![SyncAction::Download {
                 sidecar: remote[&SyncUuid::new("u1")].sidecar.clone().unwrap()
             }]
+        );
+    }
+
+    // ------------------------------------------------- resource planning
+
+    fn resource(uuid: &str, hash: &str, updated_at: &str) -> LocalResource {
+        LocalResource {
+            uuid: uuid.into(),
+            filename: "f.bin".into(),
+            mime: "application/octet-stream".into(),
+            size: 3,
+            hash: hash.into(),
+            updated_at: updated_at.into(),
+        }
+    }
+
+    fn resource_meta(uuid: &str, hash: &str, updated_at: &str) -> ResourceMeta {
+        ResourceMeta {
+            uuid: uuid.into(),
+            filename: "f.bin".into(),
+            mime: "application/octet-stream".into(),
+            size: 3,
+            hash: hash.into(),
+            updated_at: updated_at.into(),
+        }
+    }
+
+    fn remote_resource(meta: Option<ResourceMeta>, has_blob: bool) -> RemoteResourceEntry {
+        RemoteResourceEntry { meta, has_blob }
+    }
+
+    #[test]
+    fn referenced_local_without_remote_uploads() {
+        let local = [resource("r1", "aa", "2026-01-01 10:00:00")];
+        let refs = ["r1".to_string()].into_iter().collect();
+        assert_eq!(
+            plan_resources(&local, &BTreeMap::new(), &refs),
+            vec![ResourceAction::Upload {
+                resource: local[0].clone()
+            }]
+        );
+    }
+
+    #[test]
+    fn identical_resource_pair_is_a_noop() {
+        let local = [resource("r1", "aa", "2026-01-01 10:00:00")];
+        let mut remote = BTreeMap::new();
+        remote.insert(
+            SyncUuid::new("r1"),
+            remote_resource(Some(resource_meta("r1", "aa", "2026-01-01 10:00:00")), true),
+        );
+        let refs = ["r1".to_string()].into_iter().collect();
+        assert!(plan_resources(&local, &remote, &refs).is_empty());
+    }
+
+    #[test]
+    fn newer_side_wins_on_hash_mismatch() {
+        // Remote newer → download.
+        let local = [resource("r1", "aa", "2026-01-01 10:00:00")];
+        let mut remote = BTreeMap::new();
+        let meta = resource_meta("r1", "bb", "2026-01-02 10:00:00");
+        remote.insert(
+            SyncUuid::new("r1"),
+            remote_resource(Some(meta.clone()), true),
+        );
+        let refs = ["r1".to_string()].into_iter().collect();
+        assert_eq!(
+            plan_resources(&local, &remote, &refs),
+            vec![ResourceAction::Download { meta }]
+        );
+        // Local newer → upload.
+        let local = [resource("r1", "bb", "2026-01-03 10:00:00")];
+        let mut remote = BTreeMap::new();
+        remote.insert(
+            SyncUuid::new("r1"),
+            remote_resource(Some(resource_meta("r1", "aa", "2026-01-01 10:00:00")), true),
+        );
+        assert_eq!(
+            plan_resources(&local, &remote, &refs),
+            vec![ResourceAction::Upload {
+                resource: local[0].clone()
+            }]
+        );
+    }
+
+    #[test]
+    fn unreferenced_uuids_are_garbage_collected_both_sides() {
+        let local = [resource("r1", "aa", "2026-01-01 10:00:00")];
+        let mut remote = BTreeMap::new();
+        remote.insert(
+            SyncUuid::new("r1"),
+            remote_resource(Some(resource_meta("r1", "aa", "2026-01-01 10:00:00")), true),
+        );
+        remote.insert(
+            SyncUuid::new("r2"),
+            remote_resource(Some(resource_meta("r2", "bb", "2026-01-01 10:00:00")), true),
+        );
+        let refs = std::collections::HashSet::new();
+        assert_eq!(
+            plan_resources(&local, &remote, &refs),
+            vec![
+                ResourceAction::DeleteLocal { uuid: "r1".into() },
+                ResourceAction::DeleteRemote { uuid: "r1".into() },
+                ResourceAction::DeleteRemote { uuid: "r2".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn referenced_remote_without_local_downloads() {
+        let meta = resource_meta("r9", "cc", "2026-01-01 10:00:00");
+        let mut remote = BTreeMap::new();
+        remote.insert(
+            SyncUuid::new("r9"),
+            remote_resource(Some(meta.clone()), true),
+        );
+        let refs = ["r9".to_string()].into_iter().collect();
+        assert_eq!(
+            plan_resources(&[], &remote, &refs),
+            vec![ResourceAction::Download { meta }]
         );
     }
 }

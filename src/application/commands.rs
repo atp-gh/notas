@@ -74,6 +74,17 @@ pub enum DbCommand {
     ImportMarkdown(PathBuf),
     Backup(PathBuf),
     SyncNow(Box<SyncSettings>),
+    AttachFile {
+        source: PathBuf,
+    },
+    AttachBytes {
+        filename: String,
+        bytes: Vec<u8>,
+    },
+    ListAttachments,
+    DeleteAttachment {
+        uuid: String,
+    },
 }
 
 /// Editor pane layout: source-only, side-by-side live split, or
@@ -120,9 +131,15 @@ pub enum AppCommand {
         parent: Option<NotebookId>,
         name: String,
     },
-    RenameNotebook { id: NotebookId, name: String },
+    RenameNotebook {
+        id: NotebookId,
+        name: String,
+    },
     DeleteNotebook(NotebookId),
-    RenameTag { id: TagId, name: String },
+    RenameTag {
+        id: TagId,
+        name: String,
+    },
     DeleteTag(TagId),
     TrashNote,
     TrashNoteById(NoteId),
@@ -156,6 +173,14 @@ pub enum AppCommand {
     ImportConfirmed,
     BackupNow,
     BackupTo(PathBuf),
+    AttachFile,
+    AttachFileSelected(PathBuf),
+    AttachBytesSelected {
+        filename: String,
+        bytes: Vec<u8>,
+    },
+    AttachmentsOpen,
+    DeleteAttachment(String),
     DialogSave,
     DialogDiscard,
     DialogCancel,

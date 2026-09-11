@@ -43,36 +43,48 @@ src/
 │   │   ├── schema.rs # Canonical idempotent DDL (SCHEMA_SQL): tables, unique indexes,
 │   │   │             #   FTS5 virtual table + keep-in-sync triggers, version table.
 │   │   └── migrations.rs # Ordered, transactional, idempotent upgrades (v0 -> v1 adds
-│   │                     #   notes.uuid) + version bookkeeping + post-migration indexes.
+│   │                     #   notes.uuid, v1 -> v2 notebook trash, v2 -> v3 resources)
+│   │                     #   + version bookkeeping + post-migration indexes.
+│   ├── resources.rs  # Pure attachment domain (no I/O/SQL): id validation, 100 MiB cap,
+│   │                 #   `:/<id>` scan/rewrite both directions, `<id>-<name>` export
+│   │                 #   mapping, MIME guesses, resources-dir path helpers.
 │   ├── repository/   # Every SQLite read/write behind one concrete Repository struct
 │   │                 #   (no trait: exactly one storage engine exists today).
 │   │   ├── mod.rs    # Repository facade over SqlitePool; declares the shared transaction
 │   │   │             #   boundaries (remote-note apply, tag replacement, delete+tombstone).
 │   │   ├── notes.rs  # Note CRUD, trash/restore, delete-forever (writes a sync tombstone),
 │   │   │             #   list queries; rows_affected -> typed NotFound helper.
+│   │   ├── resources.rs # Attachment rows + blob files (`<data_dir>/resources/<uuid>`),
+│   │   │             #   reference scan (trashed notes count), idempotent remove.
 │   │   ├── notebooks.rs # Notebook CRUD under the unique (parent,name) constraint; name
 │   │   │                #   validation; UNIQUE-violation -> NotebookNameExists mapping.
 │   │   ├── tags.rs   # Tag list with counts, per-note tags, set-replace (creates tags on
 │   │   │             #   demand; shared by the UI and the remote-apply path), rename/delete.
 │   │   ├── sync_state.rs # Sync persistence: uuid assignment, local sync index (notebook
-│   │   │             #   paths + tags), tombstone list, notebook-path resolve-or-create,
-│   │   │             #   apply_remote_note, conflict copy, no-bump trash, last-sync time.
+│   │   │             #   paths + tags), resource metas + reference set, tombstone list,
+│   │   │             #   notebook-path resolve-or-create, apply_remote_note, conflict
+│   │   │             #   copy, no-bump trash, last-sync time.
 │   │   ├── search.rs # The FTS5 SELECT itself; builds its MATCH string via core::search.
 │   │   ├── export.rs # Pure planning (plan/sanitize_component/yaml_scalar/frontmatter,
-│   │   │             #   per-directory collision counts) + the filesystem writer run().
+│   │   │             #   per-directory collision counts) + the filesystem writer run():
+│   │   │             #   notes plus a single `_resources/` dir with depth-relative links.
 │   │   ├── import.rs # Markdown import (Joplin export layout): hand-rolled front-matter
-│   │   │             #   parser, tree walker, in-Rust ISO-8601 → SQLite timestamp
+│   │   │             #   parser, tree walker (incl. `_resources/` blobs with `<id>-`
+│   │   │             #   prefix preservation), in-Rust ISO-8601 → SQLite timestamp
 │   │   │             #   conversion, transactional upsert runner (notebook merge, uuid
 │   │   │             #   update-on-reimport, skip-and-count unreadable files).
 │   │   └── backup.rs # VACUUM INTO snapshot; path embedded (cannot bind) after escaping.
 │   ├── search.rs     # Pure FTS5 MATCH escaping (fts_query): user input -> safe phrase
 │   │                 #   query. Exhaustively unit-tested; no I/O.
 │   └── sync/         # Pure conflict/deletion domain; no database, network or time calls.
-│       ├── mod.rs    # Re-exports the planner vocabulary + content_hash.
+│       ├── mod.rs    # Re-exports the planner vocabulary + content_hash/bytes_hash.
 │       ├── model.rs  # Value types: SyncUuid, Sidecar (+ validated() invariants), LocalNote,
-│       │             #   RemoteEntry, SyncAction, SyncStats, normalize_tags.
+│       │             #   RemoteEntry, SyncAction, SyncStats, ResourceMeta, LocalResource,
+│       │             #   RemoteResourceEntry, ResourceAction, normalize_tags.
 │       └── planner.rs # plan_sync(): deterministic last-write-wins / conflict-copy /
-│                      #   tombstone decisions + content_hash. The executor executes them.
+│                      #   tombstone decisions + content_hash; plan_resources(): referenced
+│                      #   upload/download + conservative orphan GC (no tombstones).
+│                      #   The executor executes both.
 │
 ├── application/      # ── GUI-neutral application protocol (library) ────────────────
 │   │                 # Depends on core only. No GTK, no SQL, no remote-protocol details.
@@ -100,7 +112,9 @@ src/
 │   │                 #   Argon2id key derivation, wrong-password check.
 │   └── executor.rs   # S3 + WebDAV backends behind the private SyncStore trait (Send+Sync);
 │                     #   shared run loop: resolve cipher -> list both indexes -> plan_sync
-│                     #   -> execute actions -> record timestamp. Wiremock WebDAV tests.
+│                     #   -> execute actions -> sync_resources (list blobs -> plan_resources
+│                     #   -> upload/download/GC, same cipher) -> record timestamp.
+│                     #   Wiremock WebDAV tests (incl. encrypted attachments).
 │
 └── GUI (binary only, behind the `gui` feature; consumes core/application results, never
     touches SQLite or the network directly):

@@ -62,7 +62,12 @@ fn main() -> ExitCode {
     // Resolve platform paths once during startup; platform-specific services
     // can be injected into core without exposing GTK or OS environment APIs.
     let settings = Settings::load_from(platform_paths.config_dir.join("settings.json"));
+    let resources_dir = platform_paths.data_dir.join("resources");
     let relm_app = RelmApp::new("io.github.notas.Notas");
-    relm_app.run::<App>(AppInit { pool, settings });
+    relm_app.run::<App>(AppInit {
+        pool,
+        settings,
+        resources_dir,
+    });
     ExitCode::SUCCESS
 }

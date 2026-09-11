@@ -13,32 +13,45 @@ use crate::core::repository::Repository;
 use relm4::Worker;
 use relm4::prelude::*;
 use sqlx::SqlitePool;
+use std::path::PathBuf;
 
 pub struct DbWorker {
     repo: Repository,
+    resources_dir: PathBuf,
+}
+
+/// Worker init: the DB pool plus the `<data_dir>/resources` directory that
+/// holds attachment blobs (the filename is the resource uuid).
+pub struct DbWorkerInit {
+    /// Shared SQLite pool.
+    pub pool: SqlitePool,
+    /// Attachment blob directory.
+    pub resources_dir: PathBuf,
 }
 
 impl Worker for DbWorker {
-    type Init = SqlitePool;
+    type Init = DbWorkerInit;
     type Input = DbMsg;
     type Output = DbEvent;
 
     fn init(init: Self::Init, _sender: ComponentSender<Self>) -> Self {
         Self {
-            repo: Repository::new(init),
+            repo: Repository::new(init.pool),
+            resources_dir: init.resources_dir,
         }
     }
 
     fn update(&mut self, message: Self::Input, sender: ComponentSender<Self>) {
         let repo = self.repo.clone();
+        let resources_dir = self.resources_dir.clone();
         relm4::spawn(async move {
-            let event = handle(repo, message).await;
+            let event = handle(repo, resources_dir, message).await;
             let _ = sender.output(event);
         });
     }
 }
 
-async fn handle(repo: Repository, msg: DbMsg) -> DbEvent {
+async fn handle(repo: Repository, resources_dir: PathBuf, msg: DbMsg) -> DbEvent {
     let result: crate::core::error::Result<DbEvent> = match msg {
         DbMsg::LoadNotebooks => repo.list_notebooks().await.map(DbEvent::Notebooks),
         DbMsg::LoadTags => repo.list_tags().await.map(DbEvent::Tags),
@@ -113,26 +126,74 @@ async fn handle(repo: Repository, msg: DbMsg) -> DbEvent {
             .map(|_| DbEvent::NoteSaved { id: note_id }),
         DbMsg::LoadNoteTags(id) => repo.get_note_tags(id).await.map(DbEvent::NoteTags),
         DbMsg::Search(query) => repo.search(&query).await.map(DbEvent::SearchResults),
-        DbMsg::ExportMarkdown(dir) => match repo.export_markdown(&dir).await {
-            Ok(n) => Ok(DbEvent::ExportDone(Ok(n))),
-            Err(e) => Ok(DbEvent::ExportDone(Err(format!("{e:#}")))),
-        },
+        DbMsg::ExportMarkdown(dir) => {
+            match repo
+                .export_markdown_with_resources(&dir, &resources_dir)
+                .await
+            {
+                Ok(n) => Ok(DbEvent::ExportDone(Ok(n))),
+                Err(e) => Ok(DbEvent::ExportDone(Err(format!("{e:#}")))),
+            }
+        }
         DbMsg::ImportScan(dir) => match repo.import_preview(&dir).await {
             Ok(preview) => Ok(DbEvent::ImportScanDone(Ok(preview))),
             Err(e) => Ok(DbEvent::ImportScanDone(Err(format!("{e:#}")))),
         },
-        DbMsg::ImportMarkdown(dir) => match repo.import_markdown(&dir).await {
-            Ok(stats) => Ok(DbEvent::ImportDone(Ok(stats))),
-            Err(e) => Ok(DbEvent::ImportDone(Err(format!("{e:#}")))),
-        },
+        DbMsg::ImportMarkdown(dir) => {
+            match repo
+                .import_markdown_with_resources(&dir, &resources_dir)
+                .await
+            {
+                Ok(stats) => Ok(DbEvent::ImportDone(Ok(stats))),
+                Err(e) => Ok(DbEvent::ImportDone(Err(format!("{e:#}")))),
+            }
+        }
         DbMsg::Backup(dest) => match repo.backup(&dest).await {
             Ok(()) => Ok(DbEvent::BackupDone(Ok(()))),
             Err(e) => Ok(DbEvent::BackupDone(Err(format!("{e:#}")))),
         },
         DbMsg::SyncNow(settings) => {
-            match crate::sync::executor::run_sync(&repo, settings.as_ref()).await {
+            match crate::sync::executor::run_sync_with_resources(
+                &repo,
+                settings.as_ref(),
+                &resources_dir,
+            )
+            .await
+            {
                 Ok(stats) => Ok(DbEvent::SyncDone(stats)),
                 Err(e) => Ok(DbEvent::SyncFailed(e.to_string())),
+            }
+        }
+        DbMsg::AttachFile { source } => {
+            let filename = source
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "file".to_string());
+            match repo
+                .add_resource_file(&resources_dir, &source, &filename)
+                .await
+            {
+                Ok(res) => Ok(DbEvent::AttachmentAdded(Ok(res))),
+                Err(e) => Ok(DbEvent::AttachmentAdded(Err(format!("{e:#}")))),
+            }
+        }
+        DbMsg::AttachBytes { filename, bytes } => {
+            match repo
+                .add_resource_bytes(&resources_dir, &bytes, &filename)
+                .await
+            {
+                Ok(res) => Ok(DbEvent::AttachmentAdded(Ok(res))),
+                Err(e) => Ok(DbEvent::AttachmentAdded(Err(format!("{e:#}")))),
+            }
+        }
+        DbMsg::ListAttachments => match repo.list_resources().await {
+            Ok(items) => Ok(DbEvent::AttachmentsListed(items)),
+            Err(e) => Ok(DbEvent::Error(format!("{e:#}"))),
+        },
+        DbMsg::DeleteAttachment { uuid } => {
+            match repo.delete_resource(&resources_dir, &uuid).await {
+                Ok(()) => Ok(DbEvent::AttachmentDeleted(Ok(uuid))),
+                Err(e) => Ok(DbEvent::AttachmentDeleted(Err(format!("{e:#}")))),
             }
         }
     };

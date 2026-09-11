@@ -394,6 +394,43 @@ impl App {
             AppMsg::BackupTo(path) => {
                 self.worker.emit(DbMsg::Backup(path));
             }
+            AppMsg::AttachFile => {
+                if self.current_note.is_none() {
+                    self.widgets
+                        .status_label
+                        .set_text(tr!("Open a note before attaching a file"));
+                    return;
+                }
+                let dialog = gtk::FileDialog::new();
+                dialog.set_title(tr!("Attach a file"));
+                let s = app_sender.clone();
+                dialog.open(
+                    Some(&self.widgets.window),
+                    None::<&gtk::gio::Cancellable>,
+                    move |result| {
+                        if let Ok(file) = result
+                            && let Some(path) = file.path()
+                        {
+                            let _ = s.send(AppMsg::AttachFileSelected(path));
+                        }
+                    },
+                );
+            }
+            AppMsg::AttachFileSelected(path) => {
+                self.worker.emit(DbMsg::AttachFile { source: path });
+            }
+            AppMsg::AttachBytesSelected { filename, bytes } => {
+                if self.current_note.is_none() {
+                    return;
+                }
+                self.worker.emit(DbMsg::AttachBytes { filename, bytes });
+            }
+            AppMsg::AttachmentsOpen => {
+                self.worker.emit(DbMsg::ListAttachments);
+            }
+            AppMsg::DeleteAttachment(uuid) => {
+                self.worker.emit(DbMsg::DeleteAttachment { uuid });
+            }
             AppMsg::OpenSettings => {
                 // Rebuild from the current settings so the dialog always
                 // reflects the latest values, including the last sync time
@@ -649,11 +686,13 @@ impl App {
             DbEvent::ImportScanDone(result) => match result {
                 Ok(preview) => {
                     let body = format!(
-                        "{} {} and {} {} will be imported. Existing notebooks with the same name will be merged.",
+                        "{} {} and {} {} will be imported ({} {}). Existing notebooks with the same name will be merged.",
                         preview.notebooks,
                         tr!("notebooks"),
                         preview.notes,
-                        tr!("notes")
+                        tr!("notes"),
+                        preview.resources,
+                        tr!("attachments")
                     );
                     dialogs::confirm_action(
                         &self.widgets.window,
@@ -675,6 +714,20 @@ impl App {
                     if stats.notes_skipped > 0 {
                         parts.push(format!("{} {}", stats.notes_skipped, tr!("skipped")));
                     }
+                    if stats.resources_imported > 0 {
+                        parts.push(format!(
+                            "{} {}",
+                            stats.resources_imported,
+                            tr!("attachments")
+                        ));
+                    }
+                    if stats.resources_skipped > 0 {
+                        parts.push(format!(
+                            "{} {}",
+                            stats.resources_skipped,
+                            tr!("attachments skipped")
+                        ));
+                    }
                     self.widgets.status_label.set_text(&parts.join(", "));
                     self.worker.emit(DbMsg::LoadNotebooks);
                     self.worker.emit(DbMsg::LoadTags);
@@ -688,6 +741,56 @@ impl App {
                 }
                 Err(e) => dialogs::error(&self.widgets.window, &e),
             },
+            DbEvent::AttachmentAdded(result) => match result {
+                Ok(res) => {
+                    // Insert a Joplin-style reference at the cursor: images
+                    // inline, other files as links. The buffer `changed`
+                    // signal marks the note dirty and re-renders.
+                    let link = if crate::core::resources::is_image_mime(&res.mime) {
+                        format!("![{}](:/{})", res.filename, res.uuid)
+                    } else {
+                        format!("[{}](:/{})", res.filename, res.uuid)
+                    };
+                    self.widgets.editor.source_buffer.insert_at_cursor(&link);
+                    self.widgets.status_label.set_text(&format!(
+                        "{} {}",
+                        tr!("Attached"),
+                        res.filename
+                    ));
+                }
+                Err(e) => dialogs::error(&self.widgets.window, &e),
+            },
+            DbEvent::AttachmentDeleted(result) => match result {
+                Ok(uuid) => {
+                    // Drop the reference from the open note (the blob/row are
+                    // already gone); orphan GC covers every other note.
+                    let body = self.current_content();
+                    let needle = format!(":/{uuid}");
+                    if body.contains(&needle) {
+                        let cleaned = remove_resource_links(&body, &uuid);
+                        self.widgets.editor.source_buffer.set_text(&cleaned);
+                        self.handle(AppMsg::ContentChanged, app_sender);
+                    }
+                    self.widgets
+                        .status_label
+                        .set_text(tr!("Attachment removed"));
+                }
+                Err(e) => dialogs::error(&self.widgets.window, &e),
+            },
+            DbEvent::AttachmentsListed(items) => {
+                // Only the current note's references, newest first already.
+                let body = self.current_content();
+                let ids: std::collections::HashSet<String> =
+                    crate::core::resources::extract_resource_ids(&body)
+                        .into_iter()
+                        .collect();
+                let shown: Vec<(String, String, i64)> = items
+                    .into_iter()
+                    .filter(|r| ids.contains(&r.uuid))
+                    .map(|r| (r.uuid, r.filename, r.size))
+                    .collect();
+                dialogs::attachments(&self.widgets.window, app_sender, &self.resources_dir, shown);
+            }
             DbEvent::SyncDone(stats) => {
                 self.settings
                     .sync
@@ -709,6 +812,13 @@ impl App {
                 }
                 if stats.conflicts > 0 {
                     parts.push(format!("{} {}", stats.conflicts, tr!("conflicts")));
+                }
+                if stats.resources_uploaded + stats.resources_downloaded > 0 {
+                    parts.push(format!(
+                        "{} {}",
+                        stats.resources_uploaded + stats.resources_downloaded,
+                        tr!("attachments")
+                    ));
                 }
                 let detail = if parts.is_empty() {
                     tr!("Nothing to sync").to_string()
@@ -733,4 +843,42 @@ impl App {
             DbEvent::Error(e) => dialogs::error(&self.widgets.window, &e),
         }
     }
+}
+
+/// Replace every Markdown link/image pointing at `:/<uuid>` with its plain
+/// link text (`![alt](:/id)` → `alt`, `[text](:/id "t")` → `text`). Used
+/// after an attachment is deleted so the note keeps readable text instead
+/// of a dead reference.
+fn remove_resource_links(body: &str, uuid: &str) -> String {
+    let needle = format!("](:/{uuid}");
+    let mut out = body.to_string();
+    while let Some(close_bracket) = out.find(&needle) {
+        // End of the destination: `)` or whitespace (titled link).
+        let rest = &out[close_bracket..];
+        let dest_end = rest
+            .find([')', '"', ' ', '\t', '\n', '\r'])
+            .map(|p| close_bracket + p)
+            .unwrap_or(out.len());
+        // Matching `[` before the `]` (and an optional `!` for images).
+        let Some(open_bracket) = out[..close_bracket].rfind('[') else {
+            break;
+        };
+        let link_start = if open_bracket > 0 && out.as_bytes()[open_bracket - 1] == b'!' {
+            open_bracket - 1
+        } else {
+            open_bracket
+        };
+        // For titled links skip to the closing `)`.
+        let link_end = if out.as_bytes().get(dest_end) == Some(&b')') {
+            dest_end
+        } else {
+            match out[dest_end..].find(')') {
+                Some(p) => dest_end + p,
+                None => break,
+            }
+        };
+        let inner = out[open_bracket + 1..close_bracket].to_string();
+        out.replace_range(link_start..=link_end, &inner);
+    }
+    out
 }

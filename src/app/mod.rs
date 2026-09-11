@@ -67,6 +67,8 @@ pub struct App {
     pending_close: bool,
     /// Export directory waiting for the user to confirm the import.
     pending_import: Option<PathBuf>,
+    /// Attachment blob directory (`<data_dir>/resources`).
+    resources_dir: PathBuf,
     // CONTEXT: `Rc<Cell/RefCell>` (not `Arc<Mutex>`) — all of these are
     // touched only on GTK's single UI thread via widget closures, so
     // single-threaded interior mutability is sufficient and cheaper.
@@ -127,6 +129,8 @@ pub struct Widgets {
 pub struct AppInit {
     pub pool: SqlitePool,
     pub settings: Settings,
+    /// Attachment blob directory (`<data_dir>/resources`).
+    pub resources_dir: PathBuf,
 }
 
 impl SimpleComponent for App {
@@ -149,7 +153,11 @@ impl SimpleComponent for App {
         window: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let AppInit { pool, settings } = init;
+        let AppInit {
+            pool,
+            settings,
+            resources_dir,
+        } = init;
         let app_sender = sender.input_sender().clone();
 
         // Apply the persisted color scheme before anything reads the style
@@ -169,7 +177,10 @@ impl SimpleComponent for App {
         let clipboard: Rc<RefCell<Option<Clipboard>>> = Rc::new(RefCell::new(None));
 
         let worker: Controller<DbWorker> = relm4::ComponentBuilder::<DbWorker>::default()
-            .launch(pool)
+            .launch(crate::app::db_worker::DbWorkerInit {
+                pool,
+                resources_dir: resources_dir.clone(),
+            })
             .forward(&app_sender, AppMsg::Db);
 
         let emit = {
@@ -372,10 +383,55 @@ impl SimpleComponent for App {
         middle.append(&notes_empty);
 
         // ------------------------------------------------------------- editor
-        let editor = build_editor(emit.clone(), loading.clone());
+        let editor = build_editor(emit.clone(), loading.clone(), resources_dir.clone());
         editor
             .source_view
             .set_show_line_numbers(settings.editor.show_line_numbers);
+
+        // Attachments: drag-and-drop files onto the editor + paste clipboard
+        // images as new attachments. Both funnel into the worker, which
+        // replies with `AttachmentAdded` (the handler inserts the link).
+        {
+            let s = emit.clone();
+            let drop = gtk::DropTarget::new(
+                gtk::gdk::FileList::static_type(),
+                gtk::gdk::DragAction::COPY,
+            );
+            drop.connect_drop(move |_, value, _, _| {
+                let Ok(files) = value.get::<gtk::gdk::FileList>() else {
+                    return false;
+                };
+                let mut accepted = false;
+                for file in files.files() {
+                    if let Some(path) = file.path() {
+                        s(AppMsg::AttachFileSelected(path));
+                        accepted = true;
+                    }
+                }
+                accepted
+            });
+            editor.source_view.add_controller(drop);
+        }
+        {
+            let s = emit.clone();
+            editor.source_view.connect_paste_clipboard(move |view| {
+                let clipboard = view.clipboard();
+                let s = s.clone();
+                glib::spawn_future_local(async move {
+                    // Text pastes carry no texture: fall through to the
+                    // default handler, which already ran. Image pastes
+                    // insert nothing by default, so add an attachment.
+                    let Ok(Some(texture)) = clipboard.read_texture_future().await else {
+                        return;
+                    };
+                    let bytes = texture.save_to_png_bytes();
+                    s(AppMsg::AttachBytesSelected {
+                        filename: "pasted-image.png".to_string(),
+                        bytes: bytes.to_vec(),
+                    });
+                });
+            });
+        }
 
         let title_entry = gtk::Entry::new();
         title_entry.set_placeholder_text(Some(tr!("Title")));
@@ -476,6 +532,13 @@ impl SimpleComponent for App {
             trash_btn.connect_clicked(move |_| emit(AppMsg::TrashNote));
         }
 
+        let attach_btn = gtk::Button::from_icon_name(icons::ATTACH);
+        attach_btn.set_tooltip_text(Some(tr!("Attach a file to this note")));
+        {
+            let emit = emit.clone();
+            attach_btn.connect_clicked(move |_| emit(AppMsg::AttachFile));
+        }
+
         // Joplin-style tri-state switch: editor-only | live split |
         // preview-only. Three small icon buttons in a linked box; only
         // activating a button emits, so the handler just mirrors state back.
@@ -517,6 +580,7 @@ impl SimpleComponent for App {
 
         let import_btn = gtk::Button::with_label(tr!("Import Markdown…"));
         let export_btn = gtk::Button::with_label(tr!("Export Markdown…"));
+        let attachments_btn = gtk::Button::with_label(tr!("Attachments…"));
         let backup_btn = gtk::Button::with_label(tr!("Backup database…"));
         let sync_btn = gtk::Button::with_label(tr!("Sync now…"));
         let settings_btn = gtk::Button::with_label(tr!("Settings…"));
@@ -526,6 +590,8 @@ impl SimpleComponent for App {
             import_btn.connect_clicked(move |_| s(AppMsg::ImportMarkdown));
             let s = emit.clone();
             export_btn.connect_clicked(move |_| s(AppMsg::ExportMarkdown));
+            let s = emit.clone();
+            attachments_btn.connect_clicked(move |_| s(AppMsg::AttachmentsOpen));
             let s = emit.clone();
             backup_btn.connect_clicked(move |_| s(AppMsg::BackupNow));
             let s = emit.clone();
@@ -539,6 +605,7 @@ impl SimpleComponent for App {
         menu_box.set_margin_all(8);
         menu_box.append(&import_btn);
         menu_box.append(&export_btn);
+        menu_box.append(&attachments_btn);
         menu_box.append(&backup_btn);
         menu_box.append(&sync_btn);
         menu_box.append(&settings_btn);
@@ -553,6 +620,7 @@ impl SimpleComponent for App {
         let header = gtk::HeaderBar::new();
         header.pack_end(&menu_btn);
         header.pack_end(&mode_box);
+        header.pack_end(&attach_btn);
         header.pack_end(&trash_btn);
 
         // ------------------------------------------------------------- layout
@@ -693,6 +761,7 @@ impl SimpleComponent for App {
             pending_new_note: None,
             pending_close: false,
             pending_import: None,
+            resources_dir,
             row_ids,
             tag_ids,
             loading,

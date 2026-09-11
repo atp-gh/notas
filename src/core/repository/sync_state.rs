@@ -133,6 +133,32 @@ pub(crate) async fn list_tombstones(pool: &SqlitePool) -> Result<Vec<(SyncUuid, 
         .collect())
 }
 
+/// Build the local attachment index the resource planner needs: every
+/// resource row. Hashes are filled by the executor (which reads the blobs);
+/// this only supplies metadata with an empty hash placeholder.
+pub(crate) async fn local_resource_metas(
+    pool: &SqlitePool,
+) -> Result<Vec<(SyncUuid, String, String, i64, String)>> {
+    let rows = sqlx::query_as::<_, (String, String, String, i64, String)>(
+        "SELECT uuid, filename, mime, size, updated_at FROM resources ORDER BY updated_at",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(uuid, filename, mime, size, updated_at)| {
+            (SyncUuid::new(uuid), filename, mime, size, updated_at)
+        })
+        .collect())
+}
+
+/// Every `:/<id>` referenced by any local note (trashed included).
+pub(crate) async fn referenced_resource_ids(
+    pool: &SqlitePool,
+) -> Result<std::collections::HashSet<String>> {
+    crate::core::repository::resources::referenced_ids(pool).await
+}
+
 /// Resolve a notebook path (`"Parent/Child"`) to its leaf notebook id,
 /// creating the whole chain on demand. `None` resolves to `None` (unfiled).
 pub(crate) async fn find_or_create_notebook_path(

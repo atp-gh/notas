@@ -119,6 +119,25 @@ pub struct TagCount {
     pub note_count: i64,
 }
 
+/// An attachment blob (Joplin-style resource): global by uuid, shared by
+/// any number of notes through `:/<uuid>` Markdown links. The bytes live in
+/// `<data_dir>/resources/<uuid>`; this row carries the display metadata.
+#[derive(Debug, Clone, FromRow)]
+pub struct Resource {
+    /// Stable cross-device identity (32 hex chars).
+    pub uuid: String,
+    /// Original filename for display and export.
+    pub filename: String,
+    /// MIME hint for display/open decisions.
+    pub mime: String,
+    /// Byte size of the local blob.
+    pub size: i64,
+    /// Creation time, as stored by SQLite (`YYYY-MM-DD HH:MM:SS`, UTC).
+    pub created_at: String,
+    /// Last modification time, in the same format as `created_at`.
+    pub updated_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -385,6 +385,14 @@ impl Renderer {
                 self.link_url = Some(dest_url.into_string());
                 self.inline.push(Style::Link);
             }
+            // Images render as their alt text with the destination kept as
+            // a link: attachment references (`:/<id>`) stay clickable so
+            // the frontend can open the local blob, and web images degrade
+            // to a link instead of vanishing.
+            Tag::Image { dest_url, .. } => {
+                self.link_url = Some(dest_url.into_string());
+                self.inline.push(Style::Link);
+            }
             Tag::Table(alignments) => {
                 self.block_start();
                 self.table = Some(TableState {
@@ -449,7 +457,7 @@ impl Renderer {
             TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough => {
                 self.inline.pop();
             }
-            TagEnd::Link => {
+            TagEnd::Link | TagEnd::Image => {
                 self.inline.pop();
                 self.link_url = None;
             }
@@ -951,6 +959,35 @@ mod tests {
     #[test]
     fn mermaid_language_match_is_case_insensitive() {
         assert!(is_mermaid(Some("Mermaid")));
+    }
+
+    #[test]
+    fn image_and_attachment_links_keep_their_destination() {
+        // `![alt](:/id)` (image) and `[text](:/id)` (file) must both expose
+        // the destination so the preview can open the local blob.
+        for md in [
+            "![pic](:/abcdef0123456789abcdef0123456789)",
+            "[doc](:/abcdef0123456789abcdef0123456789)",
+            "[web](https://example.com)",
+        ] {
+            let spans = render(md).spans().to_vec();
+            let link = spans
+                .iter()
+                .find(|s| s.styles.contains(&Style::Link))
+                .unwrap_or_else(|| panic!("link span for {md}: {spans:?}"));
+            assert!(link.url.is_some(), "{md}: {spans:?}");
+        }
+        let spans = render("![pic](:/abcdef0123456789abcdef0123456789)")
+            .spans()
+            .to_vec();
+        assert_eq!(
+            spans
+                .iter()
+                .find(|s| s.styles.contains(&Style::Link))
+                .and_then(|s| s.url.clone())
+                .as_deref(),
+            Some(":/abcdef0123456789abcdef0123456789")
+        );
     }
 
     #[test]

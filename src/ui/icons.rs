@@ -41,6 +41,12 @@ pub const NEW_NOTE: &str = "document-new-symbolic";
 pub const SAVE: &str = "document-save-symbolic";
 /// Move-to-trash button in the header bar.
 pub const TRASH: &str = "user-trash-symbolic";
+/// Attach-file button in the header bar (paperclip).
+///
+/// `mail-attachment-symbolic` ships in both Adwaita and Papirus
+/// (`actions/`), unlike camera/scanner glyphs that only resolve via the
+/// legacy theme.
+pub const ATTACH: &str = "mail-attachment-symbolic";
 /// "Editor only" toggle in the header-bar mode switch.
 pub const MODE_SOURCE: &str = "document-edit-symbolic";
 /// "Split: editor + live preview" toggle in the header-bar mode switch.

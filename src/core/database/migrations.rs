@@ -52,6 +52,20 @@ const MIGRATIONS: &[Migration] = &[
               ON notebooks(COALESCE(parent_id, -1), name) WHERE is_trashed = 0;\n\
               CREATE INDEX IF NOT EXISTS idx_notebooks_trashed ON notebooks(is_trashed);",
     },
+    // v2 -> v3: attachments. Global resources table; no tombstones — orphaned
+    // uuids are garbage-collected by reference scan after sync convergence.
+    Migration {
+        version: 3,
+        description: "add resources table for Joplin-style attachments",
+        sql: "CREATE TABLE IF NOT EXISTS resources (\n\
+              uuid TEXT PRIMARY KEY,\n\
+              filename TEXT NOT NULL,\n\
+              mime TEXT NOT NULL DEFAULT '',\n\
+              size INTEGER NOT NULL DEFAULT 0,\n\
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),\n\
+              updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n\
+              );",
+    },
 ];
 
 /// Read the recorded schema version; databases without the version table
@@ -131,7 +145,7 @@ mod tests {
 
     /// Current schema version. Bump when adding a migration and append
     /// the matching step to [`MIGRATIONS`].
-    const SCHEMA_VERSION: i64 = 2;
+    const SCHEMA_VERSION: i64 = 3;
 
     #[test]
     fn migrations_are_ordered_and_versioned() {

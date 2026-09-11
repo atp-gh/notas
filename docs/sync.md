@@ -10,6 +10,15 @@ meta/<uuid>.json       — sidecar: title, notebook path, tags, trash state, upd
 meta/.encryption-verifier — plaintext metadata about the encryption (salt + password check), only present when encryption is enabled
 ```
 
+Attachments (Joplin-style resources) sync the same way, after the notes have converged. Each attachment is a blob plus a metadata object:
+
+```
+resources/<uuid>.bin  — the raw bytes
+resmeta/<uuid>.json   — filename, MIME hint, size, content hash, updated_at
+```
+
+Notes reference attachments with `![alt](:/<uuid>)` / `[name](:/<uuid>)` links. Resources are **shared**: copying a note reuses the same id without copying bytes, and a conflict copy reuses the ids too. Garbage collection is conservative — an attachment is deleted locally and remotely only when **no** note on the converged database references it (trashed notes count as referencing, so restoring never loses bytes). There are no resource tombstones: every device independently drops the same unreferenced ids, and a still-referenced upload simply resurrects the blob.
+
 ## Backends
 
 **S3-compatible object storage** — AWS S3, Cloudflare R2, Backblaze B2, MinIO, ... Configure the endpoint (empty = AWS), region, bucket, key prefix (default `notas/`), and an access key/secret. The bucket itself must exist already.
@@ -25,7 +34,7 @@ The settings dialog shows the fields of the selected backend; both backends' con
 
 ## Encryption
 
-With **Settings → Sync → Encryption → “Encrypt synced notes”** on, every uploaded object (bodies, sidecars, tombstones) is sealed with **XChaCha20-Poly1305** under a key derived from your password via **Argon2id**. The backend only ever stores ciphertext plus random UUIDs.
+With **Settings → Sync → Encryption → “Encrypt synced notes”** on, every uploaded object (bodies, sidecars, tombstones, **attachment blobs and their metadata**) is sealed with **XChaCha20-Poly1305** under a key derived from your password via **Argon2id**. The backend only ever stores ciphertext plus random UUIDs.
 
 - Enter the **same password on every device** that syncs: each device derives the same key from the same password and salt, so notes encrypted on one device decrypt on another. There is **no password recovery** — a lost password means the backend data is unreadable.
 - Enabling encryption **re-uploads everything**: the first sync after enabling writes every local note encrypted over its plaintext copy on the backend (and writes the verifier object). Enable it on a device that holds the notes you want to keep.
