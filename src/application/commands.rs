@@ -114,7 +114,12 @@ pub enum AppCommand {
     SelectNote(NoteId),
     SearchChanged(String),
     NewNote,
-    NewNotebook(String),
+    NewNoteAt(Option<NotebookId>),
+    PromptNewNotebook,
+    NewNotebook {
+        parent: Option<NotebookId>,
+        name: String,
+    },
     RenameNotebook { id: NotebookId, name: String },
     DeleteNotebook(NotebookId),
     RenameTag { id: TagId, name: String },

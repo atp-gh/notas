@@ -22,11 +22,7 @@ use crate::ui::{AppMsg, ViewMode};
 impl App {
     // ------------------------------------------------------------ actions
 
-    pub(super) fn create_note_now(&mut self) {
-        let notebook_id = match &self.mode {
-            ViewMode::Notebook(id) => Some(*id),
-            _ => None,
-        };
+    pub(super) fn create_note_at(&mut self, notebook_id: Option<NotebookId>) {
         self.worker.emit(DbMsg::CreateNote(notebook_id));
     }
 
@@ -56,9 +52,8 @@ impl App {
     pub(super) fn resolve_saved(&mut self) {
         if self.pending_close {
             self.finish_close();
-        } else if self.pending_new_note {
-            self.pending_new_note = false;
-            self.create_note_now();
+        } else if let Some(target) = self.pending_new_note.take() {
+            self.create_note_at(target);
         } else if let Some(id) = self.pending_open.take() {
             self.worker.emit(DbMsg::LoadNote(id));
         } else {

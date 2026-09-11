@@ -102,18 +102,51 @@ impl App {
                 self.update_trash_buttons();
             }
             AppMsg::NewNote => {
+                let target = match &self.mode {
+                    ViewMode::Notebook(id) => Some(*id),
+                    _ => None,
+                };
                 if self.dirty && self.current_note.is_some() {
-                    self.pending_new_note = true;
+                    self.pending_new_note = Some(target);
                     dialogs::unsaved(&self.widgets.window, app_sender);
                 } else {
-                    self.create_note_now();
+                    self.create_note_at(target);
                 }
             }
-            AppMsg::NewNotebook(name) => {
+            AppMsg::NewNoteAt(target) => {
+                if matches!(self.mode, ViewMode::Trash) {
+                    return;
+                }
+                if self.dirty && self.current_note.is_some() {
+                    self.pending_new_note = Some(target);
+                    dialogs::unsaved(&self.widgets.window, app_sender);
+                } else {
+                    self.create_note_at(target);
+                }
+            }
+            AppMsg::PromptNewNotebook => {
+                let parent = match &self.mode {
+                    ViewMode::Notebook(id) => Some(*id),
+                    _ => None,
+                };
+                let title = if parent.is_some() {
+                    tr!("New sub-notebook")
+                } else {
+                    tr!("New notebook")
+                };
+                dialogs::input(
+                    &self.widgets.window,
+                    app_sender,
+                    title,
+                    tr!("Notebook name…"),
+                    "",
+                    move |name| AppMsg::NewNotebook { parent, name },
+                );
+            }
+            AppMsg::NewNotebook { parent, name } => {
                 let name = name.trim().to_string();
                 if !name.is_empty() {
-                    self.worker
-                        .emit(DbMsg::CreateNotebook { parent: None, name });
+                    self.worker.emit(DbMsg::CreateNotebook { parent, name });
                 }
             }
             AppMsg::RenameNotebook { id, name } => {
@@ -486,16 +519,15 @@ impl App {
                 self.set_dirty(false);
                 if self.pending_close {
                     self.finish_close();
-                } else if self.pending_new_note {
-                    self.pending_new_note = false;
-                    self.create_note_now();
+                } else if let Some(target) = self.pending_new_note.take() {
+                    self.create_note_at(target);
                 } else if let Some(id) = self.pending_open.take() {
                     self.worker.emit(DbMsg::LoadNote(id));
                 }
             }
             AppMsg::DialogCancel => {
                 self.pending_open = None;
-                self.pending_new_note = false;
+                self.pending_new_note = None;
                 self.pending_close = false;
             }
             AppMsg::CloseRequested => {
@@ -555,9 +587,8 @@ impl App {
                     self.finish_close();
                     return;
                 }
-                if self.pending_new_note {
-                    self.pending_new_note = false;
-                    self.create_note_now();
+                if let Some(target) = self.pending_new_note.take() {
+                    self.create_note_at(target);
                     return;
                 }
                 if let Some(pending) = self.pending_open.take() {

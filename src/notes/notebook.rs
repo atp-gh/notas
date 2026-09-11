@@ -55,21 +55,16 @@ pub(crate) fn build_tree_pane(
     notebooks_label.add_css_class("heading");
 
     let new_notebook_button = gtk::Button::from_icon_name(icons::NEW_NOTEBOOK);
-    new_notebook_button.set_tooltip_text(Some(tr!("New notebook")));
+    new_notebook_button.set_tooltip_text(Some(tr!("New notebook (in the selected notebook, if any)")));
     new_notebook_button.set_halign(gtk::Align::End);
     new_notebook_button.set_valign(gtk::Align::Center);
     {
-        let window = window.clone();
         let sender = sender.clone();
         new_notebook_button.connect_clicked(move |_| {
-            dialogs::input(
-                &window,
-                &sender,
-                tr!("New notebook"),
-                tr!("Notebook name…"),
-                "",
-                AppMsg::NewNotebook,
-            );
+            // The app resolves the parent from the current selection:
+            // a selected notebook yields a nested child, otherwise a
+            // top-level notebook.
+            let _ = sender.send(AppMsg::PromptNewNotebook);
         });
     }
 
@@ -102,6 +97,10 @@ pub(crate) fn build_tree_pane(
     }
 
     let menu = gtk::Popover::new();
+    let new_note_button = gtk::Button::with_label(tr!("New note"));
+    new_note_button.set_halign(gtk::Align::Fill);
+    let new_notebook_button = gtk::Button::with_label(tr!("New sub-notebook…"));
+    new_notebook_button.set_halign(gtk::Align::Fill);
     let copy_button = gtk::Button::with_label(tr!("Copy"));
     copy_button.set_halign(gtk::Align::Fill);
     let cut_button = gtk::Button::with_label(tr!("Cut"));
@@ -113,6 +112,45 @@ pub(crate) fn build_tree_pane(
     let trash_button = gtk::Button::with_label(tr!("Move to trash"));
     trash_button.set_halign(gtk::Align::Fill);
     trash_button.add_css_class("destructive-action");
+    {
+        let sender = sender.clone();
+        let pending = pending.clone();
+        let menu = menu.clone();
+        new_note_button.connect_clicked(move |_| {
+            // `pending` holds -1 on the empty area (see the gesture
+            // below), which maps to the notebook root / unfiled.
+            let target = {
+                let id = pending.get();
+                (id >= 0).then_some(NotebookId(id))
+            };
+            let _ = sender.send(AppMsg::NewNoteAt(target));
+            menu.popdown();
+        });
+    }
+    {
+        let window = window.clone();
+        let pending = pending.clone();
+        let sender = sender.clone();
+        new_notebook_button.connect_clicked(move |_| {
+            let parent = {
+                let id = pending.get();
+                (id >= 0).then_some(NotebookId(id))
+            };
+            let title = if parent.is_some() {
+                tr!("New sub-notebook")
+            } else {
+                tr!("New notebook")
+            };
+            dialogs::input(
+                &window,
+                &sender,
+                title,
+                tr!("Notebook name…"),
+                "",
+                move |name| AppMsg::NewNotebook { parent, name },
+            );
+        });
+    }
     {
         let sender = sender.clone();
         let pending = pending.clone();
@@ -177,6 +215,8 @@ pub(crate) fn build_tree_pane(
     }
     let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
     menu_box.set_margin_all(8);
+    menu_box.append(&new_note_button);
+    menu_box.append(&new_notebook_button);
     menu_box.append(&copy_button);
     menu_box.append(&cut_button);
     menu_box.append(&paste_button);
@@ -220,7 +260,11 @@ pub(crate) fn build_tree_pane(
             {
                 let id: i64 = model.get_value(&iter, 0).get().unwrap_or(0);
                 pending.set(id);
-                // Row menu: everything visible; paste needs a buffered entry.
+                // Row menu: new note / sub-notebook target the row under
+                // the cursor; paste needs a buffered entry.
+                new_note_button.set_visible(true);
+                new_notebook_button.set_visible(true);
+                new_notebook_button.set_label(tr!("New sub-notebook…"));
                 for btn in [&copy_button, &cut_button, &rename_button, &trash_button] {
                     btn.set_visible(true);
                 }
@@ -228,8 +272,13 @@ pub(crate) fn build_tree_pane(
                 paste_button.set_sensitive(clipboard.borrow().is_some());
                 menu.popup();
             } else {
-                // Empty-area menu: paste-only, targeting the top level.
+                // Empty-area menu: creation targets the notebook root
+                // (unfiled notes / top-level notebooks); paste targets
+                // the top level as well.
                 pending.set(-1);
+                new_note_button.set_visible(true);
+                new_notebook_button.set_visible(true);
+                new_notebook_button.set_label(tr!("New notebook…"));
                 for btn in [&copy_button, &cut_button, &rename_button, &trash_button] {
                     btn.set_visible(false);
                 }

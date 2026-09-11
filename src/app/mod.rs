@@ -24,7 +24,7 @@ use relm4::{ComponentParts, ComponentSender, Controller, SimpleComponent};
 use sourceview5::prelude::*;
 use sqlx::SqlitePool;
 
-use notas::core::model::{Note, NoteId, Notebook, Tag, TagCount, TagId};
+use notas::core::model::{Note, NoteId, Notebook, NotebookId, Tag, TagCount, TagId};
 
 use crate::app::db_worker::DbWorker;
 use crate::application::DbMsg;
@@ -60,7 +60,10 @@ pub struct App {
     active_tag: Option<TagId>,
     selected_trashed: Option<NoteId>,
     pending_open: Option<NoteId>,
-    pending_new_note: bool,
+    /// A deferred note creation waiting for the unsaved-changes dialog.
+    /// `None` = nothing pending, `Some(target)` = create at `target`
+    /// (`None` target = notebook root / unfiled) once the dialog resolves.
+    pending_new_note: Option<Option<NotebookId>>,
     pending_close: bool,
     /// Export directory waiting for the user to confirm the import.
     pending_import: Option<PathBuf>,
@@ -687,7 +690,7 @@ impl SimpleComponent for App {
             active_tag: None,
             selected_trashed: None,
             pending_open: None,
-            pending_new_note: false,
+            pending_new_note: None,
             pending_close: false,
             pending_import: None,
             row_ids,
