@@ -301,9 +301,12 @@ pub fn apply_scheme(
 /// stay readable on any system theme. Returns `None` when the widget has
 /// no theme resolved yet (caller falls back to dark/light constants).
 fn theme_muted_fg(view: &gtk::TextView) -> Option<String> {
-    #[allow(deprecated)]
+    // CONTEXT: `style_context().lookup_color` is deprecated in gtk4 v4_22
+    // with no drop-in replacement for theme color lookup; keep until the
+    // GTK theme API migration lands.
+    #[expect(deprecated, reason = "no non-deprecated theme color lookup yet")]
     let fg = view.style_context().lookup_color("view_fg_color")?;
-    #[allow(deprecated)]
+    #[expect(deprecated, reason = "no non-deprecated theme color lookup yet")]
     let bg = view
         .style_context()
         .lookup_color("view_bg_color")
