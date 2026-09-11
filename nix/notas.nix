@@ -42,6 +42,20 @@ rustPlatform.buildRustPackage {
   # from the Adwaita ∩ Papirus intersection (see src/ui/icons.rs), so the
   # legacy theme is never needed — under either theme family every button
   # resolves without it.
+  #
+  # The themes must ALSO be on the wrapper's XDG_DATA_DIRS explicitly:
+  # wrapGAppsHook4 only prefixes the GSettings schemas and GTK paths on its
+  # own (see the generated wrapper). In particular the effective icon theme
+  # is often Adwaita itself — the GSettings default for
+  # org.gnome.desktop.interface icon-theme is 'Adwaita', which wins over
+  # gtk-4.0/settings.ini when dconf holds no user value (verified with
+  # GTK_DEBUG=icontheme: only Adwaita resources were scanned, Papirus never
+  # consulted). Without this prefix Adwaita resolves nowhere on NixOS and
+  # every symbolic button renders blank.
+  gappsWrapperArgs = [
+    "--prefix XDG_DATA_DIRS : ${adwaita-icon-theme}/share"
+    "--prefix XDG_DATA_DIRS : ${hicolor-icon-theme}/share"
+  ];
   buildInputs = [
     gtk4
     libadwaita
