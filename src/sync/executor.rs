@@ -509,6 +509,9 @@ async fn list_remote(
     }
 
     // The listing carries keys but not bodies, so fetch each sidecar.
+    // CONTEXT: snapshot the keys first — the loop inserts into `remote`,
+    // so iterating `remote.keys()` directly would borrow it mutably and
+    // immutably at once.
     let uuids: Vec<SyncUuid> = remote.keys().cloned().collect();
     for uuid in uuids {
         let output = match client
@@ -969,6 +972,9 @@ impl SyncStore for WebdavStore {
             remote.entry(uuid).or_default();
         }
 
+        // CONTEXT: snapshot the keys first — the loop inserts into
+        // `remote`, so iterating it directly would borrow it mutably and
+        // immutably at once.
         let uuids: Vec<SyncUuid> = remote.keys().cloned().collect();
         for uuid in uuids {
             match self.get_sidecar(cipher, &uuid).await {

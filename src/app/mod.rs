@@ -64,6 +64,9 @@ pub struct App {
     pending_close: bool,
     /// Export directory waiting for the user to confirm the import.
     pending_import: Option<PathBuf>,
+    // CONTEXT: `Rc<Cell/RefCell>` (not `Arc<Mutex>`) — all of these are
+    // touched only on GTK's single UI thread via widget closures, so
+    // single-threaded interior mutability is sufficient and cheaper.
     row_ids: Rc<RefCell<Vec<i64>>>,
     tag_ids: Rc<RefCell<Vec<i64>>>,
     loading: Rc<Cell<bool>>,
