@@ -9,7 +9,6 @@
   libadwaita,
   gtksourceview5,
   adwaita-icon-theme,
-  adwaita-icon-theme-legacy,
   hicolor-icon-theme,
   glib,
   gdk-pixbuf,
@@ -33,27 +32,21 @@ rustPlatform.buildRustPackage {
   # build time and enforce the crate's minimum versions (v4_22 / v1_9), so
   # the nixpkgs snapshot must carry recent-enough GTK. gdk-pixbuf and the
   # gsettings schemas are wrapped in for runtime by wrapGAppsHook4.
-  # adwaita-icon-theme is required at runtime: most in-app symbolic icons
-  # (document-new, view-dual, open-menu, ...) come from it, and
+  # adwaita-icon-theme is required at runtime: the in-app symbolic icons
+  # resolve from it when the user's theme falls back to Adwaita, and
   # wrapGAppsHook4 only exposes icon themes listed here via XDG_DATA_DIRS.
   # Without it the buttons render blank on NixOS, where there is no global
-  # /usr/share/icons to fall back to.
-  # adwaita-icon-theme-legacy is required too: nixpkgs' adwaita-icon-theme
-  # is NOT FDO-complete (upstream split the FDO/legacy set into a separate
-  # AdwaitaLegacy theme and nixpkgs patches out the inheritance), so
-  # category/legacy names only resolve when the legacy theme is also on
-  # XDG_DATA_DIRS. hicolor-icon-theme is the ultimate fallback all themes
-  # inherit, so it must be present as well.
-  # NOTE: this only helps when the user's icon theme falls back to Adwaita
-  # (e.g. gtk4 iconTheme = Adwaita). Themes like Papirus-Dark inherit
-  # breeze-dark/hicolor — never Adwaita — so icons missing in Papirus itself
-  # stay blank regardless of what the wrapper ships; see src/ui/icons.rs.
+  # /usr/share/icons to fall back to. hicolor-icon-theme is the ultimate
+  # fallback every theme inherits, so it must be present as well.
+  # Deliberately NO adwaita-icon-theme-legacy: the app only uses icon names
+  # from the Adwaita ∩ Papirus intersection (see src/ui/icons.rs), so the
+  # legacy theme is never needed — under either theme family every button
+  # resolves without it.
   buildInputs = [
     gtk4
     libadwaita
     gtksourceview5
     adwaita-icon-theme
-    adwaita-icon-theme-legacy
     glib
     gdk-pixbuf
     gsettings-desktop-schemas
