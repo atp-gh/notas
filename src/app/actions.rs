@@ -262,23 +262,6 @@ impl App {
 
             let chip = gtk::FlowBoxChild::new();
             chip.set_child(Some(&btn));
-            {
-                let pending = self.pending_tag.clone();
-                let menu = self.widgets.tag_menu.clone();
-                let chip_widget = chip.clone();
-                let tag_id = tag.id;
-                let gesture = gtk::GestureClick::new();
-                gesture.set_button(3);
-                gesture.connect_pressed(move |_g, _n, _x, _y| {
-                    pending.set(tag_id.0);
-                    // Unparent first: without this the second right-click
-                    // trips `gtk_widget_set_parent` (already has a parent).
-                    menu.unparent();
-                    menu.set_parent(&chip_widget);
-                    menu.present();
-                });
-                chip.add_controller(gesture);
-            }
             self.widgets.tag_flow.append(&chip);
         }
         drop(ids);

@@ -183,19 +183,35 @@ pub(crate) fn build_tree_pane(
     menu_box.append(&rename_button);
     menu_box.append(&trash_button);
     menu.set_child(Some(&menu_box));
-    // Parent once to the (stable) tree: re-parenting on every click trips
-    // `gtk_widget_set_parent` (the popover already has a parent), and the
-    // cursor position still comes from `set_pointing_to` per click.
-    menu.set_parent(&notebook_tree);
+
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+    scroll.set_child(Some(&notebook_tree));
+    scroll.set_vexpand(true);
+    // Parent once to the (stable) scrolled window, never to the tree:
+    // `set_parent` onto the TreeView trips `gtk_css_node_insert_after`
+    // criticals (seen at startup), and re-parenting per click trips
+    // `gtk_widget_set_parent` (the popover already has a parent). The cursor
+    // position still comes from `set_pointing_to` per click, translated
+    // into the scrolled window's coordinates below.
+    menu.set_parent(&scroll);
     {
         let tree = notebook_tree.clone();
         let menu = menu;
         let pending = pending.clone();
         let clipboard = clipboard.clone();
+        let scrolled = scroll.clone();
         let gesture = gtk::GestureClick::new();
         gesture.set_button(3);
         gesture.connect_pressed(move |gesture, _n, x, y| {
-            let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+            // The gesture reports tree coordinates but the popover is
+            // parented to the scrolled window, so translate (this also
+            // accounts for the current scroll offset).
+            let point = gtk::graphene::Point::new(x as f32, y as f32);
+            let Some(anchor) = tree.compute_point(&scrolled, &point) else {
+                return;
+            };
+            let rect = gtk::gdk::Rectangle::new(anchor.x() as i32, anchor.y() as i32, 1, 1);
             menu.set_pointing_to(Some(&rect));
             if let Some((path, _column, _x, _y)) = tree.path_at_pos(x as i32, y as i32)
                 && let Some(path) = path
@@ -225,11 +241,6 @@ pub(crate) fn build_tree_pane(
         });
         notebook_tree.add_controller(gesture);
     }
-
-    let scroll = gtk::ScrolledWindow::new();
-    scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    scroll.set_child(Some(&notebook_tree));
-    scroll.set_vexpand(true);
 
     NotebookPane {
         header,

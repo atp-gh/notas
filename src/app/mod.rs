@@ -70,7 +70,6 @@ pub struct App {
     allow_close: Rc<Cell<bool>>,
     suppress_selection: Rc<Cell<bool>>,
     suppress_tag_toggle: Rc<Cell<bool>>,
-    pending_tag: Rc<Cell<i64>>,
     /// In-app copy/cut buffer for right-click paste (shared with the menu
     /// gesture closures so Paste can grey out while empty).
     clipboard: Rc<RefCell<Option<Clipboard>>>,
@@ -95,7 +94,6 @@ pub struct Widgets {
     search_entry: gtk::SearchEntry,
     notebook_store: gtk::TreeStore,
     tag_flow: gtk::FlowBox,
-    tag_menu: gtk::Popover,
     // middle
     view_title: gtk::Label,
     notes_list: gtk::ListBox,
@@ -181,13 +179,13 @@ impl SimpleComponent for App {
             &app_sender,
             &pending_nb,
             &pending_tag,
+            &tag_ids,
             &clipboard,
         );
         let sidebar = sidebar_parts.root;
         let search_entry = sidebar_parts.search_entry;
         let notebook_store = sidebar_parts.notebook_store;
         let tag_flow = sidebar_parts.tag_flow;
-        let tag_menu = sidebar_parts.tag_menu;
 
         // ------------------------------------------------------------- middle
         let view_title = gtk::Label::new(Some(tr!("All notes")));
@@ -251,6 +249,12 @@ impl SimpleComponent for App {
         // paste targets the note under the cursor; paste needs a buffered
         // entry and greys out while the clipboard is empty.
         let note_menu = gtk::Popover::new();
+        // Parent once to the (stable) list: parenting to the clicked row
+        // destroys the popover with the row on the next list rebuild
+        // ("Finalizing GtkListBoxRow, but it still has children"), and
+        // re-parenting per click trips `gtk_widget_set_parent`. The cursor
+        // position still comes from `set_pointing_to` per click.
+        note_menu.set_parent(&notes_list);
         let note_normal_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
         note_normal_box.set_margin_all(8);
         let note_copy_btn = gtk::Button::with_label(tr!("Copy"));
@@ -274,12 +278,6 @@ impl SimpleComponent for App {
         note_menu_box.append(&note_normal_box);
         note_menu_box.append(&note_trash_box);
         note_menu.set_child(Some(&note_menu_box));
-        // Parent once to the (stable) list: parenting to the clicked row
-        // destroys the popover with the row on the next list rebuild
-        // ("Finalizing GtkListBoxRow, but it still has children"), and
-        // re-parenting per click trips `gtk_widget_set_parent`. The cursor
-        // position still comes from `set_pointing_to` per click.
-        note_menu.set_parent(&notes_list);
         {
             let s = app_sender.clone();
             let pending = pending_note.clone();
@@ -650,7 +648,6 @@ impl SimpleComponent for App {
             search_entry,
             notebook_store,
             tag_flow,
-            tag_menu,
             view_title,
             notes_list,
             notes_empty,
@@ -696,7 +693,6 @@ impl SimpleComponent for App {
             allow_close,
             suppress_selection,
             suppress_tag_toggle,
-            pending_tag,
             clipboard,
         };
 

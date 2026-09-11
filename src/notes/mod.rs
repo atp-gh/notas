@@ -56,10 +56,26 @@ pub(crate) fn clear_list(list: &gtk::ListBox) {
     }
 }
 
-/// Remove every child chip from a flow container.
+/// Remove every chip from a flow container.
+///
+/// Only `FlowBoxChild`s are removed: the tag right-click popover is parented
+/// to the tag flow itself (it outlives rebuilds), and `remove()` on it would
+/// fail with "Tried to remove non-child" while `first_child()` keeps
+/// returning it — an infinite loop on every refresh. Tearing down a chip
+/// that still parents the popover would likewise corrupt the CSS node tree
+/// (`gtk_css_node_insert_after` criticals), which is why the popover lives
+/// on the stable flow instead of the chip under the cursor.
 pub(crate) fn clear_flow(flow: &gtk::FlowBox) {
-    while let Some(child) = flow.first_child() {
-        flow.remove(&child);
+    let mut chips = Vec::new();
+    let mut child = flow.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if widget.downcast_ref::<gtk::FlowBoxChild>().is_some() {
+            chips.push(widget);
+        }
+    }
+    for chip in chips {
+        flow.remove(&chip);
     }
 }
 

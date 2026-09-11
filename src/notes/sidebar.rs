@@ -31,8 +31,6 @@ pub(crate) struct Sidebar {
     pub notebook_store: gtk::TreeStore,
     /// Tag chip container.
     pub tag_flow: gtk::FlowBox,
-    /// Notebook/tag context menu for the app coordinator to parent.
-    pub tag_menu: gtk::Popover,
 }
 
 /// Build the complete sidebar and wire semantic messages to the coordinator.
@@ -41,6 +39,7 @@ pub(crate) fn build(
     sender: &relm4::Sender<AppMsg>,
     pending_notebook: &Rc<Cell<i64>>,
     pending_tag: &Rc<Cell<i64>>,
+    tag_ids: &Rc<RefCell<Vec<i64>>>,
     clipboard: &Rc<RefCell<Option<Clipboard>>>,
 ) -> Sidebar {
     let search_entry = gtk::SearchEntry::new();
@@ -99,6 +98,12 @@ pub(crate) fn build(
     tag_flow.set_min_children_per_line(1);
 
     let tag_menu = gtk::Popover::new();
+    // Parent once to the (stable) flow: parenting to the clicked chip
+    // destroys the popover with the chip on the next flow rebuild, and
+    // re-parenting per click trips `gtk_widget_set_parent` (the popover
+    // already has a parent). The cursor position still comes from
+    // `set_pointing_to` per click.
+    tag_menu.set_parent(&tag_flow);
     let rename_tag_button = gtk::Button::with_label(tr!("Rename…"));
     rename_tag_button.set_halign(gtk::Align::Fill);
     let delete_tag_button = gtk::Button::with_label(tr!("Delete tag"));
@@ -135,6 +140,29 @@ pub(crate) fn build(
     tag_menu_box.append(&rename_tag_button);
     tag_menu_box.append(&delete_tag_button);
     tag_menu.set_child(Some(&tag_menu_box));
+    {
+        let flow = tag_flow.clone();
+        let menu = tag_menu;
+        let ids = tag_ids.clone();
+        let pending = pending_tag.clone();
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(3);
+        gesture.connect_pressed(move |gesture, _n, x, y| {
+            let Some(chip) = flow.child_at_pos(x as i32, y as i32) else {
+                return;
+            };
+            let idx = chip.index() as usize;
+            let Some(&id) = ids.borrow().get(idx) else {
+                return;
+            };
+            pending.set(id);
+            let rect = gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+            menu.set_pointing_to(Some(&rect));
+            menu.popup();
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+        tag_flow.add_controller(gesture);
+    }
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_width_request(230);
@@ -151,6 +179,5 @@ pub(crate) fn build(
         search_entry,
         notebook_store: notebook_pane.store,
         tag_flow,
-        tag_menu,
     }
 }

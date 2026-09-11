@@ -6,6 +6,9 @@ mod ui;
 #[macro_use]
 mod tr;
 
+#[cfg(test)]
+mod gtk_regressions;
+
 // Reuse the library target's single core/sync module instances. Keeping the
 // binary as a thin frontend avoids compiling two distinct copies of core
 // types (which can otherwise make integration between targets surprising).
