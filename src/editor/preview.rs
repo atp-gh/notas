@@ -115,6 +115,9 @@ impl PreviewTags {
                 ],
             )
             .expect("create code-block tag");
+        // CONTEXT: `create_tag` only returns `None` for unknown property
+        // names; all props here are static GTK `TextTag` props, so failure
+        // is a programming error, not a runtime condition.
         let quote_tag = |name: &str, margin: i32| {
             buffer
                 .create_tag(
@@ -125,7 +128,7 @@ impl PreviewTags {
                         ("left-margin", &margin),
                     ],
                 )
-                .unwrap_or_else(|| panic!("create {name} tag"))
+                .unwrap_or_else(|| unreachable!("create {name} tag"))
         };
         let quote_1 = quote_tag("quote-1", 16);
         let quote_2 = quote_tag("quote-2", 32);
@@ -198,7 +201,7 @@ impl PreviewTags {
                 Some(&name),
                 &[("foreground", &hex), ("weight", &weight), ("style", &style)],
             )
-            .unwrap_or_else(|| panic!("create {name} tag"));
+            .unwrap_or_else(|| unreachable!("create {name} tag"));
         self.hl_cache.borrow_mut().insert(key, tag.clone());
         tag
     }
